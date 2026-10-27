@@ -35,6 +35,8 @@ export type App = {
   ask_url: string;
   /** 1: a push to the branch deploys (webhook); 0: only manual deploys */
   auto_deploy: number;
+  /** scheduled commands run in the live release (systemd timers) */
+  crons: { schedule: string; command: string }[];
   created_at: number;
   updated_at: number;
 };
@@ -227,6 +229,7 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "processes", "TEXT NOT NULL DEFAULT '[]'"],
   ["apps", "ask_url", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "auto_deploy", "INTEGER NOT NULL DEFAULT 1"],
+  ["apps", "crons", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
 ];
@@ -241,7 +244,7 @@ function migrate(d: Database) {
 const now = () => Math.floor(Date.now() / 1000);
 
 function decodeApp(row: any): App {
-  return { ...row, domains: JSON.parse(row.domains), processes: JSON.parse(row.processes || "[]") };
+  return { ...row, domains: JSON.parse(row.domains), processes: JSON.parse(row.processes || "[]"), crons: JSON.parse(row.crons || "[]") };
 }
 function decodeSite(row: any): Site {
   return {
@@ -275,7 +278,7 @@ export const apps = {
   },
   insert(a: Partial<App> & { name: string }) {
     const t = now();
-    const row = { ...a, domains: JSON.stringify(a.domains ?? []), processes: JSON.stringify(a.processes ?? []), created_at: t, updated_at: t };
+    const row = { ...a, domains: JSON.stringify(a.domains ?? []), processes: JSON.stringify(a.processes ?? []), crons: JSON.stringify(a.crons ?? []), created_at: t, updated_at: t };
     const cols = Object.keys(row);
     state()
       .query(`INSERT INTO apps (${cols.join(",")}) VALUES (${cols.map((c) => "$" + c).join(",")})`)
@@ -285,6 +288,7 @@ export const apps = {
     const row: Record<string, unknown> = { ...patch, updated_at: now() };
     if (patch.domains) row.domains = JSON.stringify(patch.domains);
     if (patch.processes) row.processes = JSON.stringify(patch.processes);
+    if (patch.crons) row.crons = JSON.stringify(patch.crons);
     delete row.name;
     const sets = Object.keys(row).map((c) => `${c} = $${c}`);
     state().query(`UPDATE apps SET ${sets.join(", ")} WHERE name = $name`).run({ ...row, name } as any);

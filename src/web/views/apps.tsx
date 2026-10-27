@@ -25,6 +25,7 @@ export type AppRow = {
   processes: (ProcessSpec & { port_a: number; port_b: number })[];
   ask_url: string;
   auto_deploy: number;
+  crons: { schedule: string; command: string }[];
   status: { active: string; memory: number; since: string; procs?: { name: string; active: string; memory: number }[] };
   deploys?: { id: number; status: string; trigger: string; commit_sha: string; release: string; error: string; started_at: number; finished_at: number | null }[];
 };
@@ -139,6 +140,16 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         <input type="hidden" name="auto_deploy" value="0" />
         <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
       </label>
+      <label class="field wide">
+        <span>Cron</span>
+        <textarea name="crons" rows={3} class="mono" spellcheck={false} placeholder={"*:0/15 | bun run scripts/sync.ts\ndaily | node scripts/cleanup.js"}>
+          {(a.crons ?? []).map((c) => `${c.schedule} | ${c.command}`).join("\n")}
+        </textarea>
+        <small class="muted">
+          schedule | command, one per line. Runs in the live release with the app's env, user and sandbox; never twice at once; missed runs catch up after a
+          reboot. Schedules: hourly, daily, weekly, *:0/5 (every 5 min), Mon..Fri 09:00, *-*-01 03:00.
+        </small>
+      </label>
       {a.name ? (
         <Field
           label="Authenticator code"
@@ -164,6 +175,7 @@ export function AppDetail(p: {
   hookUrl: string;
   github: { connected: boolean; repo: string };
   revealed?: boolean;
+  crons?: { jobs: { schedule: string; command: string; next: string; last: string; result: string }[]; logs: string };
 }) {
   const a = p.app;
   const managed = a.kind === "managed";
@@ -177,6 +189,12 @@ export function AppDetail(p: {
               <form method="post" action={`/apps/${a.name}/deploy`}>
                 <Csrf token={p.csrf} />
                 <button class="btn primary">{t("Deploy")}</button>
+              </form>
+            ) : null}
+            {managed && a.active_slot ? (
+              <form method="post" action={`/apps/${a.name}/rollback`} title="Back to the previous release, kept on disk: no build, seconds">
+                <Csrf token={p.csrf} />
+                <button class="btn">↶ Rollback</button>
               </form>
             ) : null}
             {(["restart", "stop", "start"] as const).map((act) => (
@@ -300,6 +318,38 @@ export function AppDetail(p: {
 
       {managed ? (
         <>
+          {p.crons?.jobs.length ? (
+            <Card title="Cron">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Schedule</th>
+                    <th>Command</th>
+                    <th>Last</th>
+                    <th>Next</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.crons.jobs.map((j) => (
+                    <tr>
+                      <td>
+                        <code>{j.schedule}</code>
+                      </td>
+                      <td class="small">
+                        <code>{j.command}</code>
+                      </td>
+                      <td class="small">
+                        {j.last || "—"} {j.last ? <Badge state={j.result === "success" ? "ok" : j.result || "—"} /> : null}
+                      </td>
+                      <td class="small muted">{j.next || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {p.crons.logs ? <pre class="log small">{p.crons.logs}</pre> : null}
+            </Card>
+          ) : null}
+
           <Card title={t("Environment variables")}>
             <form method="post" action={`/apps/${a.name}/env`}>
               <Csrf token={p.csrf} />

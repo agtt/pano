@@ -7,6 +7,7 @@
 // never rewrites the configuration of something it did not install.
 
 import { paths } from "../shared/config.ts";
+import { ensureJob } from "./backup.ts";
 import { createDatabase } from "./mysql.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, run, writeAtomic } from "./sys.ts";
@@ -97,7 +98,6 @@ async function installMariadb(): Promise<Record_> {
     `# Written by pano. Localhost only, small footprint.
 [mysqld]
 bind-address = 127.0.0.1
-skip-name-resolve
 local-infile = 0
 performance_schema = OFF
 innodb_buffer_pool_size = 128M
@@ -259,6 +259,7 @@ export async function pgCreate(input: { name?: unknown; user?: unknown }, actor:
     ].join("\n"),
   );
   audit(actor, "pg.create", { name, user });
+  ensureJob("postgres", name, actor);
   return { name, user, password, url: `postgres://${user}:${password}@127.0.0.1:5432/${name}` };
 }
 
@@ -332,6 +333,7 @@ export async function databaseForApp(
     url = `${await valkeyUrl()}/${n}`;
   }
   await env.set({ ...current, [key]: url });
+  if (engine !== "valkey") ensureJob(engine === "postgres" ? "postgres" : "mysql", name, actor);
   audit(actor, "app.database", { app, engine, key });
   return { key, engine, database: engine === "valkey" ? url.split("/").pop()! : name };
 }

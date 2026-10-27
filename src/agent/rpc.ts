@@ -3,11 +3,13 @@
 
 import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
 import { checkOtp } from "./otp.ts";
+import * as alerts from "./alerts.ts";
 import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
 import * as cpanel from "./cpanel.ts";
 import * as github from "./github.ts";
+import * as guard from "./guard.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
@@ -30,12 +32,12 @@ const SENSITIVE = new Set([
   "apps.delete", "apps.webhookSecret", "apps.env.reveal", "apps.env.set", "containers.delete", "sites.delete", "sites.revertPhp",
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
-  "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove",
+  "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save",
 ]);
 export const ENV_MASK = "••••••••";
 
 /** App fields that decide what runs as the app (and so can read its secrets). */
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes"] as const;
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -80,11 +82,16 @@ export const methods: Record<string, Handler> = {
   },
   "apps.create": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
+    await appsOps.checkSchedules(input.crons);
     appsOps.assertDomainsFree(appsOps.inputHosts(input), {}, allDomains());
-    return hideSecret(await appsOps.createApp(input, actor));
+    const created = await appsOps.createApp(input, actor);
+    // env, DATA_DIR (SQLite, uploads) and the live release, daily
+    backup.ensureJob("app", created.name, actor);
+    return hideSecret(created);
   },
   "apps.update": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
+    await appsOps.checkSchedules(input.crons);
     appsOps.assertDomainsFree(appsOps.inputHosts(input), { app: input.name }, allDomains());
     await appsOps.updateApp(input.name, input, actor);
   },
@@ -93,6 +100,12 @@ export const methods: Record<string, Handler> = {
     return appsOps.deleteApp(p.name, actor, !!p.removeFiles);
   },
   "apps.deploy": (p, actor) => ({ id: appsOps.startDeploy(p.name, "manual", actor) }),
+  "apps.rollback": (p, actor) => appsOps.rollback(v.appName(p.name), actor),
+  "apps.crons": async (p) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    return { jobs: await appsOps.cronStatus(app), logs: await appsOps.cronLogs(app) };
+  },
   "apps.action": (p, actor) => {
     if (!["start", "stop", "restart"].includes(p.action)) throw new Error("bad action");
     return appsOps.appAction(p.name, p.action, actor);
@@ -194,13 +207,26 @@ export const methods: Record<string, Handler> = {
   "pg.create": (p, actor) => services.pgCreate({ name: p.name, user: p.user }, actor),
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
 
+  // ---- alerts (Telegram)
+  "alerts.get": () => alerts.alertSettings(),
+  "alerts.save": (p, actor) => {
+    audit(actor, "alerts.save", { chatId: p.chatId, token: p.token ? "changed" : "kept" });
+    return alerts.saveAlerts({ token: p.token, chatId: p.chatId });
+  },
+  "alerts.test": async () => {
+    if (!(await alerts.notify("✅ test from pano"))) throw new Error("not sent: check the bot token and chat id (send /start to the bot first)");
+    return "sent";
+  },
+
   // ---- private access (WireGuard, off until enabled)
   "vpn.status": () => vpn.status(),
   "vpn.enable": (p, actor) => vpn.enable({ port: p.port, endpoint: p.endpoint }, actor),
   "vpn.disable": (_p, actor) => vpn.disable(actor),
   "vpn.peer.add": (p, actor) => vpn.addPeer({ name: p.name, publicKey: p.publicKey }, actor),
   "vpn.peer.remove": (p, actor) => vpn.removePeer(v.int(p.id, 1, 1e9, "id"), actor),
-  "vpn.locks": (p, actor) => vpn.setLocks({ panel: !!p.panel, ssh: !!p.ssh, services: !!p.services }, Number(p.confirmSeconds ?? 300), actor),
+  "vpn.locks": (p, actor) => vpn.setLocks({ panel: !!p.panel, ssh: !!p.ssh, services: !!p.services, databases: !!p.databases }, Number(p.confirmSeconds ?? 300), actor),
+  "guard.get": async () => ({ ...guard.guardSettings(), banned: await guard.banned() }),
+  "guard.set": (p, actor) => guard.setGuard({ ssh: !!p.ssh, http: !!p.http }, actor),
   // `remote` is the address the web process saw the request come from.
   "vpn.confirm": (p, actor) => vpn.confirm(String(p.remote ?? ""), actor),
 
@@ -314,7 +340,11 @@ export const methods: Record<string, Handler> = {
 
   // ---- databases
   "db.list": async () => ({ databases: await mysql.listDatabases(), users: await mysql.listUsers() }),
-  "db.create": (p, actor) => mysql.createDatabase({ name: p.name, user: p.user, password: p.password }, actor),
+  "db.create": async (p, actor) => {
+    const r = await mysql.createDatabase({ name: p.name, user: p.user, password: p.password }, actor);
+    backup.ensureJob("mysql", r.name, actor);
+    return r;
+  },
   "db.drop": (p, actor) => mysql.dropDatabase(p.name, p.confirm, actor),
   "db.password": (p, actor) => mysql.setPassword(p.user, p.host, p.password, actor),
   "db.grant": (p, actor) => mysql.grant(p.db, p.user, actor),

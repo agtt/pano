@@ -1,7 +1,7 @@
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, Field } from "./layout.tsx";
 
-type Locks = { panel: boolean; ssh: boolean; services: boolean };
+type Locks = { panel: boolean; ssh: boolean; services: boolean; databases: boolean };
 export type VpnStatus = {
   installed: boolean;
   enabled: boolean;
@@ -144,6 +144,10 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
           <label class="check">
             <input type="checkbox" name="services" value="1" checked={s.locks.services} /> Databases and admin ports (3306, 5432, 6379, 7080, 8090, 8888, 11211)
             only over WireGuard
+          </label>
+          <label class="check">
+            <input type="checkbox" name="databases" value="1" checked={s.locks.databases} /> Databases on <code>{s.address}</code> for your desktop client
+            (TablePlus, DBeaver): MariaDB 3306, PostgreSQL 5432, Valkey 6379, still with their passwords
           </label>
           <div class="cols">
             <Field label="Confirm within (seconds)" name="confirmSeconds" value={300} />

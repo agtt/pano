@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
+import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
 import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
 import { decryptStream, encryptStream } from "./crypto-stream.ts";
@@ -162,7 +163,9 @@ async function execute(job: BackupJob, runId: number) {
     backups.finishRun(runId, job.id, { status: "success", object_key: objectKey, bytes });
     await prune(job, s3);
   } catch (e) {
-    backups.finishRun(runId, job.id, { status: "failed", error: (e instanceof Error ? e.message : String(e)).slice(0, 500) });
+    const msg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    backups.finishRun(runId, job.id, { status: "failed", error: msg });
+    void notify(`🔴 backup ${job.name} failed: ${msg}`);
   }
 }
 
@@ -223,9 +226,21 @@ export function due(job: BackupJob, now: Date): boolean {
   return now >= slot && last < slot.getTime();
 }
 
+/**
+ * Daily encrypted backup for something pano just created (a database, an app).
+ * Added even before R2 is set up; scheduled runs start once it is.
+ */
+export function ensureJob(kind: "mysql" | "postgres" | "app", target: string, actor: string) {
+  if (backups.jobs().some((j) => j.kind === kind && j.target === target)) return;
+  const job = validateJob({ kind, target, schedule: "daily 03:30", keep: 14 });
+  backups.addJob(job);
+  audit(actor, "backup.job.add", { ...job, automatic: true });
+}
+
 export function startScheduler() {
   setInterval(() => {
     const now = new Date();
+    if (!settings.get("r2.bucket")) return;
     for (const job of backups.jobs()) {
       if (!due(job, now) || backups.runs(job.id, 1)[0]?.status === "running") continue;
       try {

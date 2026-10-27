@@ -7,6 +7,7 @@
 // minutes or it is undone automatically, so a mistake cannot lock you out.
 
 import { paths } from "../shared/config.ts";
+import { notify } from "./alerts.ts";
 import { audit, settings, state } from "./state.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 
@@ -20,11 +21,12 @@ const KEY = `${paths.secrets}/wg.key`;
 /** Admin services that should never face the internet: MariaDB, Postgres, Redis, OLS admin, CyberPanel, its SSH web shell, memcached. */
 export const SERVICE_PORTS = [3306, 5432, 6379, 7080, 8090, 8888, 11211];
 
-export type Locks = { panel: boolean; ssh: boolean; services: boolean };
+/** databases: MariaDB/PostgreSQL/Valkey also answer on the tunnel address (for TablePlus, DBeaver…). */
+export type Locks = { panel: boolean; ssh: boolean; services: boolean; databases: boolean };
 type Pending = { previous: Locks; deadline: number };
 export type Peer = { id: number; name: string; public_key: string; psk: string; ip: string; created_at: number };
 
-const NO_LOCKS: Locks = { panel: false, ssh: false, services: false };
+const NO_LOCKS: Locks = { panel: false, ssh: false, services: false, databases: false };
 const PUBKEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/;
 
 export const locks = (): Locks => ({ ...NO_LOCKS, ...JSON.parse(settings.get("vpn.locks") ?? "{}") });
@@ -53,6 +55,8 @@ export function renderRules(l: Locks, sshPort: number): string {
     "\t\ttype filter hook input priority -5; policy accept;",
     '\t\tiifname "lo" accept',
     `\t\tiifname "${IFACE}" accept`,
+    // The tunnel addresses exist only inside the tunnel: never accept them from another interface (a spoofing neighbour).
+    `\t\tip daddr ${NET}.0/24 drop`,
     // Sessions already open (the SSH you are using right now) keep working.
     "\t\tct state established,related accept",
     ...drops,
@@ -141,6 +145,33 @@ async function sync() {
   await writeAtomic(CONF, renderConf(privateKey, port, peers()), 0o600);
   await writeAtomic(RULES, renderRules(locks(), await sshPort()), 0o600);
   if (await active()) await run(["systemctl", "reload", UNIT]);
+  await syncDbForward(settings.get("vpn.enabled") === "1" && locks().databases);
+}
+
+export const DB_PORTS = [3306, 5432, 6379];
+
+/**
+ * Databases stay on 127.0.0.1; a socket-activated forwarder answers on the tunnel
+ * address and connects locally, so no database configuration changes and only
+ * WireGuard devices can reach it. Logins still need the database's own password.
+ */
+async function syncDbForward(on: boolean) {
+  for (const port of DB_PORTS) {
+    const base = `pano-vpn-db-${port}`;
+    const listening = (await run(["ss", "-Htln", `sport = :${port}`], { check: false })).stdout.includes("127.0.0.1:");
+    if (!on || !listening) {
+      await run(["systemctl", "disable", "--now", `${base}.socket`], { check: false });
+      continue;
+    }
+    await writeAtomic(`${paths.systemd}/${base}.socket`, `[Unit]\nDescription=pano: 127.0.0.1:${port} on WireGuard\n\n[Socket]\nListenStream=${SERVER_IP}:${port}\nFreeBind=true\n\n[Install]\nWantedBy=sockets.target\n`, 0o644);
+    await writeAtomic(
+      `${paths.systemd}/${base}.service`,
+      `[Unit]\nDescription=pano: forward WireGuard ${port} to 127.0.0.1\n\n[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:${port}\nDynamicUser=yes\nPrivateTmp=yes\nProtectSystem=strict\nProtectHome=yes\nNoNewPrivileges=yes\nCapabilityBoundingSet=\n`,
+      0o644,
+    );
+    await run(["systemctl", "daemon-reload"]);
+    await run(["systemctl", "enable", "--now", `${base}.socket`], { check: false });
+  }
 }
 
 /** pano.env decides where the UI listens; the web process restarts to pick it up. */
@@ -215,6 +246,7 @@ export async function disable(actor: string) {
   settings.set("vpn.locks", JSON.stringify(NO_LOCKS));
   settings.set("vpn.pending", "");
   await setPanelOverVpn(false);
+  await syncDbForward(false);
   await run(["systemctl", "disable", "--now", UNIT], { check: false });
   if (await firewalld()) {
     await run(["firewall-cmd", "--permanent", `--remove-port=${settings.get("vpn.port") ?? 51820}/udp`], { check: false });
@@ -305,6 +337,7 @@ async function revertUnconfirmed() {
   await sync();
   await setPanelOverVpn(p.previous.panel);
   audit("system", "vpn.locks.reverted", { reason: "not confirmed over WireGuard in time" });
+  void notify("⚠️ private access: new locks were not confirmed over WireGuard and have been undone");
 }
 
 /** Confirmation counts only when it arrives through the tunnel: that proves the tunnel works. */

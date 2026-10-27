@@ -15,6 +15,7 @@ import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } f
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
 import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
+import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
 import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
@@ -186,12 +187,12 @@ export function createWebApp() {
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
       ]);
-      const [edge, gh] = await Promise.all([call("edge.status"), call("github.status")]);
+      const [edge, gh, crons] = await Promise.all([call("edge.status"), call("github.status"), call("apps.crons", { name }).catch(() => undefined)]);
       const hooks = edge.settings.hooksDomain;
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
       const github = { connected: gh.connected, repo: m?.[1] ?? "" };
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} />);
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} crons={crons} />);
     } catch (e) {
       return c.redirect(err("/apps", e));
     }
@@ -224,6 +225,11 @@ export function createWebApp() {
     needOtp(c, f.otp);
     await call("apps.env.set", { name, vars }, actor(c));
     return `/apps/${name}`;
+  }));
+  app.post("/apps/:name/rollback", act("/apps", async (c) => {
+    const name = c.req.param("name")!;
+    const r = await call("apps.rollback", { name }, actor(c));
+    return `/apps/${name}?ok=${encodeURIComponent(`Rolled back to ${r.release}`)}`;
   }));
   app.post("/apps/:name/database", async (c) => {
     const name = c.req.param("name");
@@ -537,7 +543,7 @@ export function createWebApp() {
   }));
   app.post("/vpn/locks", act("/vpn", async (c, f) => {
     needOtp(c, f.otp);
-    await call("vpn.locks", { panel: f.panel === "1", ssh: f.ssh === "1", services: f.services === "1", confirmSeconds: Number(f.confirmSeconds) }, actor(c));
+    await call("vpn.locks", { panel: f.panel === "1", ssh: f.ssh === "1", services: f.services === "1", databases: f.databases === "1", confirmSeconds: Number(f.confirmSeconds) }, actor(c));
     return "Locks applied";
   }));
   app.post("/vpn/confirm", act("/vpn", async (c) => {
@@ -576,7 +582,28 @@ export function createWebApp() {
   });
 
   // ---- security, import, activity
-  app.get("/security", async (c) => page(c, t("Security"), <SecurityPage findings={await call("system.audit")} />));
+  app.get("/security", async (c) => {
+    const [findings, guard, alerts, edge] = await Promise.all([call("system.audit"), call<GuardView>("guard.get"), call<AlertsView>("alerts.get"), call("edge.status")]);
+    return page(
+      c,
+      t("Security"),
+      <div class="stack">
+        <ProtectCards csrf={c.get("s").csrf} guard={guard} alerts={alerts} behindCloudflare={edge.settings.behindCloudflare} />
+        <SecurityPage findings={findings} />
+      </div>,
+    );
+  });
+  app.post("/security/guard", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("guard.set", { ssh: f.ssh === "1", http: f.http === "1" }, actor(c));
+    return "Guard saved";
+  }));
+  app.post("/security/alerts", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("alerts.save", { token: f.token, chatId: f.chatId }, actor(c));
+    return "Telegram saved";
+  }));
+  app.post("/security/alerts/test", act("/security", async () => call<string>("alerts.test")));
   const importPage = async (c: Context<Env>, cpReport?: CpReportView) => {
     const cpFile = c.req.query("cpanel");
     const [plan, cpPlan, archives, apps, sites] = await Promise.all([

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { AppDetail, AppForm, GitPage } from "../src/web/views/apps.tsx";
 import { ServicesPage } from "../src/web/views/services.tsx";
 import { VpnPage } from "../src/web/views/vpn.tsx";
+import { ProtectCards } from "../src/web/views/protect.tsx";
 import { ImportPage, PhpSiteNew, RuntimesPage, SiteForm } from "../src/web/views/pages.tsx";
 
 const versions = [
@@ -59,7 +60,7 @@ test("vpn and services views render", () => {
   const base = {
     installed: true, enabled: true, running: true, address: "10.77.0.1", port: 51820, endpoint: "203.0.113.1", publicKey: "k",
     peers: [{ id: 1, name: "laptop", ip: "10.77.0.2", public_key: "p", created_at: 0, endpoint: "1.2.3.4:5", handshake: 1, rx: 10, tx: 20 }],
-    locks: { panel: true, ssh: true, services: false }, pending: { previous: { panel: false, ssh: false, services: false }, deadline: Date.now() + 60_000 }, sshPort: 22,
+    locks: { panel: true, ssh: true, services: false, databases: true }, pending: { previous: { panel: false, ssh: false, services: false, databases: false }, deadline: Date.now() + 60_000 }, sshPort: 22,
   };
   expect(html(<VpnPage csrf="c" s={{ ...base, enabled: false }} viaVpn={false} />)).toContain("Enable private access");
   const on = html(<VpnPage csrf="c" s={base} viaVpn={true} created={{ name: "phone", ip: "10.77.0.3", config: "[Interface]", qr: "data:image/svg+xml;base64,AA", generated: true }} />);
@@ -79,4 +80,11 @@ test("vpn and services views render", () => {
   expect(svc).toContain("/services/valkey/install");
   expect(svc).toContain("postgres://a");
   expect(svc).toContain("$DATA_DIR");
+});
+
+test("security cards render", () => {
+  const html = String(<ProtectCards csrf="c" guard={{ ssh: true, http: false, banned: ["198.51.100.7"] }} alerts={{ chatId: "1", tokenSet: true }} behindCloudflare={true} />);
+  expect(html).toContain("198.51.100.7");
+  expect(html).toContain("saved; empty = keep");
+  expect(html).toContain("inactive while behind Cloudflare");
 });

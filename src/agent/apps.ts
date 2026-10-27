@@ -11,9 +11,10 @@ import { appendFile, readdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
+import { notify } from "./alerts.ts";
 import { reportStatus } from "./github.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
-import { installed, runtimeBin, type Runtime } from "./runtimes.ts";
+import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
 import { ensureDir, exists, randomToken, readText, remove, run, writeAtomic, type RunOptions } from "./sys.ts";
 
@@ -46,6 +47,7 @@ export type AppInput = {
   processes: ProcessSpec[];
   ask_url: string;
   auto_deploy: number;
+  crons: Cron[];
 };
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
@@ -69,6 +71,7 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     processes,
     ask_url: askUrl,
     // The form sends a hidden "0" plus the checkbox's "1"; API callers may leave it out (on).
+    crons: Array.isArray(x.crons) ? (x.crons as Cron[]) : parseCrons(String(x.crons ?? "")),
     auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
   };
 }
@@ -130,7 +133,10 @@ export async function updateApp(name: string, input: AppInput, actor: string) {
   const processes = assignPorts(app.processes, input.processes);
   apps.update(name, { ...input, processes, name: undefined } as Partial<App>);
   const next = apps.get(name)!;
-  if (app.kind === "managed") await writeUnits(next);
+  if (app.kind === "managed") {
+    await writeUnits(next);
+    await writeCrons(next);
+  }
   await applyEdge();
   audit(actor, "app.update", { name });
 }
@@ -138,6 +144,7 @@ export async function updateApp(name: string, input: AppInput, actor: string) {
 export async function deleteApp(name: string, actor: string, removeFiles: boolean) {
   const app = mustGet(name);
   if (app.kind === "managed") {
+    await writeCrons({ ...app, crons: [] });
     for (const file of await unitFiles(name)) {
       const base = file.replace(/@\.service$/, "");
       for (const slot of ["a", "b"]) await run(["systemctl", "disable", "--now", `${base}@${slot}.service`], { check: false });
@@ -180,6 +187,34 @@ async function toolPath(app: App): Promise<string> {
   return [...dirs, "/usr/local/bin", "/usr/bin", "/bin"].join(":");
 }
 
+/** Hardening shared by app processes and their cron jobs. */
+const sandboxLines = (home: string) => `UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${home}
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Cloud metadata (user-data can hold root passwords and keys) and other users' processes are out of reach.
+IPAddressDeny=169.254.169.254/32
+ProtectProc=invisible
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+`;
+
 export function renderUnit(app: App, p: Process, path: string): string {
   const home = appHome(app.name);
   const sub = [app.root_dir, p.dir].filter(Boolean).join("/");
@@ -207,32 +242,7 @@ KillMode=mixed
 MemoryHigh=${high}M
 MemoryMax=${p.memory_mb}M
 TasksMax=1024
-UMask=0027
-NoNewPrivileges=true
-CapabilityBoundingSet=
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${home}
-PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-RestrictNamespaces=true
-LockPersonality=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-# Cloud metadata (user-data can hold root passwords and keys) and other users' processes are out of reach.
-IPAddressDeny=169.254.169.254/32
-ProtectProc=invisible
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-
+${sandboxLines(home)}
 [Install]
 WantedBy=multi-user.target
 `;
@@ -262,7 +272,7 @@ async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: Map<stri
     const env = `PANO_PROCESS=${p.name || "main"}\n${port ? `PORT=${port}\n` : ""}`;
     await writeAtomic(runFile(app.name, p, deploy.slot, "env"), env, 0o644);
     const rootBin = [`${home}/slot-${deploy.slot}`, app.root_dir, "node_modules/.bin"].filter(Boolean).join("/");
-    const start = deploy.starts.get(p.name) || "npm run start";
+    const start = deploy.starts.get(p.name) || "bun run start";
     await writeAtomic(
       runFile(app.name, p, deploy.slot, "sh"),
       `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:${rootBin}:$PATH"\nexec ${start}\n`,
@@ -278,6 +288,130 @@ const activeUnits = (app: App): string[] =>
     : app.active_slot
       ? procsOf(app).map((p) => unitName(app.name, p, app.active_slot as "a" | "b"))
       : [];
+
+// ---- instant rollback ------------------------------------------------------------
+
+/**
+ * Switches back to the release the other slot still holds: no clone, no build.
+ * Same order as a deploy: start, health check, switch traffic, then stop.
+ */
+export async function rollback(name: string, actor: string) {
+  const app = mustGet(name);
+  if (app.kind !== "managed" || !app.active_slot) throw new Error("nothing deployed yet");
+  if (deploys.running(name)) throw new Error("a deploy is running");
+  const home = appHome(name);
+  const from = app.active_slot;
+  const to: "a" | "b" = from === "a" ? "b" : "a";
+  const target = (await run(["readlink", "-f", fsPath(`${home}/slot-${to}`)], { check: false })).stdout.trim();
+  const release = target.split("/").pop() ?? "";
+  if (!release || release === app.current_release || !(await exists(`${home}/releases/${release}`))) throw new Error("no previous release on disk");
+  if (!(await exists(runFile(name, procsOf(app)[0]!, to, "sh")))) throw new Error("the previous release has no start script");
+  const procs = procsOf(app);
+  const log = (l: string) => console.log(`[rollback ${name}] ${l}`);
+  for (const p of procs.filter(isWeb)) await run(["systemctl", "restart", unitName(name, p, to)]);
+  for (const p of procs.filter(isWeb)) await healthCheck(app, p, to, log);
+  apps.update(name, { active_slot: to, current_release: release });
+  await run(["ln", "-sfn", fsPath(`${home}/slot-${to}`), fsPath(`${home}/current`)]);
+  for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(name, p, to)], { check: false });
+  await applyEdge();
+  for (const p of procs.filter((x) => !isWeb(x))) {
+    await run(["systemctl", "disable", "--now", unitName(name, p, from)], { check: false });
+    await run(["systemctl", "enable", "--now", unitName(name, p, to)]);
+  }
+  const old = procs.filter(isWeb).map((p) => unitName(name, p, from));
+  setTimeout(() => run(["systemctl", "disable", "--now", ...old], { check: false }), 15_000);
+  audit(actor, "app.rollback", { name, release });
+  return { release };
+}
+
+// ---- cron jobs -------------------------------------------------------------------
+
+export type Cron = { schedule: string; command: string };
+
+/** `schedule | command` per line. Schedules are systemd calendar expressions: hourly, daily, *:0/5, Mon *-*-* 03:00 … */
+export function parseCrons(text: string): Cron[] {
+  const out: Cron[] = [];
+  for (const line of text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))) {
+    const i = line.indexOf("|");
+    if (i < 0) throw new Error(`cron: "schedule | command" expected: ${line.slice(0, 40)}`);
+    const schedule = line.slice(0, i).trim();
+    const command = v.command(line.slice(i + 1).trim(), "cron command");
+    if (!/^[A-Za-z0-9*:\/,.~ -]{1,64}$/.test(schedule)) throw new Error(`cron schedule: ${schedule}`);
+    if (!command) throw new Error("cron command is empty");
+    out.push({ schedule, command });
+  }
+  if (out.length > 20) throw new Error("at most 20 cron jobs per app");
+  return out;
+}
+
+export const formatCrons = (c: Cron[]) => c.map((x) => `${x.schedule} | ${x.command}`).join("\n");
+
+const cronBase = (app: string, i: number) => `pano-cron-${app}-${i}`;
+
+/** One timer + oneshot service per job, in the live release, with the app's user, env and sandbox. Never two runs at once. */
+export async function writeCrons(app: App) {
+  const home = appHome(app.name);
+  const all = await readdir(fsPath(paths.systemd)).catch(() => [] as string[]);
+  const keep = new Set(app.crons.flatMap((_, i) => [`${cronBase(app.name, i)}.timer`, `${cronBase(app.name, i)}.service`]));
+  for (const f of all.filter((f) => f.startsWith(`pano-cron-${app.name}-`) && !keep.has(f))) {
+    if (f.endsWith(".timer")) await run(["systemctl", "disable", "--now", f], { check: false });
+    await remove(`${paths.systemd}/${f}`);
+  }
+  const path = await toolPath(app);
+  const dir = `${home}/current${app.root_dir ? `/${app.root_dir}` : ""}`;
+  for (const [i, c] of app.crons.entries()) {
+    const base = cronBase(app.name, i);
+    await writeAtomic(`${home}/run/cron-${i}.sh`, `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:$PATH"\nexec ${c.command}\n`, 0o755);
+    await writeAtomic(
+      `${paths.systemd}/${base}.service`,
+      `[Unit]
+Description=pano cron ${app.name} #${i}: ${c.schedule}
+
+[Service]
+Type=oneshot
+User=${appUser(app.name)}
+Group=${appUser(app.name)}
+WorkingDirectory=${dir}
+EnvironmentFile=-${home}/shared/.env
+Environment=NODE_ENV=production HOME=${home} DATA_DIR=${home}/data PANO_CRON=${i}
+Environment=PATH=${path}
+ExecStart=${home}/run/cron-${i}.sh
+TimeoutStartSec=1h
+MemoryMax=${app.memory_mb}M
+TasksMax=256
+${sandboxLines(home)}`,
+      0o644,
+    );
+    await writeAtomic(`${paths.systemd}/${base}.timer`, `[Unit]\nDescription=pano cron ${app.name} #${i}\n\n[Timer]\nOnCalendar=${c.schedule}\nPersistent=true\nRandomizedDelaySec=5\n\n[Install]\nWantedBy=timers.target\n`, 0o644);
+  }
+  await run(["systemctl", "daemon-reload"]);
+  if (!app.active_slot) return; // timers start with the first deploy
+  for (const i of app.crons.keys()) await run(["systemctl", "enable", "--now", `${cronBase(app.name, i)}.timer`], { check: false });
+}
+
+/** Rejects a schedule systemd would not understand, before anything is saved. */
+export async function checkSchedules(crons: Cron[]) {
+  for (const c of crons) {
+    const r = await run(["systemd-analyze", "calendar", c.schedule], { check: false });
+    if (r.code !== 0) throw new Error(`cron schedule not understood: ${c.schedule} (examples: hourly, daily, *:0/15, Mon..Fri 09:00)`);
+  }
+}
+
+export async function cronStatus(app: App) {
+  return Promise.all(
+    app.crons.map(async (c, i) => {
+      const r = await run(["systemctl", "show", `${cronBase(app.name, i)}.timer`, `${cronBase(app.name, i)}.service`, "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec", "-p", "Result"], { check: false });
+      const get = (k: string) => r.stdout.match(new RegExp(`^${k}=(.*)$`, "m"))?.[1] ?? "";
+      return { ...c, next: get("NextElapseUSecRealtime"), last: get("LastTriggerUSec"), result: get("Result") };
+    }),
+  );
+}
+
+export async function cronLogs(app: App, lines = 100): Promise<string> {
+  if (!app.crons.length) return "";
+  const units = app.crons.flatMap((_, i) => ["-u", `${cronBase(app.name, i)}.service`]);
+  return (await run(["journalctl", ...units, "-n", String(lines), "--no-pager", "-o", "short-iso"], { check: false })).stdout;
+}
 
 export async function appAction(name: string, action: "start" | "stop" | "restart", actor: string) {
   const app = mustGet(name);
@@ -365,12 +499,19 @@ async function deploy(app: App, id: number) {
   const workdir = app.root_dir ? `${dir}/${app.root_dir}` : dir;
   const slot: "a" | "b" = app.active_slot === "a" ? "b" : "a";
   const procs = procsOf(app);
-  const binPath = await toolPath(app);
+  let binPath = await toolPath(app);
   let commit = "";
 
   try {
     if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
       throw new Error(`${app.runtime} ${app.runtime_version} is not installed (Runtimes page)`);
+    }
+    if (app.runtime !== "bun" && !(await installed()).some((r) => r.runtime === "bun")) {
+      await step("install bun (package manager)");
+      const { bun } = await available();
+      if (!bun[0]) throw new Error("cannot reach github.com to fetch bun");
+      await installRuntime("bun", bun[0], log);
+      binPath = await toolPath(app);
     }
     await step(`clone ${app.repo} (${app.branch})`);
     const sshKey = `${home}/.ssh/id_ed25519`;
@@ -426,6 +567,8 @@ async function deploy(app: App, id: number) {
     await step("switch traffic");
     const previous = app.active_slot as "a" | "b" | "";
     apps.update(app.name, { active_slot: slot, current_release: release });
+    await run(["ln", "-sfn", fsPath(`${home}/slot-${slot}`), fsPath(`${home}/current`)]);
+    await writeCrons(apps.get(app.name)!);
     for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(app.name, p, slot)], { check: false });
     const edge = await applyEdge();
     await log(edge.reloaded ? "edge reloaded" : "edge not running yet (traffic switches at cutover)");
@@ -455,6 +598,7 @@ async function deploy(app: App, id: number) {
       await remove(dir).catch(() => {});
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
+    void notify(`🔴 deploy of ${app.name} failed: ${msg.slice(0, 300)}`);
     if (commit) void reportStatus(app, commit, "failure", msg);
   }
 }
@@ -512,12 +656,11 @@ const readPkg = async (dir: string) => JSON.parse((await readText(`${dir}/packag
 export async function detectPlan(app: Pick<App, "install_cmd" | "build_cmd" | "start_cmd" | "runtime">, workdir: string): Promise<Plan> {
   const has = (f: string) => exists(`${workdir}/${f}`);
   const scripts = (await readPkg(workdir)).scripts ?? {};
-  let pm = app.runtime === "bun" ? "bun" : "npm";
-  let install = app.runtime === "bun" ? "bun install --frozen-lockfile" : "npm ci";
-  if ((await has("bun.lock")) || (await has("bun.lockb"))) (pm = "bun"), (install = "bun install --frozen-lockfile");
-  else if (await has("pnpm-lock.yaml")) (pm = "npx --yes pnpm@10"), (install = "npx --yes pnpm@10 install --frozen-lockfile");
-  else if (await has("yarn.lock")) (pm = "npx --yes yarn@1"), (install = "npx --yes yarn@1 install --frozen-lockfile");
-  else if (!(await has("package-lock.json")) && app.runtime !== "bun") install = "npm install";
+  // bun is the package manager for every app, also Node.js ones (they still run on node).
+  // It reads package-lock.json, yarn.lock and pnpm-lock.yaml and keeps their exact versions,
+  // and hard-links packages from its store, so each release costs almost no disk.
+  const pm = "bun";
+  const install = (await has("bun.lock")) || (await has("bun.lockb")) ? "bun install --frozen-lockfile" : "bun install";
   return {
     install: app.install_cmd || ((await has("package.json")) ? install : ""),
     build: app.build_cmd || (scripts.build ? `${pm} run build` : ""),
@@ -532,7 +675,8 @@ export async function detectStart(runtime: Runtime, dir: string, pm: string): Pr
   const scripts = pkg.scripts ?? {};
   // `next` resolves through the start script's PATH (process dir, then repo root node_modules/.bin).
   if (pkg.dependencies?.next || /\bnext (start|build)\b/.test(Object.values(scripts).join(" "))) return "next start -H 127.0.0.1 -p $PORT";
-  if (scripts.start) return `${pm} run start`;
+  // A plain start script runs directly (no package manager process kept in memory next to the app).
+  if (scripts.start) return /\b(npm|npx|yarn|pnpm|bun)\b|&&|\|\|/.test(scripts.start) ? `${pm} run start` : scripts.start;
   return runtime === "bun" ? "bun run index.ts" : "node server.js";
 }
 
