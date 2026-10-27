@@ -17,6 +17,7 @@ import { HomePage, LoginPage } from "./views/home.tsx";
 import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
 import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
 import { ShieldPage, type ShieldView } from "./views/shield.tsx";
+import { JobsPage, type JobsView, type QueuesView } from "./views/jobs.tsx";
 import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
@@ -604,6 +605,41 @@ export function createWebApp() {
     await call("alerts.save", { token: f.token, chatId: f.chatId }, actor(c));
     return "Telegram saved";
   }));
+  // ---- scheduled jobs and queues
+  app.get("/jobs", async (c) => {
+    const ref = c.req.query("log");
+    const [jobs, queues] = await Promise.all([call<JobsView>("jobs.list"), call<QueuesView>("queues.status")]);
+    let log: { ref: string; text: string } | undefined;
+    if (ref) {
+      const [owner, name, index] = ref.split(":");
+      log = { ref, text: await call<string>("jobs.logs", { owner, name, index: Number(index) }).catch((e) => String(e instanceof Error ? e.message : e)) };
+    }
+    return page(c, t("Jobs"), <JobsPage csrf={c.get("s").csrf} jobs={jobs} queues={queues} log={log} />);
+  });
+  app.post("/jobs/run", act("/jobs", async (c, f) => {
+    await call("jobs.run", { owner: f.owner, name: f.name, index: Number(f.index) }, actor(c));
+    return "Started";
+  }));
+  app.post("/jobs/queues", act("/jobs", async (c, f) => {
+    await call("queues.set", { on: f.on === "1" }, actor(c));
+    return f.on === "1" ? "Queue monitor on" : "Queue monitor off";
+  }));
+  app.post("/jobs/workers/restart", act("/jobs", async (c, f) => {
+    await call("queues.restartWorker", { app: f.app, process: f.process }, actor(c));
+    return `${f.app} / ${f.process} restarted`;
+  }));
+  app.post("/sites/:name/crons", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      await call("sites.crons", { name, crons: f.crons }, actor(c));
+      return back(c, `/sites/${name}`, "Cron saved");
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}`, e));
+    }
+  });
+
   // ---- shield
   app.get("/shield", async (c) => page(c, t("Shield"), <ShieldPage csrf={c.get("s").csrf} s={await call<ShieldView>("shield.status")} />));
   app.post("/shield/settings", act("/shield", async (c, f) => {

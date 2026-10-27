@@ -53,13 +53,21 @@ async function unitState(unit: string) {
   return { active: get("ActiveState") || "unknown", memory: Number.isFinite(mem) && mem < 2 ** 60 ? mem : 0, enabled: get("UnitFileState") === "enabled" };
 }
 
-/** MariaDB that was on the server before pano (CyberPanel) counts as installed but not managed. */
+/** MariaDB or Redis that was on the server before pano (CyberPanel) counts as installed but not managed. */
 async function detect(k: ServiceKey): Promise<Record_ | null> {
   const r = rec(k);
   if (r) return r;
   if (k === "mariadb" && (await unitExists("mariadb.service"))) {
     const v = await run(["mariadb", "--version"], { check: false });
     return { unit: "mariadb.service", version: v.stdout.match(/(\d+\.\d+\.\d+)-MariaDB/)?.[1] ?? "", managed: false };
+  }
+  if (k === "valkey") {
+    // Installing next to it would fight over port 6379.
+    for (const [unit, bin] of [["valkey.service", "valkey-server"], ["redis.service", "redis-server"]] as const) {
+      if (!(await unitExists(unit))) continue;
+      const v = await run([bin, "--version"], { check: false });
+      return { unit, version: v.stdout.match(/v=(\d+\.\d+\.\d+)/)?.[1] ?? "", managed: false };
+    }
   }
   return null;
 }
@@ -219,9 +227,25 @@ export async function action(k: ServiceKey, what: "start" | "stop" | "restart", 
 /** Connection details for apps; the Valkey password is revealed only to an authenticated, 2FA-confirmed admin. */
 export async function valkeyUrl(): Promise<string> {
   const pw = ((await readText(VALKEY_PASS)) ?? "").trim();
-  if (!pw) throw new Error("Valkey is not installed by pano");
   // "default" is the user requirepass sets; some clients reject an empty user name.
-  return `redis://default:${pw}@127.0.0.1:6379`;
+  if (pw) return `redis://default:${pw}@127.0.0.1:6379`;
+  const existing = await existingRedisUrl();
+  if (!existing) throw new Error("Valkey is not installed");
+  return existing;
+}
+
+/** A Redis/Valkey that was there before pano: its address and password, read from its own config. */
+export async function existingRedisUrl(): Promise<string | null> {
+  for (const file of ["/etc/valkey/valkey.conf", "/etc/redis/redis.conf", "/etc/redis.conf"]) {
+    const conf = await readText(file);
+    if (conf === null) continue;
+    const last = (k: string) => [...conf.matchAll(new RegExp(`^\\s*${k}\\s+(\\S+)`, "gm"))].at(-1)?.[1];
+    const port = Number(last("port") ?? 6379);
+    if (!port) continue; // unix socket only
+    const pw = last("requirepass")?.replace(/^"(.*)"$/, "$1");
+    return `redis://${pw ? `default:${encodeURIComponent(pw)}@` : ""}127.0.0.1:${port}`;
+  }
+  return null;
 }
 
 // ---- PostgreSQL databases --------------------------------------------------------

@@ -70,6 +70,8 @@ export type Site = {
   deny_paths: string[];
   /** set when a legacy site was converted to php: what to go back to */
   converted_from: { kind: Site["kind"]; root: string; php_version: string } | null;
+  /** php sites: scheduled commands run as the site user with the site's PHP (systemd timers) */
+  crons: { schedule: string; command: string }[];
   created_at: number;
 };
 
@@ -232,6 +234,7 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "crons", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
+  ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
 ];
 
 function migrate(d: Database) {
@@ -253,6 +256,7 @@ function decodeSite(row: any): Site {
     routes: JSON.parse(row.routes),
     deny_paths: JSON.parse(row.deny_paths || "[]"),
     converted_from: row.converted_from ? JSON.parse(row.converted_from) : null,
+    crons: JSON.parse(row.crons || "[]"),
   };
 }
 
@@ -318,7 +322,9 @@ export const sites = {
     const row = state().query("SELECT * FROM sites WHERE name = ?").get(name);
     return row ? decodeSite(row) : null;
   },
-  upsert(s: Omit<Site, "created_at" | "deny_paths" | "converted_from"> & Partial<Pick<Site, "deny_paths" | "converted_from">>) {
+  upsert(input: Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons"> & Partial<Pick<Site, "deny_paths" | "converted_from" | "crons">>) {
+    // Cron jobs change only through setCrons.
+    const { crons: _crons, ...s } = input;
     const prev = sites.get(s.name);
     const deny = s.deny_paths ?? prev?.deny_paths ?? [];
     const from = s.converted_from !== undefined ? s.converted_from : (prev?.converted_from ?? null);
@@ -337,6 +343,9 @@ export const sites = {
         converted_from: from ? JSON.stringify(from) : "",
         created_at: now(),
       } as any);
+  },
+  setCrons(name: string, crons: Site["crons"]) {
+    state().query("UPDATE sites SET crons = ? WHERE name = ?").run(JSON.stringify(crons), name);
   },
   setEnabled(name: string, enabled: boolean) {
     state().query("UPDATE sites SET enabled = ? WHERE name = ?").run(enabled ? 1 : 0, name);

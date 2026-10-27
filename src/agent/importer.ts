@@ -7,7 +7,7 @@ import { readServerConfig, readVhost, type OlsVhost } from "./ols.ts";
 import { apps, audit, sites, type App, type Route, type Site } from "./state.ts";
 import { exists, readText, run } from "./sys.ts";
 
-export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
+export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
 export type ImportApp = Pick<App, "name" | "external_unit" | "upstream"> & { ports: number[]; process: string };
 export type ImportPlan = {
   cyberpanel: { installed: boolean; version: string; services: Record<string, string> };

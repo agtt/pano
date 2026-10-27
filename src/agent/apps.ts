@@ -22,11 +22,11 @@ export const appUser = (name: string) => `app-${name}`;
 export const appHome = (name: string) => `${paths.apps}/${name}`;
 // App names never contain "_", so "<app>_<process>" cannot collide with another app.
 const unitBase = (app: string, p: Process) => (p.name ? `pano-app-${app}_${p.name}` : `pano-app-${app}`);
-const unitName = (app: string, p: Process, slot: "a" | "b") => `${unitBase(app, p)}@${slot}.service`;
+export const unitName = (app: string, p: Process, slot: "a" | "b") => `${unitBase(app, p)}@${slot}.service`;
 const unitFile = (app: string, p: Process) => `${paths.systemd}/${unitBase(app, p)}@.service`;
 /** Per process and slot: <home>/run/<key>-<slot>.env (PORT) and .sh (start script). Root-owned. */
 const runFile = (app: string, p: Process, slot: string, ext: "env" | "sh") => `${appHome(app)}/run/${p.name || "main"}-${slot}.${ext}`;
-const isWeb = (p: Process) => p.port_a > 0;
+export const isWeb = (p: Process) => p.port_a > 0;
 const deployLog = (id: number) => `${paths.deployLogs}/${id}.log`;
 
 // ---- create / update / delete ----------------------------------------------
@@ -187,6 +187,14 @@ async function toolPath(app: App): Promise<string> {
   return [...dirs, "/usr/local/bin", "/usr/bin", "/bin"].join(":");
 }
 
+/**
+ * CPU and disk shares for work nobody waits on. Web processes keep the default
+ * weight of 100, so under load they get 5x more than builds and cron jobs and
+ * 2x more than queue workers; on an idle server everything runs at full speed.
+ */
+export const LOW = "Nice=10\nCPUWeight=20\nIOWeight=20\n";
+const BACKGROUND = "Nice=5\nCPUWeight=50\nIOWeight=50\n";
+
 /** Hardening shared by app processes and their cron jobs. */
 const sandboxLines = (home: string) => `UMask=0027
 NoNewPrivileges=true
@@ -242,7 +250,7 @@ KillMode=mixed
 MemoryHigh=${high}M
 MemoryMax=${p.memory_mb}M
 TasksMax=1024
-${sandboxLines(home)}
+${isWeb(p) ? "" : BACKGROUND}${sandboxLines(home)}
 [Install]
 WantedBy=multi-user.target
 `;
@@ -361,7 +369,7 @@ export async function writeCrons(app: App) {
   const dir = `${home}/current${app.root_dir ? `/${app.root_dir}` : ""}`;
   for (const [i, c] of app.crons.entries()) {
     const base = cronBase(app.name, i);
-    await writeAtomic(`${home}/run/cron-${i}.sh`, `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:$PATH"\nexec ${c.command}\n`, 0o755);
+    await writeAtomic(`${home}/run/cron-${i}.sh`, `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:$PATH"\n${c.command}\n`, 0o755);
     await writeAtomic(
       `${paths.systemd}/${base}.service`,
       `[Unit]
@@ -379,7 +387,7 @@ ExecStart=${home}/run/cron-${i}.sh
 TimeoutStartSec=1h
 MemoryMax=${app.memory_mb}M
 TasksMax=256
-${sandboxLines(home)}`,
+${LOW}${sandboxLines(home)}`,
       0o644,
     );
     await writeAtomic(`${paths.systemd}/${base}.timer`, `[Unit]\nDescription=pano cron ${app.name} #${i}\n\n[Timer]\nOnCalendar=${c.schedule}\nPersistent=true\nRandomizedDelaySec=5\n\n[Install]\nWantedBy=timers.target\n`, 0o644);
@@ -395,16 +403,6 @@ export async function checkSchedules(crons: Cron[]) {
     const r = await run(["systemd-analyze", "calendar", c.schedule], { check: false });
     if (r.code !== 0) throw new Error(`cron schedule not understood: ${c.schedule} (examples: hourly, daily, *:0/15, Mon..Fri 09:00)`);
   }
-}
-
-export async function cronStatus(app: App) {
-  return Promise.all(
-    app.crons.map(async (c, i) => {
-      const r = await run(["systemctl", "show", `${cronBase(app.name, i)}.timer`, `${cronBase(app.name, i)}.service`, "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec", "-p", "Result"], { check: false });
-      const get = (k: string) => r.stdout.match(new RegExp(`^${k}=(.*)$`, "m"))?.[1] ?? "";
-      return { ...c, next: get("NextElapseUSecRealtime"), last: get("LastTriggerUSec"), result: get("Result") };
-    }),
-  );
 }
 
 export async function cronLogs(app: App, lines = 100): Promise<string> {
@@ -612,6 +610,8 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     `WorkingDirectory=${o.cwd ?? home}`,
     `MemoryMax=${Math.max(app.memory_mb, 2048)}M`,
     "RuntimeMaxSec=1800",
+    // Builds yield to the sites that are serving traffic.
+    ...LOW.trim().split("\n"),
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     "ProtectHome=yes",

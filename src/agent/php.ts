@@ -20,7 +20,7 @@ export const phpCli = (ver: string) => `${phpRoot(ver)}/usr/bin/php`;
 export const siteUser = (name: string) => `site-${name.replace(/[^a-z0-9]/g, "-").slice(0, 27)}`;
 export const siteHome = (name: string) => `${paths.sites}/${name}`;
 const unitName = (name: string) => `pano-php-${name}.service`;
-const confDir = (name: string) => `${paths.phpEtc}/${name}`;
+export const confDir = (name: string) => `${paths.phpEtc}/${name}`;
 
 const EXTENSIONS = ["fpm", "cli", "common", "mysqlnd", "opcache", "gd", "intl", "mbstring", "xml", "sodium", "bcmath", "pecl-zip"];
 
@@ -152,27 +152,8 @@ decorate_workers_output = no
 `;
 }
 
-export function renderPhpUnit(name: string, ver: string): string {
-  const user = siteUser(name);
-  const conf = confDir(name);
-  return `[Unit]
-Description=pano PHP ${ver} for site ${name}
-After=network.target mariadb.service
-
-[Service]
-Type=notify
-User=${user}
-Group=${user}
-ExecStart=${fpmBin(ver)} --nodaemonize --fpm-config ${conf}/php-fpm.conf --php-ini ${conf}/php.ini
-ExecReload=/bin/kill -USR2 $MAINPID
-RuntimeDirectory=pano-php/${name}
-RuntimeDirectoryMode=0711
-Restart=on-failure
-RestartSec=2
-MemoryHigh=896M
-MemoryMax=1024M
-TasksMax=256
-UMask=0027
+/** Hardening shared by a site's PHP-FPM and its cron jobs. */
+export const phpSandbox = (name: string) => `UMask=0027
 NoNewPrivileges=true
 CapabilityBoundingSet=
 ProtectSystem=strict
@@ -197,7 +178,29 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
+`;
 
+export function renderPhpUnit(name: string, ver: string): string {
+  const user = siteUser(name);
+  const conf = confDir(name);
+  return `[Unit]
+Description=pano PHP ${ver} for site ${name}
+After=network.target mariadb.service
+
+[Service]
+Type=notify
+User=${user}
+Group=${user}
+ExecStart=${fpmBin(ver)} --nodaemonize --fpm-config ${conf}/php-fpm.conf --php-ini ${conf}/php.ini
+ExecReload=/bin/kill -USR2 $MAINPID
+RuntimeDirectory=pano-php/${name}
+RuntimeDirectoryMode=0711
+Restart=on-failure
+RestartSec=2
+MemoryHigh=896M
+MemoryMax=1024M
+TasksMax=256
+${phpSandbox(name)}
 [Install]
 WantedBy=multi-user.target
 `;

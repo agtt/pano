@@ -19,6 +19,7 @@ export type SiteRow = {
   on_demand_tls: number;
   deny_paths?: string[];
   converted_from?: { kind: string; root: string; php_version: string } | null;
+  crons?: { schedule: string; command: string }[];
 };
 
 export type PhpVersion = { version: string; installed: boolean; inUse: boolean; eol: string };
@@ -141,6 +142,23 @@ function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versi
             Blocked (from .htaccess): <code>{s.deny_paths.join("  ")}</code>
           </p>
         ) : null}
+      </Card>
+      <Card title="Cron" actions={<a class="btn small" href="/jobs">{t("Jobs")}</a>}>
+        <form method="post" action={`/sites/${s.name}/crons`}>
+          <Csrf token={csrf} />
+          <textarea name="crons" rows={3} class="mono" spellcheck={false} placeholder={"*:0/5 | php public/wp-cron.php\nminutely | php artisan schedule:run"}>
+            {(s.crons ?? []).map((c) => `${c.schedule} | ${c.command}`).join("\n")}
+          </textarea>
+          <p class="muted small">
+            One job per line, <code>schedule | command</code>. Runs in <code>{s.root.replace(/\/public$/, "")}</code> as the site user with PHP {s.php_version} and
+            the site's php.ini. Schedules: <code>minutely</code>, <code>*:0/5</code> (every 5 minutes), <code>hourly</code>, <code>daily</code>,{" "}
+            <code>Mon..Fri 09:00</code>.
+          </p>
+          <div class="row">
+            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+            <button class="btn">{t("Save")}</button>
+          </div>
+        </form>
       </Card>
       <Card title={t("Logs")} actions={<a class="btn" href={`/sites/${s.name}`}>↻</a>}>
         <pre class="log">{logs || "—"}</pre>

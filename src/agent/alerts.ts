@@ -4,6 +4,8 @@
 
 import { hostname } from "node:os";
 import { paths } from "../shared/config.ts";
+import { failedJobs } from "./jobs.ts";
+import { checkQueues } from "./queues.ts";
 import { apps, procsOf, settings } from "./state.ts";
 import { ensureDir, readText, run, writeAtomic } from "./sys.ts";
 
@@ -68,12 +70,9 @@ export async function checkOnce() {
     if (a.kind !== "managed" || !a.active_slot) continue;
     const units = procsOf(a).map((p) => `pano-app-${a.name}${p.name ? `_${p.name}` : ""}@${a.active_slot}.service`);
     await problem(`app:${a.name}`, !(await isActive(units)), `app ${a.name} is down`);
-    for (const i of a.crons.keys()) {
-      const r = await run(["systemctl", "show", `pano-cron-${a.name}-${i}.service`, "-p", "Result", "--value"], { check: false });
-      const result = r.stdout.trim();
-      await problem(`cron:${a.name}:${i}`, !!result && result !== "success", `cron ${a.name} #${i} (${a.crons[i]!.schedule}) failed: ${result}`);
-    }
   }
+  for (const j of await failedJobs()) await problem(j.key, j.failed, j.text);
+  await checkQueues(problem, notify);
   for (const [key, unit] of Object.entries(await watchedServices())) {
     await problem(`svc:${key}`, !(await isActive([unit])), `${key} is not running`);
   }

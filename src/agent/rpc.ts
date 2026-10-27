@@ -14,6 +14,8 @@ import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
 import * as importer from "./importer.ts";
+import * as jobs from "./jobs.ts";
+import * as queues from "./queues.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
@@ -34,6 +36,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
+  "sites.crons",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -105,7 +108,7 @@ export const methods: Record<string, Handler> = {
   "apps.crons": async (p) => {
     const app = apps.get(v.appName(p.name));
     if (!app) throw new Error("no such app");
-    return { jobs: await appsOps.cronStatus(app), logs: await appsOps.cronLogs(app) };
+    return { jobs: await jobs.listJobs({ owner: "app", name: app.name }), logs: await appsOps.cronLogs(app) };
   },
   "apps.action": (p, actor) => {
     if (!["start", "stop", "restart"].includes(p.action)) throw new Error("bad action");
@@ -209,6 +212,14 @@ export const methods: Record<string, Handler> = {
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
 
   // ---- shield (malware scan, IP reputation, login brute force)
+  // ---- scheduled jobs and queues
+  "jobs.list": async () => ({ jobs: await jobs.listJobs(), crontabs: await jobs.legacyCrontabs() }),
+  "jobs.run": (p, actor) => jobs.runJob(jobs.parseRef(p), actor),
+  "jobs.logs": (p) => jobs.jobLogs(jobs.parseRef(p)),
+  "queues.status": () => queues.queueStatus(),
+  "queues.set": (p, actor) => queues.setQueues(!!p.on, actor),
+  "queues.restartWorker": (p, actor) => queues.restartWorker(v.appName(p.app), String(p.process ?? ""), actor),
+
   "shield.status": () => shield.shieldStatus(),
   "shield.set": (p, actor) =>
     shield.setShield({ scan: !!p.scan, autoQuarantine: !!p.autoQuarantine, reputation: !!p.reputation, bruteforce: !!p.bruteforce }, actor),
@@ -262,9 +273,16 @@ export const methods: Record<string, Handler> = {
     appsOps.assertDomainsFree(domains, { site: v.siteName(p.name) }, allDomains());
     return php.createPhpSite({ name: p.name, domains, version: p.php_version || DEFAULT_PHP }, actor);
   },
-  "sites.phpVersion": (p, actor) => php.setPhpVersion(p.name, p.version, actor),
+  "sites.phpVersion": async (p, actor) => {
+    await php.setPhpVersion(p.name, p.version, actor);
+    await jobs.writeSiteCrons(v.siteName(p.name));
+  },
   "sites.convertPhp": (p, actor) => php.convertLegacy(p.name, p.version, actor),
-  "sites.revertPhp": (p, actor) => php.revertConvert(p.name, actor),
+  "sites.revertPhp": async (p, actor) => {
+    await php.revertConvert(p.name, actor);
+    await jobs.writeSiteCrons(v.siteName(p.name));
+  },
+  "sites.crons": (p, actor) => jobs.setSiteCrons(p.name, p.crons, actor),
   "sites.fixPermissions": async (p, actor) => {
     const warnings = await php.fixPermissions(v.siteName(p.name));
     audit(actor, "php.site.permissions", { name: p.name });
@@ -312,6 +330,7 @@ export const methods: Record<string, Handler> = {
     if (!site) throw new Error("not found");
     sites.setEnabled(site.name, !!p.enabled);
     if (site.kind === "php") await php.setPhpEnabled(site, !!p.enabled);
+    await jobs.writeSiteCrons(site.name);
     await applyEdge();
     audit(actor, "site.toggle", { name: site.name, enabled: !!p.enabled });
   },
@@ -321,6 +340,7 @@ export const methods: Record<string, Handler> = {
     if (!site) throw new Error("not found");
     if (site.kind === "php") await php.deletePhpSite(site, !!p.removeFiles);
     sites.remove(site.name);
+    await jobs.writeSiteCrons(site.name);
     await applyEdge();
     audit(actor, "site.delete", { name: site.name, removeFiles: !!p.removeFiles });
   },

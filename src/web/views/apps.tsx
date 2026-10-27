@@ -1,6 +1,7 @@
 import { formatProcesses, type ProcessSpec } from "../../shared/validate.ts";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { JobResult, type JobRow } from "./jobs.tsx";
 
 export type AppRow = {
   name: string;
@@ -175,7 +176,7 @@ export function AppDetail(p: {
   hookUrl: string;
   github: { connected: boolean; repo: string };
   revealed?: boolean;
-  crons?: { jobs: { schedule: string; command: string; next: string; last: string; result: string }[]; logs: string };
+  crons?: { jobs: JobRow[]; logs: string };
 }) {
   const a = p.app;
   const managed = a.kind === "managed";
@@ -339,9 +340,9 @@ export function AppDetail(p: {
                         <code>{j.command}</code>
                       </td>
                       <td class="small">
-                        {j.last || "—"} {j.last ? <Badge state={j.result === "success" ? "ok" : j.result || "—"} /> : null}
+                        <JobResult j={j} />
                       </td>
-                      <td class="small muted">{j.next || "—"}</td>
+                      <td class="small muted">{j.armed ? fmtTime(j.next) : "—"}</td>
                     </tr>
                   ))}
                 </tbody>

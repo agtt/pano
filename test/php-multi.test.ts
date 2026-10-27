@@ -43,7 +43,7 @@ describe("edge: multi-process apps and php sites", () => {
     ],
   } as unknown as App;
   const php = {
-    name: "blog.example.org", kind: "php", domains: ["blog.example.org"], routes: [], enabled: 1, on_demand_tls: 0, tls_cert: "", tls_key: "",
+    name: "blog.example.org", kind: "php", domains: ["blog.example.org"], routes: [], crons: [], enabled: 1, on_demand_tls: 0, tls_cert: "", tls_key: "",
     root: "/srv/pano/sites/blog.example.org/public", ask_url: "", php_version: "8.5", source: "pano", deny_paths: ["/private", "/wp-content/uploads/wc-logs"],
     converted_from: null, created_at: 0,
   } as Site;
