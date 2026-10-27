@@ -19,6 +19,7 @@ import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.t
 import { ShieldPage, type ShieldView } from "./views/shield.tsx";
 import { JobsPage, type JobsView, type QueuesView } from "./views/jobs.tsx";
 import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
+import type { RealtimeView } from "./views/realtime.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
@@ -382,10 +383,56 @@ export function createWebApp() {
 
   // ---- database and cache servers
   const servicesPage = async (c: Context<Env>, secret?: { title: string; lines: [string, string][] }) => {
-    const list = await call<ServiceRow[]>("services.status");
+    const [list, realtime, apps] = await Promise.all([
+      call<ServiceRow[]>("services.status"),
+      call<RealtimeView>("realtime.status"),
+      call<{ name: string; kind: string }[]>("apps.list"),
+    ]);
     const pg = list.find((s) => s.key === "postgres")?.installed ? await call<PgDb[]>("pg.list").catch(() => []) : [];
-    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} />);
+    const appNames = apps.filter((a) => a.kind === "managed").map((a) => a.name);
+    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} realtime={realtime} appNames={appNames} />);
   };
+  // ---- realtime
+  app.post("/services/realtime/install", act("/services", async (c) => `Realtime ${(await call("realtime.install", {}, actor(c))).version} installed`));
+  app.post("/services/realtime/update", act("/services", async (c) => `Realtime updated to ${(await call("realtime.update", {}, actor(c))).version}`));
+  app.post("/services/realtime/check", act("/services", async (c) => {
+    await call("realtime.check", {}, actor(c));
+    return "Checked";
+  }));
+  app.post("/services/realtime/auto", act("/services", async (c, f) => {
+    await call("realtime.autoUpdate", { on: f.on === "1" }, actor(c));
+  }));
+  app.post("/services/realtime/domain", act("/services", async (c, f) => {
+    await call("realtime.domain", { domain: f.domain }, actor(c));
+    return f.domain ? `Realtime on wss://${f.domain}` : "Realtime on localhost only";
+  }));
+  app.post("/services/realtime/apps", act("/services", async (c, f) => {
+    const r = await call("realtime.app.add", { name: f.name, origins: f.origins }, actor(c));
+    return `${r.name} added (key ${r.key})`;
+  }));
+  app.post("/services/realtime/to-app", act("/services", async (c, f) => {
+    await call("apps.addRealtime", { name: f.app, realtime: f.realtime }, actor(c));
+    return `Pusher settings added to ${f.app}`;
+  }));
+  app.post("/services/realtime/apps/remove", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("realtime.app.remove", { name: f.name, confirm: f.confirm }, actor(c));
+  }));
+  app.post("/services/realtime/uninstall", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("realtime.uninstall", { confirm: f.confirm }, actor(c));
+    return "Realtime removed";
+  }));
+  app.post("/services/realtime/apps/:name/reveal", async (c) => {
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      const a = await call<{ id: string; key: string; secret: string; name: string }>("realtime.app.reveal", { name: c.req.param("name") }, actor(c));
+      return servicesPage(c, { title: `Realtime · ${a.name}`, lines: [["PUSHER_APP_ID", a.id], ["PUSHER_APP_KEY", a.key], ["PUSHER_APP_SECRET", a.secret]] });
+    } catch (e) {
+      return c.redirect(err("/services", e));
+    }
+  });
   app.get("/services", (c) => servicesPage(c));
   app.post("/services/:key/install", act("/services", async (c) => {
     const r = await call("services.install", { service: c.req.param("key") }, actor(c));

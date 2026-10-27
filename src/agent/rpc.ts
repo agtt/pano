@@ -16,6 +16,7 @@ import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, ins
 import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
 import * as queues from "./queues.ts";
+import * as realtime from "./realtime.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
@@ -36,7 +37,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons",
+  "sites.crons", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -141,6 +142,13 @@ export const methods: Record<string, Handler> = {
     if (app.active_slot) await appsOps.appAction(app.name, "restart", actor).catch(() => {});
     return r;
   },
+  "apps.addRealtime": async (p, actor) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    const env = { get: () => appsOps.getEnv(app.name), set: (vars: Record<string, string>) => appsOps.setEnv(app.name, vars, actor) };
+    await realtime.toAppEnv(p.realtime, env, app.name, actor);
+    if (app.active_slot) await appsOps.appAction(app.name, "restart", actor).catch(() => {});
+  },
   "apps.deployKey": (p) => appsOps.deployKey(p.name),
   "apps.webhookSecret": (p) => {
     const a = apps.get(v.appName(p.name));
@@ -212,6 +220,36 @@ export const methods: Record<string, Handler> = {
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
 
   // ---- shield (malware scan, IP reputation, login brute force)
+  // ---- realtime (Pusher-compatible)
+  "realtime.status": () => realtime.realtimeStatus(),
+  "realtime.install": (_p, actor) => realtime.install(actor),
+  "realtime.update": async (p, actor) => {
+    const s = await realtime.realtimeStatus();
+    if (!s.latest || !realtime.newer(s.latest, s.version)) throw new Error("already on the newest version");
+    return realtime.update(s.latest, actor);
+  },
+  "realtime.check": () => realtime.checkUpdates(),
+  "realtime.autoUpdate": (p, actor) => realtime.setAutoUpdate(!!p.on, actor),
+  "realtime.uninstall": (p, actor) => {
+    if (p.confirm !== "realtime") throw new Error("type realtime to confirm");
+    return realtime.uninstall(actor);
+  },
+  "realtime.domain": (p, actor) => {
+    const domain = String(p.domain ?? "").trim().toLowerCase();
+    if (domain) {
+      const [d] = parseDomains(domain);
+      if (!d || d.includes("*")) throw new Error("one domain, for example ws.example.com");
+      appsOps.assertDomainsFree([d], { site: d }, allDomains());
+    }
+    return realtime.setDomain(domain, actor);
+  },
+  "realtime.app.add": (p, actor) => realtime.addApp({ name: p.name, origins: p.origins }, actor),
+  "realtime.app.remove": (p, actor) => {
+    if (p.confirm !== p.name) throw new Error("type the app name to confirm");
+    return realtime.removeApp(p.name, actor);
+  },
+  "realtime.app.reveal": (p) => realtime.revealApp(p.name),
+
   // ---- scheduled jobs and queues
   "jobs.list": async () => ({ jobs: await jobs.listJobs(), crontabs: await jobs.legacyCrontabs() }),
   "jobs.run": (p, actor) => jobs.runJob(jobs.parseRef(p), actor),

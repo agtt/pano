@@ -9,7 +9,7 @@ import { ensureDir, exists, remove, run } from "./sys.ts";
 
 export type Runtime = "node" | "bun";
 
-const arch = () => (process.arch === "arm64" ? "arm64" : "x64");
+export const arch = () => (process.arch === "arm64" ? "arm64" : "x64");
 const dir = (rt: Runtime, ver: string) => `${paths.runtimes}/${rt}/${ver}`;
 
 /** Directory that goes first on PATH for an app using this runtime. */
@@ -60,17 +60,17 @@ export async function available(): Promise<{ node: { version: string; lts: strin
   return { node, bun };
 }
 
-async function download(url: string): Promise<Uint8Array> {
+export async function download(url: string): Promise<Uint8Array> {
   const res = await fetch(url, { headers: { "user-agent": "pano" } });
   if (!res.ok) throw new Error(`download failed (${res.status}): ${url}`);
   return new Uint8Array(await res.arrayBuffer());
 }
 
-function sha256(bytes: Uint8Array) {
+export function sha256(bytes: Uint8Array) {
   return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
-function expectedSum(list: string, file: string): string {
+export function expectedSum(list: string, file: string): string {
   const line = list.split("\n").find((l) => l.trim().split(/\s+/)[1]?.replace(/^\*/, "") === file);
   if (!line) throw new Error(`no checksum published for ${file}`);
   return line.trim().split(/\s+/)[0]!;

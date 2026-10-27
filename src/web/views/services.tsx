@@ -1,5 +1,6 @@
 import { fmtBytes, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { RealtimeCard, type RealtimeView } from "./realtime.tsx";
 
 export type ServiceRow = {
   key: "mariadb" | "postgres" | "valkey";
@@ -16,7 +17,7 @@ export type ServiceRow = {
 export type PgDb = { name: string; sizeMb: number; owner: string; system: boolean };
 type Secret = { title: string; lines: [string, string][] };
 
-export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; secret?: Secret }) {
+export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; secret?: Secret; realtime?: RealtimeView; appNames?: string[] }) {
   const pg = p.list.find((s) => s.key === "postgres");
   return (
     <div class="stack">
@@ -129,6 +130,8 @@ export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; 
           </Card>
         ) : null}
       </div>
+
+      {p.realtime ? <RealtimeCard r={p.realtime} csrf={p.csrf} appNames={p.appNames ?? []} /> : null}
 
       {pg?.installed ? (
         <Card title={`PostgreSQL ${pg.version}`}>
