@@ -8,6 +8,7 @@ export const NAV: [string, string][] = [
   ["/databases", "Databases"],
   ["/backups", "Backups"],
   ["/runtimes", "Runtimes"],
+  ["/containers", "Containers"],
   ["/edge", "Edge"],
   ["/security", "Security"],
   ["/import", "Import"],

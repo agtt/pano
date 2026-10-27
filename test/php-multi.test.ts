@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { renderQuadlet, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
@@ -109,6 +110,25 @@ RewriteRule . /index.php [L]
     expect(files.notes.length).toBe(1);
     expect(analyzeHtaccess("AuthType Basic\nAuthUserFile /home/x/.htpasswd\nRequire valid-user").deny).toBe(true);
     expect(analyzeHtaccess("RewriteRule ^old$ /new [R=301,L]").notes[0]).toContain("rewrite");
+  });
+});
+
+describe("containers", () => {
+  test("images are always fully qualified and inputs validated", () => {
+    const base = { name: "cache", port: "6379", volumes: "/data", memory_mb: "256", env: "A=1" };
+    expect(validateContainer({ ...base, image: "redis:7-alpine" }).image).toBe("docker.io/library/redis:7-alpine");
+    expect(validateContainer({ ...base, image: "louislam/uptime-kuma:1" }).image).toBe("docker.io/louislam/uptime-kuma:1");
+    expect(validateContainer({ ...base, image: "ghcr.io/x/y:2" }).image).toBe("ghcr.io/x/y:2");
+    expect(() => validateContainer({ ...base, image: "redis; rm -rf /" })).toThrow();
+    expect(() => validateContainer({ ...base, image: "redis", volumes: "/data/../etc" })).toThrow();
+    expect(() => validateContainer({ ...base, image: "redis", port: "", domains: "a.example.com" })).toThrow();
+  });
+  test("quadlet publishes on localhost only, in its own user namespace", () => {
+    const q = renderQuadlet({ name: "cache", image: "docker.io/library/redis:7-alpine", port: 6379, host_port: 5100, domains: [], volumes: ["/data"], command: "", memory_mb: 256, created_at: 0 });
+    expect(q).toContain("PublishPort=127.0.0.1:5100:6379");
+    expect(q).toContain("UserNS=auto");
+    expect(q).toContain("Volume=/srv/pano/containers/cache/v0:/data:U,Z");
+    expect(q).toContain("--memory=256m");
   });
 });
 

@@ -18,6 +18,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 | Monorepos | One build, several processes: `name \| dir \| routes \| memory \| start` per line. Routes are hosts, `host/path`, `*.host` or `*` (any host, on-demand TLS with an ask URL). Web processes get blue/green slots and health checks; workers have no port and never run twice (old one stops before the new one starts). |
 | PHP sites | PHP 7.4–8.5 (Remi packages, signed) installed on first use. Each site: its own system user, its own PHP-FPM pool running as that user (never root, `pm=ondemand`, hardened unit with `MemoryDenyWriteExecute`), socket only the edge can open (ACL), `open_basedir`, dangerous functions off, secure session cookies. The edge never serves dotfiles, dumps/backups, composer files or PHP inside uploads. Patch releases arrive with OS updates; pools reload onto the new binary. |
 | Sites | Proxy (path → port routes), static, PHP, and legacy sites still served by the old OpenLiteSpeed on localhost. |
+| Containers (optional) | Off until enabled; then Podman comes from the distribution (no daemon, nothing runs without a container). Each container is a Quadlet systemd unit in its own user namespace (root inside = unprivileged uid outside), memory/pids capped, published on 127.0.0.1 only, HTTPS through the edge when given a domain. Templates: Redis, PostgreSQL, Meilisearch, Uptime Kuma, n8n; empty passwords/keys are generated. |
 | Databases | MariaDB/MySQL: list with sizes and grants, create db + user, reset passwords, drop (with 2FA). |
 | Backups | mysqldump / tar → gzip → **AES-256-GCM on the server** → streamed multipart upload to R2. Schedules, retention, restore. R2 only ever sees ciphertext. |
 | Import | Reads a CyberPanel/OLS server (vhosts, proxies, PHP versions, certificates, suspended sites, databases, the systemd/PM2 services behind each port) into pano. Read-only until cutover. Legacy sites can then be moved one by one onto pano PHP (files copied, `deny from all` directories stay closed, one-click revert). |
@@ -80,6 +81,7 @@ bun run typecheck
 dev/vm.sh            # full test in an OrbStack AlmaLinux 9 VM (real systemd, MariaDB, OpenLiteSpeed)
 dev/vm-e2e.sh        # then: import, deploy Next.js/Bun, cutover, zero-downtime redeploy, rollback
 dev/vm-e2e-php.sh    # then: monorepo app, PHP site, OLS → PHP move/revert, cPanel import
+dev/vm-e2e-containers.sh  # then: enable Podman, nginx behind the edge, Redis template
 ```
 
 Layout: `src/agent` (root: state, apps, php, edge, backups, importer, cpanel, cutover, audit), `src/web` (UI, auth), `src/shared` (paths, validation).

@@ -4,6 +4,7 @@
 import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, v } from "../shared/validate.ts";
 import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
+import * as containers from "./containers.ts";
 import * as cpanel from "./cpanel.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
@@ -85,6 +86,21 @@ export const methods: Record<string, Handler> = {
     const inUse = apps.list().some((a) => a.runtime === p.runtime && a.runtime_version === p.version);
     await runtimes.uninstall(v.runtime(p.runtime), p.version, inUse);
     audit(actor, "runtime.uninstall", { runtime: p.runtime, version: p.version });
+  },
+
+  // ---- containers (optional: Podman is installed only when asked for)
+  "containers.status": async () => ({ installed: await containers.podmanInstalled(), templates: containers.TEMPLATES }),
+  "containers.install": (_p, actor) => containers.installPodman(actor),
+  "containers.list": () => containers.listContainers(),
+  "containers.get": (p) => containers.containerDetail(String(p.name ?? "")),
+  "containers.save": (p, actor) => containers.saveContainer(containers.validateContainer(p), actor),
+  "containers.action": (p, actor) => {
+    if (!["start", "stop", "restart", "pull"].includes(p.action)) throw new Error("bad action");
+    return containers.containerAction(String(p.name ?? ""), p.action, actor);
+  },
+  "containers.delete": (p, actor) => {
+    if (p.confirm !== p.name) throw new Error("type the container name to confirm");
+    return containers.deleteContainer(String(p.name), !!p.removeData, actor);
   },
 
   // ---- PHP (installed per version, only when a site needs it)

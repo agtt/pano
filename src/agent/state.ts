@@ -59,7 +59,7 @@ export type Site = {
   php_version: string;
   tls_cert: string;
   tls_key: string;
-  source: "cyberpanel" | "cpanel" | "pano";
+  source: "cyberpanel" | "cpanel" | "container" | "pano";
   enabled: number;
   on_demand_tls: number;
   /** php sites: path prefixes answered with 404 (from "deny from all" .htaccess files) */
@@ -179,6 +179,17 @@ CREATE TABLE IF NOT EXISTS backup_runs (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS backup_runs_job ON backup_runs(job_id, id DESC);
+CREATE TABLE IF NOT EXISTS containers (
+  name TEXT PRIMARY KEY,
+  image TEXT NOT NULL,
+  port INTEGER NOT NULL DEFAULT 0,
+  host_port INTEGER NOT NULL DEFAULT 0,
+  domains TEXT NOT NULL DEFAULT '[]',
+  volumes TEXT NOT NULL DEFAULT '[]',
+  command TEXT NOT NULL DEFAULT '',
+  memory_mb INTEGER NOT NULL DEFAULT 512,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL,
@@ -273,6 +284,7 @@ export const apps = {
   /** Two consecutive free ports for a new app's blue/green slots. */
   nextPorts(taken: number[] = []): [number, number] {
     const used = new Set<number>(taken);
+    for (const c of containers.list()) used.add(c.host_port);
     for (const a of apps.list()) {
       used.add(a.port_a), used.add(a.port_b);
       for (const p of a.processes) used.add(p.port_a), used.add(p.port_b);
@@ -390,6 +402,44 @@ export const backups = {
   },
   failStale() {
     state().query("UPDATE backup_runs SET status = 'failed', error = 'agent restarted', finished_at = ? WHERE status = 'running'").run(now());
+  },
+};
+
+export type Container = {
+  name: string;
+  image: string;
+  /** port inside the container (0: not published) and its localhost port on the host */
+  port: number;
+  host_port: number;
+  domains: string[];
+  /** paths inside the container; each is backed by /srv/pano/containers/<name>/<n> */
+  volumes: string[];
+  command: string;
+  memory_mb: number;
+  created_at: number;
+};
+
+export const containers = {
+  list(): Container[] {
+    return state()
+      .query("SELECT * FROM containers ORDER BY name")
+      .all()
+      .map((r: any) => ({ ...r, domains: JSON.parse(r.domains), volumes: JSON.parse(r.volumes) }));
+  },
+  get(name: string): Container | null {
+    return containers.list().find((c) => c.name === name) ?? null;
+  },
+  upsert(c: Omit<Container, "created_at">) {
+    state()
+      .query(
+        `INSERT INTO containers (name, image, port, host_port, domains, volumes, command, memory_mb, created_at)
+         VALUES ($name, $image, $port, $host_port, $domains, $volumes, $command, $memory_mb, $created_at)
+         ON CONFLICT(name) DO UPDATE SET image=$image, port=$port, host_port=$host_port, domains=$domains, volumes=$volumes, command=$command, memory_mb=$memory_mb`,
+      )
+      .run({ ...c, domains: JSON.stringify(c.domains), volumes: JSON.stringify(c.volumes), created_at: now() } as any);
+  },
+  remove(name: string) {
+    state().query("DELETE FROM containers WHERE name = ?").run(name);
   },
 };
 

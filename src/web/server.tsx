@@ -12,6 +12,7 @@ import { t } from "./i18n.ts";
 import css from "./static/app.css" with { type: "text" };
 import js from "./static/app.js" with { type: "text" };
 import { AppDetail, AppForm, AppsPage, type AppRow } from "./views/apps.tsx";
+import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
@@ -367,8 +368,47 @@ export function createWebApp() {
     await call("runtimes.uninstall", { runtime: f.runtime, version: f.version }, actor(c));
   }));
 
+  // ---- containers (optional)
+  app.get("/containers", async (c) => {
+    const st = await call("containers.status");
+    const list = st.installed ? await call("containers.list") : [];
+    return page(c, t("Containers"), <ContainersPage csrf={c.get("s").csrf} installed={st.installed} list={list} templates={st.templates} />);
+  });
+  app.post("/containers/install", act("/containers", async (c) => {
+    await call("containers.install", {}, actor(c));
+    return "Containers enabled";
+  }));
+  app.get("/containers/new", async (c) => {
+    const st = await call("containers.status");
+    const key = c.req.query("template") ?? "";
+    const tpl = st.templates[key];
+    const draft = tpl ? { name: key, image: tpl.image, port: tpl.port, volumes: tpl.volumes, env: tpl.env, memory_mb: tpl.memory_mb } : undefined;
+    return page(c, t("Containers"), <Card title="+ Container"><ContainerForm csrf={c.get("s").csrf} c={draft} note={tpl?.note} /></Card>);
+  });
+  app.post("/containers/save", act("/containers/new", async (c, f) => {
+    const saved = await call("containers.save", f, actor(c));
+    return `/containers/${saved.name}`;
+  }));
+  app.get("/containers/:name", async (c) => {
+    try {
+      return page(c, c.req.param("name"), <ContainerDetail csrf={c.get("s").csrf} c={await call("containers.get", { name: c.req.param("name") })} />);
+    } catch (e) {
+      return c.redirect(err("/containers", e));
+    }
+  });
+  app.post("/containers/:name/action", act("/containers", async (c, f) => {
+    const name = c.req.param("name")!;
+    await call("containers.action", { name, action: f.action }, actor(c));
+    return `/containers/${name}`;
+  }));
+  app.post("/containers/:name/delete", act("/containers", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("containers.delete", { name: c.req.param("name"), confirm: f.confirm, removeData: f.removeData === "1" }, actor(c));
+    return "/containers";
+  }));
+
   // ---- edge
-  const edgePage = async (c: Context<Env>, report?: any) => {
+  const edgePage =async (c: Context<Env>, report?: any) => {
     const [status, preview] = await Promise.all([call("edge.status"), call<string>("edge.preview").catch((e) => String(e.message))]);
     return page(c, t("Edge"), <EdgePage csrf={c.get("s").csrf} status={status} preview={preview} report={report} />);
   };

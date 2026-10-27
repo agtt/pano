@@ -10,6 +10,7 @@ const tr: Record<string, string> = {
   Databases: "Veritabanları",
   Backups: "Yedekler",
   Runtimes: "Çalışma ortamları",
+  Containers: "Konteynerler",
   Security: "Güvenlik",
   Import: "İçe aktar",
   Edge: "Edge / SSL",

@@ -21,6 +21,9 @@ export const paths = {
   logs: "/var/log/pano",
   apps: "/srv/pano/apps",
   sites: "/srv/pano/sites",
+  containers: "/srv/pano/containers",
+  containerEnv: "/etc/pano/containers",
+  quadlets: "/etc/containers/systemd",
   phpEtc: "/etc/pano/php",
   phpRun: "/run/pano-php",
   /** Drop cPanel cpmove archives here (scp) to import them. */
