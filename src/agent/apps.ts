@@ -221,6 +221,8 @@ ProtectProc=invisible
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# Calls newer than this systemd (fchmodat2 on 6.6+ kernels) fail softly and libc falls back.
+SystemCallErrorNumber=ENOSYS
 `;
 
 export function renderUnit(app: App, p: Process, path: string): string {
@@ -624,7 +626,23 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     "RestrictSUIDSGID=yes",
     "CapabilityBoundingSet=",
     "UMask=0027",
-    ...(o.envFile ? [`EnvironmentFile=-${home}/shared/.env`] : []),
+    "ProtectKernelLogs=yes",
+    "ProtectClock=yes",
+    "ProtectHostname=yes",
+    "RestrictRealtime=yes",
+    "RestrictNamespaces=yes",
+    "LockPersonality=yes",
+    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+    // Same as the running app: no cloud metadata, no other processes, ordinary syscalls only.
+    "IPAddressDeny=169.254.169.254/32",
+    "ProtectProc=invisible",
+    "SystemCallArchitectures=native",
+    "SystemCallFilter=@system-service",
+    "SystemCallErrorNumber=ENOSYS",
+    // The install step runs third-party scripts (postinstall); it never sees the
+    // app's secrets or data: both directories are empty there (a linked .env just
+    // goes missing). Only the build gets the env (frameworks inline it).
+    ...(o.envFile ? [`EnvironmentFile=-${home}/shared/.env`] : [`TemporaryFileSystem=${home}/shared:ro ${home}/data:ro`]),
   ];
   const env = {
     HOME: home,

@@ -15,7 +15,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 | cPanel/WHM, CyberPanel, CloudPanel, Plesk (single-server hosting) | Sites, PHP, databases, TLS, backups, cron, security in one panel; imports cPanel `cpmove` backups and live CyberPanel servers |
 | Vercel / Netlify / Coolify / Dokploy (app hosting, push-to-deploy) | Git push-to-deploy with zero-downtime blue/green releases and instant rollback, on your own server |
 | PM2 + nginx by hand | systemd units per app + Caddy edge, rendered and validated by the panel |
-| Imunify360 / ImunifyAV / Maldet | Shield: malware scanner, quarantine, login brute-force protection, reputation blocklists |
+| ImunifyAV / Maldet (basic), fail2ban | Shield: malware scanner, quarantine, login brute-force protection, reputation blocklists (not a WAF, EDR or DDoS protection) |
 | JetBackup / Acronis / custom backup scripts | Encrypted full or incremental (restic) backups to one or two S3 stores at once |
 | Pusher / Ably (paid realtime) | Pusher-compatible WebSockets (Sockudo) on demand |
 | Twilio TURN / Xirsys | TURN relay (coturn) for WebRTC calls and P2P games on demand |
@@ -27,7 +27,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 ## Features
 
 **Apps (Next.js, Node.js, Bun)**
-- Git → sandboxed build → blue/green systemd slots → health check → traffic switch; zero-downtime deploys, one-click rollback (previous release kept, no rebuild).
+- Git → sandboxed build → blue/green systemd slots → health check → traffic switch; zero-downtime deploys (the old process gets up to 20 s to finish requests; database migrations must stay backward compatible, a code rollback does not roll back the database), one-click rollback (previous release kept, no rebuild).
 - bun as package manager for every app (reads npm/yarn/pnpm lockfiles); any Node.js/Bun version side by side, pinned per app, checksum-verified.
 - Monorepos: one build, several processes (web + workers), per-process routes, memory limits.
 - Per-app env (masked in the UI), logs, cron jobs, persistent `DATA_DIR` (SQLite, uploads) included in backups.
@@ -37,7 +37,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Caddy: automatic HTTPS (Let's Encrypt), HTTP/3, zstd/gzip, on-demand TLS for customer domains, Cloudflare real IP, security headers.
 
 **PHP sites and WordPress**
-- PHP 7.4–8.5 installed on first use; each site its own system user, own PHP-FPM pool, sandboxed unit, `open_basedir`, dangerous functions off.
+- PHP 7.4–8.5 installed on first use; versions past end of life are flagged in the UI and the security audit (meant only for migrated legacy sites); each site its own system user, own PHP-FPM pool and an OS-level sandbox (read-only system, no new privileges, syscall filter); `open_basedir` and disabled functions are an extra layer, not the boundary.
 - Per-site PHP version switch with revert, site cron jobs, blocked paths, legacy sites can stay on OpenLiteSpeed during migration.
 - Existing PHP apps (POS, small CMS, Laravel) and WordPress supported.
 
@@ -57,7 +57,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Builds, crons and workers get a lower CPU/disk share than websites so they never slow sites down.
 
 **Backups**
-- Full archives (AES-256-GCM encrypted on the server) or incremental (restic, deduplicated, encrypted).
+- Full archives (AES-256-GCM, encrypted on the server) or incremental (restic: deduplicated, encrypted with restic's own AES-256-CTR + Poly1305-AES).
 - One or two destinations at once: Cloudflare R2, Backblaze B2, Hetzner Object Storage, Wasabi, AWS S3, MinIO.
 - Hourly/daily/weekly schedules, retention, restore; the storage provider only sees ciphertext.
 
