@@ -5,7 +5,7 @@
 // before every reload, so a bad change never replaces a working config.
 
 import { env, fsPath, paths } from "../shared/config.ts";
-import { apps as appStore, settings, sites as siteStore, type App, type Site } from "./state.ts";
+import { apps as appStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
 const CLOUDFLARE_RANGES = [
@@ -58,6 +58,55 @@ export function activePort(a: App): number {
   return a.active_slot === "b" ? a.port_b : a.port_a;
 }
 
+export const phpSocket = (site: string) => `${paths.phpRun}/${site}/fpm.sock`;
+
+/** Host -> path routes of an app, pointing at the active slot of each web process. */
+export function appRoutes(a: App): Map<string, Route[]> {
+  const out = new Map<string, Route[]>();
+  const add = (host: string, path: string, port: number) => out.set(host, [...(out.get(host) ?? []), { path, upstream: `127.0.0.1:${port}` }]);
+  if (a.kind === "external") {
+    for (const d of a.domains) add(d, "/", activePort(a));
+    return out;
+  }
+  for (const p of procsOf(a)) {
+    if (!p.port_a) continue;
+    const port = a.active_slot === "b" ? p.port_b : p.port_a;
+    for (const r of p.routes) {
+      const i = r.indexOf("/");
+      add(i < 0 ? r : r.slice(0, i), i < 0 ? "/" : r.slice(i), port);
+    }
+  }
+  return out;
+}
+
+/** Path-prefix handles, most specific first; "/" is the fallback. */
+function routeLines(routes: Route[], notFound = false): string[] {
+  const sorted = [...routes].sort((x, y) => y.path.length - x.path.length);
+  const out: string[] = [];
+  sorted.forEach((r, i) => {
+    if (r.path === "/") return;
+    const prefix = r.path.replace(/\/$/, "");
+    out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, `\t\treverse_proxy ${r.upstream}`, "\t}");
+  });
+  const root = sorted.find((r) => r.path === "/");
+  if (root) out.push("\thandle {", `\t\treverse_proxy ${root.upstream}`, "\t}");
+  else if (notFound) out.push("\thandle {", "\t\trespond 404", "\t}");
+  return out;
+}
+
+// Never served from a PHP site: dotfiles (.env, .git, .htaccess), dumps and
+// backups, composer manifests, and PHP inside WordPress uploads.
+const PHP_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp|ini|log|sh|env|dist|config)$|/composer\.(json|lock)$|/wp-content/uploads/.*\.(php\d?|phtml|phar)$)`;
+
+function phpLines(site: Site): string[] {
+  const out = [`\troot * ${site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${PHP_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404"];
+  if (site.deny_paths.length) {
+    out.push(`\t@pano_deny_dirs path ${site.deny_paths.flatMap((p) => (p === "/" ? ["*"] : [p, `${p}/*`])).join(" ")}`, "\trespond @pano_deny_dirs 404");
+  }
+  out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`, "\tfile_server");
+  return out;
+}
+
 export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string> }): string {
   const { settings: s } = input;
   const out: string[] = [
@@ -107,16 +156,27 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
   }
 
   for (const a of input.apps) {
-    if (!a.domains.length || (a.kind === "managed" && !a.active_slot)) continue;
-    out.push(
-      `${siteAddresses(a.domains)} {`,
-      "\timport pano_common",
-      ...tlsLine(`app-${a.name}`, input.certs.has(`app-${a.name}`), false),
-      `\treverse_proxy 127.0.0.1:${activePort(a)}`,
-      ...logBlock(`app-${a.name}`),
-      "}",
-      "",
-    );
+    if (a.kind === "managed" && !a.active_slot) continue;
+    // Hosts with the same routes share one block (example.com, www.example.com).
+    const groups = new Map<string, { hosts: string[]; routes: Route[] }>();
+    for (const [host, routes] of appRoutes(a)) {
+      const key = JSON.stringify([...routes].sort((x, y) => x.path.localeCompare(y.path)));
+      const g = groups.get(key) ?? { hosts: [], routes };
+      g.hosts.push(host);
+      groups.set(key, g);
+    }
+    for (const { hosts, routes } of groups.values()) {
+      const single = routes.length === 1 && routes[0]!.path === "/";
+      out.push(
+        `${siteAddresses(hosts)} {`,
+        "\timport pano_common",
+        ...tlsLine(`app-${a.name}`, input.certs.has(`app-${a.name}`), hosts.some((h) => h.includes("*"))),
+        ...(single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true)),
+        ...logBlock(`app-${a.name}`),
+        "}",
+        "",
+      );
+    }
   }
 
   for (const site of input.sites) {
@@ -129,15 +189,10 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
       out.push(`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`);
     } else if (site.kind === "static") {
       out.push(`\troot * ${site.root}`, "\tfile_server");
+    } else if (site.kind === "php") {
+      out.push(...phpLines(site));
     } else {
-      const routes = [...site.routes].sort((x, y) => y.path.length - x.path.length);
-      routes.forEach((r, i) => {
-        if (r.path === "/") return;
-        const prefix = r.path.replace(/\/$/, "");
-        out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, `\t\treverse_proxy ${r.upstream}`, "\t}");
-      });
-      const root = routes.find((r) => r.path === "/");
-      if (root) out.push("\thandle {", `\t\treverse_proxy ${root.upstream}`, "\t}");
+      out.push(...routeLines(site.routes));
     }
     out.push(...logBlock(`site-${site.name}`), "}", "");
   }

@@ -14,6 +14,8 @@ export type RunOptions = {
   cwd?: string;
   env?: Record<string, string>;
   input?: string;
+  /** Real path of a file fed to stdin (opened by the agent, so the command needs no access to it). */
+  inputFile?: string;
   timeoutMs?: number;
   /** Streams combined output line by line (deploy logs). */
   onLine?: (line: string) => void;
@@ -44,7 +46,7 @@ export async function run(cmd: string[], o: RunOptions = {}): Promise<RunResult>
     proc = Bun.spawn(argv, {
       cwd: o.cwd,
       env: { ...BASE_ENV, ...o.env },
-      stdin: o.input !== undefined ? new TextEncoder().encode(o.input) : "ignore",
+      stdin: o.inputFile ? Bun.file(o.inputFile) : o.input !== undefined ? new TextEncoder().encode(o.input) : "ignore",
       stdout: o.quiet ? "ignore" : "pipe",
       stderr: o.quiet ? "ignore" : "pipe",
     });
@@ -129,18 +131,13 @@ export async function remove(abs: string) {
   await rm(fsPath(abs), { recursive: true, force: true });
 }
 
-const uidCache = new Map<string, { uid: number; gid: number }>();
-
+/** Not cached: users are deleted and recreated (app/site removal) and may come back with another uid. */
 export async function lookupUser(user: string): Promise<{ uid: number; gid: number } | null> {
-  const hit = uidCache.get(user);
-  if (hit) return hit;
   const passwd = await readText("/etc/passwd");
   const line = passwd?.split("\n").find((l) => l.startsWith(user + ":"));
   if (!line) return null;
   const [, , uid, gid] = line.split(":");
-  const ids = { uid: Number(uid), gid: Number(gid) };
-  uidCache.set(user, ids);
-  return ids;
+  return { uid: Number(uid), gid: Number(gid) };
 }
 
 async function chownTo(abs: string, owner: string) {

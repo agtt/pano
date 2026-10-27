@@ -20,6 +20,11 @@ export const paths = {
   configBackups: "/var/lib/pano/config-backups",
   logs: "/var/log/pano",
   apps: "/srv/pano/apps",
+  sites: "/srv/pano/sites",
+  phpEtc: "/etc/pano/php",
+  phpRun: "/run/pano-php",
+  /** Drop cPanel cpmove archives here (scp) to import them. */
+  imports: "/var/lib/pano/imports",
   opt: "/opt/pano",
   bin: "/opt/pano/bin",
   caddy: "/opt/pano/bin/caddy",

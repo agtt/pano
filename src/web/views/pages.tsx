@@ -17,12 +17,40 @@ export type SiteRow = {
   source: string;
   enabled: number;
   on_demand_tls: number;
+  deny_paths?: string[];
+  converted_from?: { kind: string; root: string; php_version: string } | null;
 };
+
+export type PhpVersion = { version: string; installed: boolean; inUse: boolean; eol: string };
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+function PhpSelect({ versions, current, name = "version" }: { versions: PhpVersion[]; current?: string; name?: string }) {
+  return (
+    <select name={name}>
+      {versions.map((x) => (
+        <option value={x.version} selected={x.version === current}>
+          PHP {x.version}
+          {x.installed ? "" : " (installs on first use)"}
+          {x.eol < today() ? " — end of life" : ""}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 export function SitesPage({ sites, csrf }: { sites: SiteRow[]; csrf: string }) {
   return (
     <div class="stack">
-      <Card title={t("Sites")} actions={<a class="btn primary" href="/sites/new">+ Site</a>}>
+      <Card
+        title={t("Sites")}
+        actions={
+          <div class="row">
+            <a class="btn primary" href="/sites/new-php">+ PHP</a>
+            <a class="btn" href="/sites/new">+ Site</a>
+          </div>
+        }
+      >
         {sites.length ? (
           <table>
             <thead>
@@ -39,7 +67,7 @@ export function SitesPage({ sites, csrf }: { sites: SiteRow[]; csrf: string }) {
               {sites.map((s) => (
                 <tr>
                   <td>
-                    <a href={`/sites/${s.name}`}>{s.name}</a> {s.source === "cyberpanel" ? <span class="tag">cyberpanel</span> : null}
+                    <a href={`/sites/${s.name}`}>{s.name}</a> {s.source !== "pano" ? <span class="tag">{s.source}</span> : null}
                   </td>
                   <td>
                     {s.kind}
@@ -69,7 +97,108 @@ export function SitesPage({ sites, csrf }: { sites: SiteRow[]; csrf: string }) {
   );
 }
 
-export function SiteForm({ site, csrf }: { site?: SiteRow; csrf: string }) {
+export function PhpSiteNew({ csrf, versions }: { csrf: string; versions: PhpVersion[] }) {
+  return (
+    <Card title="+ PHP site">
+      <p class="muted">
+        Own system user, own PHP-FPM pool (started on demand, never as root), files in <code>/srv/pano/sites/&lt;name&gt;/public</code>. PHP is installed the
+        first time a version is used. Hidden files, dumps, backups and PHP inside uploads are never served.
+      </p>
+      <form method="post" action="/sites/php" class="grid-form">
+        <Csrf token={csrf} />
+        <Field label="Name" name="name" required placeholder="example.com" />
+        <Field label="Domains" name="domains" required placeholder="example.com, www.example.com" />
+        <label class="field">
+          <span>PHP</span>
+          <PhpSelect versions={versions} current={versions[0]?.version} name="php_version" />
+        </label>
+        <div class="actions">
+          <button class="btn primary">{t("Create")}</button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versions: PhpVersion[]; logs: string }) {
+  return (
+    <>
+      <Card title={`PHP ${s.php_version}`}>
+        <form method="post" action={`/sites/${s.name}/php-version`} class="row">
+          <Csrf token={csrf} />
+          <PhpSelect versions={versions} current={s.php_version} />
+          <button class="btn">{t("Save")}</button>
+        </form>
+        <p class="muted small">
+          Files: <code>{s.root}</code> · user <code>site-{s.name.replace(/[^a-z0-9]/g, "-").slice(0, 27)}</code>. Upload over SFTP as root, then fix permissions.
+        </p>
+        <form method="post" action={`/sites/${s.name}/permissions`}>
+          <Csrf token={csrf} />
+          <button class="btn small">Fix permissions</button>
+        </form>
+        {s.deny_paths?.length ? (
+          <p class="small">
+            Blocked (from .htaccess): <code>{s.deny_paths.join("  ")}</code>
+          </p>
+        ) : null}
+      </Card>
+      <Card title={t("Logs")} actions={<a class="btn" href={`/sites/${s.name}`}>↻</a>}>
+        <pre class="log">{logs || "—"}</pre>
+      </Card>
+      {s.converted_from ? (
+        <Card title="Back to OpenLiteSpeed">
+          <p class="muted small">
+            Serves <code>{s.converted_from.root}</code> through OpenLiteSpeed again. Changes made since the move (uploads, posts written to files) stay in the
+            pano copy and are not copied back.
+          </p>
+          <form method="post" action={`/sites/${s.name}/revert`} class="row">
+            <Csrf token={csrf} />
+            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+            <button class="btn danger">Revert</button>
+          </form>
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
+function ConvertPanel({ s, csrf, versions }: { s: SiteRow; csrf: string; versions: PhpVersion[] }) {
+  const current = versions.find((x) => x.version === s.php_version && x.eol >= today()) ? s.php_version : versions[0]?.version;
+  return (
+    <Card title="Move to pano PHP">
+      <p class="muted small">
+        Copies <code>{s.root || "(no root)"}</code> into a new PHP site with its own user and pool; the original files and OpenLiteSpeed are not changed and you
+        can switch back. <code>.htaccess</code> is not read by the edge: directories closed with "deny from all" stay closed, other rules are listed after the move.
+      </p>
+      <form method="post" action={`/sites/${s.name}/convert`} class="row">
+        <Csrf token={csrf} />
+        <PhpSelect versions={versions} current={current} />
+        <button class="btn primary">Move</button>
+      </form>
+    </Card>
+  );
+}
+
+export function NoticePage({ title, items, back }: { title: string; items: string[]; back: string }) {
+  return (
+    <Card title={title}>
+      {items.length ? (
+        <ul class="warnings">
+          {items.map((w) => (
+            <li>{w}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>OK</p>
+      )}
+      <a class="btn" href={back}>
+        ←
+      </a>
+    </Card>
+  );
+}
+
+export function SiteForm({ site, csrf, versions = [], logs = "" }: { site?: SiteRow; csrf: string; versions?: PhpVersion[]; logs?: string }) {
   const s = site;
   return (
     <div class="stack">
@@ -77,16 +206,20 @@ export function SiteForm({ site, csrf }: { site?: SiteRow; csrf: string }) {
         <form method="post" action="/sites/save" class="grid-form">
           <Csrf token={csrf} />
           {s ? <input type="hidden" name="name" value={s.name} /> : <Field label="Name" name="name" required placeholder="example.com" />}
-          <label class="field">
-            <span>{t("Kind")}</span>
-            <select name="kind">
-              {["proxy", "static", "legacy"].map((k) => (
-                <option value={k} selected={s?.kind === k}>
-                  {k}
-                </option>
-              ))}
-            </select>
-          </label>
+          {s?.kind === "php" ? (
+            <input type="hidden" name="kind" value="php" />
+          ) : (
+            <label class="field">
+              <span>{t("Kind")}</span>
+              <select name="kind">
+                {["proxy", "static", "legacy"].map((k) => (
+                  <option value={k} selected={s?.kind === k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <Field label="Domains" name="domains" value={s?.domains.join(", ")} placeholder="example.com, www.example.com ( * = catch-all )" required />
           <Field label="Root directory" name="root" value={s?.root} placeholder="/srv/www/example (static)" />
           <label class="field wide">
@@ -106,9 +239,23 @@ export function SiteForm({ site, csrf }: { site?: SiteRow; csrf: string }) {
           </div>
         </form>
       </Card>
+      {s?.kind === "php" ? <PhpPanel s={s} csrf={csrf} versions={versions} logs={logs} /> : null}
+      {s?.kind === "legacy" && versions.length ? <ConvertPanel s={s} csrf={csrf} versions={versions} /> : null}
       {s ? (
         <Card title={t("Delete")} class="danger-zone">
-          <DangerForm action={`/sites/${s.name}/delete`} csrf={csrf} name={s.name} label={t("Delete")} />
+          <DangerForm
+            action={`/sites/${s.name}/delete`}
+            csrf={csrf}
+            name={s.name}
+            label={t("Delete")}
+            extra={
+              s.kind === "php" && !s.converted_from ? (
+                <label class="check">
+                  <input type="checkbox" name="removeFiles" value="1" /> also remove files and the system user
+                </label>
+              ) : null
+            }
+          />
         </Card>
       ) : null}
     </div>
@@ -336,7 +483,12 @@ export function BackupsPage(p: {
 
 // ---- runtimes --------------------------------------------------------------
 
-export function RuntimesPage(p: { csrf: string; installed: { runtime: string; version: string; inUse: boolean }[]; available: { node: { version: string; lts: string | false }[]; bun: string[] } | null }) {
+export function RuntimesPage(p: {
+  csrf: string;
+  installed: { runtime: string; version: string; inUse: boolean }[];
+  available: { node: { version: string; lts: string | false }[]; bun: string[] } | null;
+  php: PhpVersion[];
+}) {
   const have = new Set(p.installed.map((r) => `${r.runtime}@${r.version}`));
   const InstallBtn = ({ rt, ver, label }: { rt: string; ver: string; label?: string }) =>
     have.has(`${rt}@${ver}`) ? (
@@ -408,6 +560,40 @@ export function RuntimesPage(p: { csrf: string; installed: { runtime: string; ve
         ) : (
           <p class="muted">Could not reach nodejs.org / GitHub.</p>
         )}
+      </Card>
+      <Card title="PHP">
+        <p class="muted small">
+          Installed only when needed (Remi packages, signed). Each PHP site runs its own pool; nothing PHP runs without a PHP site. Patch releases arrive with OS
+          updates and pools are reloaded automatically.
+        </p>
+        <table class="compact">
+          {p.php.map((x) => (
+            <tr>
+              <td>PHP {x.version}</td>
+              <td class="muted small">{x.eol < today() ? <span class="tag">end of life {x.eol}</span> : `security fixes until ${x.eol}`}</td>
+              <td>{x.inUse ? <span class="tag">{t("In use")}</span> : null}</td>
+              <td>
+                {x.installed ? (
+                  x.inUse ? (
+                    <span class="badge good">{t("Installed")}</span>
+                  ) : (
+                    <form method="post" action="/runtimes/php/uninstall">
+                      <Csrf token={p.csrf} />
+                      <input type="hidden" name="version" value={x.version} />
+                      <button class="btn small danger">{t("Delete")}</button>
+                    </form>
+                  )
+                ) : (
+                  <form method="post" action="/runtimes/php/install">
+                    <Csrf token={p.csrf} />
+                    <input type="hidden" name="version" value={x.version} />
+                    <button class="btn small">{t("Install")}</button>
+                  </form>
+                )}
+              </td>
+            </tr>
+          ))}
+        </table>
       </Card>
     </div>
   );
@@ -529,10 +715,161 @@ export type ImportPlanView = {
   warnings: string[];
 };
 
-export function ImportPage(p: { csrf: string; plan?: ImportPlanView; snippet: string; existing: Set<string> }) {
+export type CpPlanView = {
+  archive: string;
+  account: string;
+  mainDomain: string;
+  sites: { name: string; domains: string[]; php: string; exists: boolean; warnings: string[] }[];
+  databases: { name: string; bytes: number; exists: boolean }[];
+  users: { user: string; hashOk: boolean; dbs: Record<string, string[]>; exists: boolean }[];
+  notMigrated: string[];
+  warnings: string[];
+};
+export type CpReportView = { sites: string[]; databases: string[]; users: { user: string; password?: string }[]; warnings: string[] };
+
+function CpanelImport(p: { csrf: string; archives: { file: string; bytes: number }[]; plan?: CpPlanView; report?: CpReportView }) {
+  const plan = p.plan;
+  return (
+    <>
+      <Card title={`${t("Import")} · cPanel`}>
+        <p class="muted">
+          Copy a full account backup (<code>cpmove-USER.tar.gz</code>, from <code>/scripts/pkgacct USER</code> or cPanel → Backup → Full Backup) to{" "}
+          <code>/var/lib/pano/imports/</code> on this server. Each domain becomes a PHP site; databases and their users keep their passwords. Nothing that
+          already exists here is overwritten.
+        </p>
+        {p.archives.length ? (
+          <table class="compact">
+            {p.archives.map((a) => (
+              <tr>
+                <td>
+                  <code>{a.file}</code>
+                </td>
+                <td class="muted">{fmtBytes(a.bytes)}</td>
+                <td>
+                  <form method="get" action="/import">
+                    <input type="hidden" name="cpanel" value={a.file} />
+                    <button class="btn small">{t("Scan")}</button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </table>
+        ) : (
+          <p class="muted small">No archives found.</p>
+        )}
+      </Card>
+      {p.report ? (
+        <Card title="cPanel import done">
+          <p>
+            Sites: {p.report.sites.join(", ") || "—"} · Databases: {p.report.databases.join(", ") || "—"}
+          </p>
+          {p.report.users.length ? (
+            <table class="compact">
+              {p.report.users.map((u) => (
+                <tr>
+                  <td>
+                    <code>{u.user}</code>
+                  </td>
+                  <td>{u.password ? <code data-copy>{u.password}</code> : <span class="muted">original password kept</span>}</td>
+                </tr>
+              ))}
+            </table>
+          ) : null}
+          {p.report.users.some((u) => u.password) ? <p class="small">New passwords are shown only now: put them in the site's config.</p> : null}
+          {p.report.warnings.length ? (
+            <ul class="warnings">
+              {p.report.warnings.map((w) => (
+                <li>{w}</li>
+              ))}
+            </ul>
+          ) : null}
+        </Card>
+      ) : null}
+      {plan ? (
+        <form method="post" action="/import/cpanel/apply" class="stack">
+          <Csrf token={p.csrf} />
+          <input type="hidden" name="file" value={plan.archive} />
+          <Card title={`cPanel: ${plan.account} (${plan.mainDomain})`}>
+            {plan.warnings.length ? (
+              <ul class="warnings">
+                {plan.warnings.map((w) => (
+                  <li>{w}</li>
+                ))}
+              </ul>
+            ) : null}
+            <h3>{t("Sites")}</h3>
+            <table>
+              {plan.sites.map((s) => (
+                <tr>
+                  <td>
+                    <input type="checkbox" name="sites" value={s.name} checked={!s.exists} disabled={s.exists} />
+                  </td>
+                  <td>
+                    {s.name} {s.exists ? <span class="tag">exists</span> : null}
+                    {s.warnings.length ? (
+                      <ul class="warnings small">
+                        {s.warnings.map((w) => (
+                          <li>{w}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </td>
+                  <td>PHP {s.php}</td>
+                  <td class="small">{s.domains.join(", ")}</td>
+                </tr>
+              ))}
+            </table>
+            <h3>{t("Databases")}</h3>
+            <table class="compact">
+              {plan.databases.map((d) => (
+                <tr>
+                  <td>
+                    <input type="checkbox" name="databases" value={d.name} checked={!d.exists} disabled={d.exists} />
+                  </td>
+                  <td>
+                    {d.name} {d.exists ? <span class="tag">exists</span> : null}
+                  </td>
+                  <td class="muted">{fmtBytes(d.bytes)}</td>
+                  <td class="small">
+                    {plan.users
+                      .filter((u) => u.dbs[d.name])
+                      .map((u) => `${u.user}${u.hashOk ? "" : " (new password)"}${u.exists ? " (exists, skipped)" : ""}`)
+                      .join(", ")}
+                  </td>
+                </tr>
+              ))}
+            </table>
+            <h3>Not migrated</h3>
+            <ul class="warnings">
+              {plan.notMigrated.map((n) => (
+                <li>
+                  <pre class="small">{n}</pre>
+                </li>
+              ))}
+            </ul>
+          </Card>
+          <div>
+            <button class="btn primary">{t("Import selected")}</button>
+          </div>
+        </form>
+      ) : null}
+    </>
+  );
+}
+
+export function ImportPage(p: {
+  csrf: string;
+  plan?: ImportPlanView;
+  snippet: string;
+  existing: Set<string>;
+  archives: { file: string; bytes: number }[];
+  cpPlan?: CpPlanView;
+  cpReport?: CpReportView;
+}) {
   const plan = p.plan;
   return (
     <div class="stack">
+      <CpanelImport csrf={p.csrf} archives={p.archives} plan={p.cpPlan} report={p.cpReport} />
       <Card title={`${t("Import")} · CyberPanel`}>
         <p class="muted">
           Reads OpenLiteSpeed and CyberPanel configuration and running services. Scanning changes nothing; importing only writes pano's own state. CyberPanel keeps

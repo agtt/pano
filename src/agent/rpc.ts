@@ -1,9 +1,11 @@
 // The complete list of things the web UI can ask the root agent to do. Each
 // handler validates its own input; there is no generic "run command" method.
 
-import { v } from "../shared/validate.ts";
+import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, v } from "../shared/validate.ts";
 import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
+import * as cpanel from "./cpanel.ts";
+import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
 import * as importer from "./importer.ts";
@@ -32,12 +34,12 @@ export const methods: Record<string, Handler> = {
   },
   "apps.create": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
-    appsOps.assertDomainsFree(input.domains, {}, allDomains());
+    appsOps.assertDomainsFree(appsOps.inputHosts(input), {}, allDomains());
     return hideSecret(await appsOps.createApp(input, actor));
   },
   "apps.update": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
-    appsOps.assertDomainsFree(input.domains, { app: input.name }, allDomains());
+    appsOps.assertDomainsFree(appsOps.inputHosts(input), { app: input.name }, allDomains());
     await appsOps.updateApp(input.name, input, actor);
   },
   "apps.delete": (p, actor) => {
@@ -85,16 +87,36 @@ export const methods: Record<string, Handler> = {
     audit(actor, "runtime.uninstall", { runtime: p.runtime, version: p.version });
   },
 
+  // ---- PHP (installed per version, only when a site needs it)
+  "php.versions": async () => {
+    const used = new Set(sites.list().filter((s) => s.kind === "php").map((s) => s.php_version));
+    const have = new Set(await php.installedPhp());
+    return PHP_VERSIONS.map((ver) => ({ version: ver, installed: have.has(ver), inUse: used.has(ver), eol: PHP_EOL[ver] }));
+  },
+  "php.install": (p, actor) => php.installPhp(v.phpVersion(p.version), actor),
+  "php.uninstall": (p, actor) => php.uninstallPhp(v.phpVersion(p.version), actor),
+
   // ---- sites (routing entries that are not managed apps)
   "sites.list": () => sites.list(),
+  "sites.createPhp": async (p, actor) => {
+    const domains = parseDomains(p.domains);
+    appsOps.assertDomainsFree(domains, { site: v.siteName(p.name) }, allDomains());
+    return php.createPhpSite({ name: p.name, domains, version: p.php_version || DEFAULT_PHP }, actor);
+  },
+  "sites.phpVersion": (p, actor) => php.setPhpVersion(p.name, p.version, actor),
+  "sites.convertPhp": (p, actor) => php.convertLegacy(p.name, p.version, actor),
+  "sites.revertPhp": (p, actor) => php.revertConvert(p.name, actor),
+  "sites.fixPermissions": async (p, actor) => {
+    const warnings = await php.fixPermissions(v.siteName(p.name));
+    audit(actor, "php.site.permissions", { name: p.name });
+    return warnings;
+  },
+  "sites.logs": (p) => php.phpLogs(p.name),
   "sites.save": async (p, actor) => {
-    const name = String(p.name ?? "").toLowerCase();
-    if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(name)) throw new Error("invalid site name");
+    const name = v.siteName(p.name);
     const kind = p.kind as Site["kind"];
-    if (!["legacy", "static", "proxy"].includes(kind)) throw new Error("invalid kind");
-    const domains = (Array.isArray(p.domains) ? p.domains : String(p.domains ?? "").split(/[\s,]+/)).filter(Boolean);
-    const clean = domains.map((d: string) => (d === "*" ? "*" : v.domain(d)));
-    if (!clean.length) throw new Error("at least one domain");
+    if (!["legacy", "static", "proxy", "php"].includes(kind)) throw new Error("invalid kind");
+    const clean = parseDomains(p.domains);
     appsOps.assertDomainsFree(clean, { site: name }, allDomains());
     const routes = kind === "proxy"
       ? String(p.routes ?? "").split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -106,6 +128,8 @@ export const methods: Record<string, Handler> = {
     const askUrl = String(p.ask_url ?? "").trim();
     if (askUrl && !/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(askUrl)) throw new Error("ask URL must be http://127.0.0.1:PORT/path");
     const prev = sites.get(name);
+    // PHP sites need a user, pool and unit: they come from sites.createPhp / convertPhp, then only change here.
+    if ((kind === "php") !== (prev?.kind === "php")) throw new Error("use the PHP site form to create or convert PHP sites");
     sites.upsert({
       name,
       kind,
@@ -125,15 +149,21 @@ export const methods: Record<string, Handler> = {
     audit(actor, "site.save", { name });
   },
   "sites.toggle": async (p, actor) => {
-    sites.setEnabled(String(p.name), !!p.enabled);
+    const site = sites.get(v.siteName(p.name));
+    if (!site) throw new Error("not found");
+    sites.setEnabled(site.name, !!p.enabled);
+    if (site.kind === "php") await php.setPhpEnabled(site, !!p.enabled);
     await applyEdge();
-    audit(actor, "site.toggle", { name: p.name, enabled: !!p.enabled });
+    audit(actor, "site.toggle", { name: site.name, enabled: !!p.enabled });
   },
   "sites.delete": async (p, actor) => {
     if (p.confirm !== p.name) throw new Error("type the site name to confirm");
-    sites.remove(String(p.name));
+    const site = sites.get(v.siteName(p.name));
+    if (!site) throw new Error("not found");
+    if (site.kind === "php") await php.deletePhpSite(site, !!p.removeFiles);
+    sites.remove(site.name);
     await applyEdge();
-    audit(actor, "site.delete", { name: p.name });
+    audit(actor, "site.delete", { name: site.name, removeFiles: !!p.removeFiles });
   },
 
   // ---- edge
@@ -194,7 +224,19 @@ export const methods: Record<string, Handler> = {
   // ---- import from CyberPanel
   "import.scan": () => importer.scan(),
   "import.apply": (p, actor) => importer.apply({ sites: (p.sites ?? []).map(String), apps: (p.apps ?? []).map(String) }, actor),
+
+  // ---- import from cPanel backups (cpmove archives in /var/lib/pano/imports)
+  "import.cpanel.list": () => cpanel.listArchives(),
+  "import.cpanel.scan": (p) => cpanel.scanArchive(String(p.file ?? "")),
+  "import.cpanel.apply": (p, actor) =>
+    cpanel.applyArchive(String(p.file ?? ""), { sites: (p.sites ?? []).map(String), databases: (p.databases ?? []).map(String) }, actor),
 };
+
+function parseDomains(x: unknown): string[] {
+  const list = (Array.isArray(x) ? x : String(x ?? "").split(/[\s,]+/)).filter(Boolean).map(String);
+  if (!list.length) throw new Error("at least one domain");
+  return [...new Set(list.map((d) => (d === "*" ? "*" : v.domain(d))))];
+}
 
 function hideSecret<T extends { webhook_secret?: string }>(a: T): T {
   return { ...a, webhook_secret: a.webhook_secret ? "set" : "" };

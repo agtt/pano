@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { APP_PORT_BASE, fsPath, paths } from "../shared/config.ts";
+import type { ProcessSpec } from "../shared/validate.ts";
 
 export type App = {
   name: string;
@@ -28,16 +29,26 @@ export type App = {
   /** external apps: upstream address and the unit that runs them */
   upstream: string;
   external_unit: string;
+  /** Several processes from one build (monorepos). Empty: the app is a single process. */
+  processes: Process[];
+  /** on-demand TLS for a "*" route: local URL asked whether a host may get a certificate */
+  ask_url: string;
   created_at: number;
   updated_at: number;
 };
+
+/** A process of a multi-process app. Workers have no routes and port 0. */
+export type Process = ProcessSpec & { port_a: number; port_b: number };
 
 export type Route = { path: string; upstream: string };
 
 export type Site = {
   name: string;
-  /** legacy: served by the old OpenLiteSpeed on localhost (PHP, WordPress, rewrite rules) */
-  kind: "legacy" | "static" | "proxy";
+  /**
+   * legacy: served by the old OpenLiteSpeed on localhost (PHP, WordPress, rewrite rules)
+   * php: pano's own PHP-FPM (per-site user and pool), started only for sites that exist
+   */
+  kind: "legacy" | "static" | "proxy" | "php";
   /** "*" means catch-all: any host that reaches the server (needs on_demand_tls). */
   domains: string[];
   root: string;
@@ -48,9 +59,13 @@ export type Site = {
   php_version: string;
   tls_cert: string;
   tls_key: string;
-  source: "cyberpanel" | "pano";
+  source: "cyberpanel" | "cpanel" | "pano";
   enabled: number;
   on_demand_tls: number;
+  /** php sites: path prefixes answered with 404 (from "deny from all" .htaccess files) */
+  deny_paths: string[];
+  /** set when a legacy site was converted to php: what to go back to */
+  converted_from: { kind: Site["kind"]; root: string; php_version: string } | null;
   created_at: number;
 };
 
@@ -182,16 +197,50 @@ export function state(): Database {
   db = new Database(file, { create: true, strict: true });
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Columns added after the first release; CREATE TABLE IF NOT EXISTS does not add them to old databases. */
+const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
+  ["apps", "processes", "TEXT NOT NULL DEFAULT '[]'"],
+  ["apps", "ask_url", "TEXT NOT NULL DEFAULT ''"],
+  ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
+  ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
+];
+
+function migrate(d: Database) {
+  for (const [table, column, def] of ADDED_COLUMNS) {
+    const cols = d.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+  }
 }
 
 const now = () => Math.floor(Date.now() / 1000);
 
 function decodeApp(row: any): App {
-  return { ...row, domains: JSON.parse(row.domains) };
+  return { ...row, domains: JSON.parse(row.domains), processes: JSON.parse(row.processes || "[]") };
 }
 function decodeSite(row: any): Site {
-  return { ...row, domains: JSON.parse(row.domains), routes: JSON.parse(row.routes) };
+  return {
+    ...row,
+    domains: JSON.parse(row.domains),
+    routes: JSON.parse(row.routes),
+    deny_paths: JSON.parse(row.deny_paths || "[]"),
+    converted_from: row.converted_from ? JSON.parse(row.converted_from) : null,
+  };
+}
+
+/** The processes an app runs. A single-process app is one unnamed process using the app's own fields. */
+export function procsOf(app: App): Process[] {
+  if (app.processes?.length) return app.processes;
+  return [{ name: "", dir: "", routes: app.domains, memory_mb: app.memory_mb, start: app.start_cmd, port_a: app.port_a, port_b: app.port_b }];
+}
+
+/** Host names an app answers for (without route paths). */
+export function appHosts(app: App): string[] {
+  if (app.kind === "external") return app.domains;
+  return [...new Set(procsOf(app).flatMap((p) => p.routes.map((r) => r.split("/")[0]!)))];
 }
 
 export const apps = {
@@ -204,7 +253,7 @@ export const apps = {
   },
   insert(a: Partial<App> & { name: string }) {
     const t = now();
-    const row = { ...a, domains: JSON.stringify(a.domains ?? []), created_at: t, updated_at: t };
+    const row = { ...a, domains: JSON.stringify(a.domains ?? []), processes: JSON.stringify(a.processes ?? []), created_at: t, updated_at: t };
     const cols = Object.keys(row);
     state()
       .query(`INSERT INTO apps (${cols.join(",")}) VALUES (${cols.map((c) => "$" + c).join(",")})`)
@@ -213,6 +262,7 @@ export const apps = {
   update(name: string, patch: Partial<App>) {
     const row: Record<string, unknown> = { ...patch, updated_at: now() };
     if (patch.domains) row.domains = JSON.stringify(patch.domains);
+    if (patch.processes) row.processes = JSON.stringify(patch.processes);
     delete row.name;
     const sets = Object.keys(row).map((c) => `${c} = $${c}`);
     state().query(`UPDATE apps SET ${sets.join(", ")} WHERE name = $name`).run({ ...row, name } as any);
@@ -223,7 +273,10 @@ export const apps = {
   /** Two consecutive free ports for a new app's blue/green slots. */
   nextPorts(taken: number[] = []): [number, number] {
     const used = new Set<number>(taken);
-    for (const a of apps.list()) used.add(a.port_a), used.add(a.port_b);
+    for (const a of apps.list()) {
+      used.add(a.port_a), used.add(a.port_b);
+      for (const p of a.processes) used.add(p.port_a), used.add(p.port_b);
+    }
     let p = APP_PORT_BASE;
     while (used.has(p) || used.has(p + 1)) p += 2;
     return [p, p + 1];
@@ -238,15 +291,25 @@ export const sites = {
     const row = state().query("SELECT * FROM sites WHERE name = ?").get(name);
     return row ? decodeSite(row) : null;
   },
-  upsert(s: Omit<Site, "created_at">) {
+  upsert(s: Omit<Site, "created_at" | "deny_paths" | "converted_from"> & Partial<Pick<Site, "deny_paths" | "converted_from">>) {
+    const prev = sites.get(s.name);
+    const deny = s.deny_paths ?? prev?.deny_paths ?? [];
+    const from = s.converted_from !== undefined ? s.converted_from : (prev?.converted_from ?? null);
     state()
       .query(
-        `INSERT INTO sites (name, kind, domains, root, routes, ask_url, php_version, tls_cert, tls_key, source, enabled, on_demand_tls, created_at)
-         VALUES ($name, $kind, $domains, $root, $routes, $ask_url, $php_version, $tls_cert, $tls_key, $source, $enabled, $on_demand_tls, $created_at)
+        `INSERT INTO sites (name, kind, domains, root, routes, ask_url, php_version, tls_cert, tls_key, source, enabled, on_demand_tls, deny_paths, converted_from, created_at)
+         VALUES ($name, $kind, $domains, $root, $routes, $ask_url, $php_version, $tls_cert, $tls_key, $source, $enabled, $on_demand_tls, $deny_paths, $converted_from, $created_at)
          ON CONFLICT(name) DO UPDATE SET kind=$kind, domains=$domains, root=$root, routes=$routes, ask_url=$ask_url, php_version=$php_version,
-           tls_cert=$tls_cert, tls_key=$tls_key, source=$source, enabled=$enabled, on_demand_tls=$on_demand_tls`,
+           tls_cert=$tls_cert, tls_key=$tls_key, source=$source, enabled=$enabled, on_demand_tls=$on_demand_tls, deny_paths=$deny_paths, converted_from=$converted_from`,
       )
-      .run({ ...s, domains: JSON.stringify(s.domains), routes: JSON.stringify(s.routes), created_at: now() } as any);
+      .run({
+        ...s,
+        domains: JSON.stringify(s.domains),
+        routes: JSON.stringify(s.routes),
+        deny_paths: JSON.stringify(deny),
+        converted_from: from ? JSON.stringify(from) : "",
+        created_at: now(),
+      } as any);
   },
   setEnabled(name: string, enabled: boolean) {
     state().query("UPDATE sites SET enabled = ? WHERE name = ?").run(enabled ? 1 : 0, name);

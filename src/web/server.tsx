@@ -14,7 +14,21 @@ import js from "./static/app.js" with { type: "text" };
 import { AppDetail, AppForm, AppsPage, type AppRow } from "./views/apps.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
 import { Card, Layout } from "./views/layout.tsx";
-import { ActivityPage, BackupsPage, DatabasesPage, EdgePage, ImportPage, RuntimesPage, SecurityPage, SiteForm, SitesPage } from "./views/pages.tsx";
+import {
+  ActivityPage,
+  BackupsPage,
+  DatabasesPage,
+  EdgePage,
+  ImportPage,
+  NoticePage,
+  PhpSiteNew,
+  RuntimesPage,
+  SecurityPage,
+  SiteForm,
+  SitesPage,
+  type CpPlanView,
+  type CpReportView,
+} from "./views/pages.tsx";
 
 type Env = { Variables: { s: Session } };
 
@@ -204,11 +218,51 @@ export function createWebApp() {
   // ---- sites
   app.get("/sites", async (c) => page(c, t("Sites"), <SitesPage sites={await call("sites.list")} csrf={c.get("s").csrf} />));
   app.get("/sites/new", (c) => page(c, t("Sites"), <SiteForm csrf={c.get("s").csrf} />));
+  app.get("/sites/new-php", async (c) => page(c, t("Sites"), <PhpSiteNew csrf={c.get("s").csrf} versions={await call("php.versions")} />));
   app.get("/sites/:name", async (c) => {
     const site = (await call<any[]>("sites.list")).find((s) => s.name === c.req.param("name"));
     if (!site) return c.redirect("/sites");
-    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} />);
+    const php = site.kind === "php" || site.kind === "legacy";
+    const [versions, logs] = await Promise.all([
+      php ? call("php.versions") : [],
+      site.kind === "php" ? call<string>("sites.logs", { name: site.name }).catch(() => "") : "",
+    ]);
+    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} />);
   });
+  app.post("/sites/php", act("/sites/new-php", async (c, f) => {
+    const r = await call("sites.createPhp", { name: f.name, domains: f.domains, php_version: f.php_version }, actor(c));
+    return `/sites/${r.name}`;
+  }));
+  app.post("/sites/:name/php-version", act("/sites", async (c, f) => {
+    const name = c.req.param("name")!;
+    await call("sites.phpVersion", { name, version: f.version }, actor(c));
+    return `/sites/${name}`;
+  }));
+  app.post("/sites/:name/permissions", async (c) => {
+    const name = c.req.param("name");
+    try {
+      const warnings = await call<string[]>("sites.fixPermissions", { name }, actor(c));
+      return page(c, name, <NoticePage title="Permissions fixed" items={warnings} back={`/sites/${name}`} />);
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}`, e));
+    }
+  });
+  app.post("/sites/:name/convert", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      const r = await call<{ warnings: string[] }>("sites.convertPhp", { name, version: f.version }, actor(c));
+      return page(c, name, <NoticePage title={`${name} now runs on pano PHP`} items={r.warnings} back={`/sites/${name}`} />);
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}`, e));
+    }
+  });
+  app.post("/sites/:name/revert", act("/sites", async (c, f) => {
+    const name = c.req.param("name")!;
+    needOtp(c, f.otp);
+    await call("sites.revertPhp", { name }, actor(c));
+    return `/sites/${name}`;
+  }));
   app.post("/sites/save", act("/sites", async (c, f) => {
     await call("sites.save", { ...f, autoTls: f.autoTls === "1" }, actor(c));
     return "/sites";
@@ -218,7 +272,7 @@ export function createWebApp() {
   }));
   app.post("/sites/:name/delete", act("/sites", async (c, f) => {
     needOtp(c, f.otp);
-    await call("sites.delete", { name: c.req.param("name"), confirm: f.confirm }, actor(c));
+    await call("sites.delete", { name: c.req.param("name"), confirm: f.confirm, removeFiles: f.removeFiles === "1" }, actor(c));
     return "/sites";
   }));
 
@@ -295,9 +349,16 @@ export function createWebApp() {
 
   // ---- runtimes
   app.get("/runtimes", async (c) => {
-    const [installed, available] = await Promise.all([call("runtimes.list"), call("runtimes.available").catch(() => null)]);
-    return page(c, t("Runtimes"), <RuntimesPage csrf={c.get("s").csrf} installed={installed} available={available} />);
+    const [installed, available, php] = await Promise.all([call("runtimes.list"), call("runtimes.available").catch(() => null), call("php.versions")]);
+    return page(c, t("Runtimes"), <RuntimesPage csrf={c.get("s").csrf} installed={installed} available={available} php={php} />);
   });
+  app.post("/runtimes/php/install", act("/runtimes", async (c, f) => {
+    await call("php.install", { version: f.version }, actor(c));
+    return `PHP ${f.version} installed`;
+  }));
+  app.post("/runtimes/php/uninstall", act("/runtimes", async (c, f) => {
+    await call("php.uninstall", { version: f.version }, actor(c));
+  }));
   app.post("/runtimes/install", act("/runtimes", async (c, f) => {
     await call("runtimes.install", { runtime: f.runtime, version: f.version }, actor(c));
     return `${f.runtime} ${f.version} installed`;
@@ -338,11 +399,38 @@ export function createWebApp() {
 
   // ---- security, import, activity
   app.get("/security", async (c) => page(c, t("Security"), <SecurityPage findings={await call("system.audit")} />));
-  app.get("/import", async (c) => {
-    const plan = c.req.query("scan") ? await call("import.scan") : undefined;
-    const [apps, sites] = await Promise.all([call<any[]>("apps.list"), call<any[]>("sites.list")]);
+  const importPage = async (c: Context<Env>, cpReport?: CpReportView) => {
+    const cpFile = c.req.query("cpanel");
+    const [plan, cpPlan, archives, apps, sites] = await Promise.all([
+      c.req.query("scan") ? call("import.scan") : undefined,
+      cpFile ? call<CpPlanView>("import.cpanel.scan", { file: cpFile }) : undefined,
+      call("import.cpanel.list").catch(() => []),
+      call<any[]>("apps.list"),
+      call<any[]>("sites.list"),
+    ]);
     const existing = new Set([...apps.map((a) => `app:${a.name}`), ...sites.map((s) => `site:${s.name}`)]);
-    return page(c, t("Import"), <ImportPage csrf={c.get("s").csrf} plan={plan} snippet={WP_SNIPPET} existing={existing} />);
+    return page(
+      c,
+      t("Import"),
+      <ImportPage csrf={c.get("s").csrf} plan={plan} snippet={WP_SNIPPET} existing={existing} archives={archives} cpPlan={cpPlan} cpReport={cpReport} />,
+    );
+  };
+  app.get("/import", async (c) => {
+    try {
+      return await importPage(c);
+    } catch (e) {
+      return c.redirect(err("/import", e));
+    }
+  });
+  app.post("/import/cpanel/apply", async (c) => {
+    const f = await form(c);
+    const list = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
+    try {
+      const report = await call<CpReportView>("import.cpanel.apply", { file: f.file, sites: list(f.sites), databases: list(f.databases) }, actor(c));
+      return importPage(c, report);
+    } catch (e) {
+      return c.redirect(err("/import", e));
+    }
   });
   app.post("/import/apply", act("/import", async (c, f) => {
     const list = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);

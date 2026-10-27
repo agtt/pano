@@ -7,7 +7,8 @@ import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startScheduler } from "./backup.ts";
 import { methods } from "./rpc.ts";
-import { apps, backups, deploys, sites, state } from "./state.ts";
+import { reloadUpdatedPhp } from "./php.ts";
+import { appHosts, apps, backups, deploys, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 
 export async function startAgent() {
@@ -57,7 +58,11 @@ export async function startAgent() {
     async fetch(req) {
       const domain = new URL(req.url).searchParams.get("domain")?.toLowerCase() ?? "";
       if (!/^[a-z0-9.-]{1,253}$/.test(domain)) return new Response("bad", { status: 400 });
-      const all = [...apps.list().map((a) => a.domains), ...sites.list().filter((s) => s.enabled).map((s) => s.domains)].flat();
+      const owners = [
+        ...apps.list().map((a) => ({ hosts: appHosts(a), ask: a.ask_url })),
+        ...sites.list().filter((s) => s.enabled).map((s) => ({ hosts: s.domains, ask: s.ask_url })),
+      ];
+      const all = owners.flatMap((o) => o.hosts);
       if (all.includes(domain)) return new Response("ok");
       const matchesWildcard = (d: string) => {
         if (!d.startsWith("*.") || !domain.endsWith(d.slice(1))) return false;
@@ -65,8 +70,8 @@ export async function startAgent() {
         return /^[a-z0-9-]+$/.test(label);
       };
       if (all.some(matchesWildcard)) return new Response("ok");
-      for (const s of sites.list().filter((x) => x.enabled && x.domains.includes("*") && x.ask_url)) {
-        const r = await fetch(`${s.ask_url}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+      for (const o of owners.filter((x) => x.hosts.includes("*") && x.ask)) {
+        const r = await fetch(`${o.ask}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
         if (r?.ok) return new Response("ok");
       }
       return new Response("no", { status: 403 });
@@ -74,5 +79,7 @@ export async function startAgent() {
   });
 
   startScheduler();
+  // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.
+  setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);
 }

@@ -7,7 +7,7 @@ import { readServerConfig, readVhost, type OlsVhost } from "./ols.ts";
 import { apps, audit, sites, type App, type Route, type Site } from "./state.ts";
 import { exists, readText, run } from "./sys.ts";
 
-export type ImportSite = Omit<Site, "created_at"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
+export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
 export type ImportApp = Pick<App, "name" | "external_unit" | "upstream"> & { ports: number[]; process: string };
 export type ImportPlan = {
   cyberpanel: { installed: boolean; version: string; services: Record<string, string> };
@@ -177,6 +177,8 @@ export async function apply(select: { sites: string[]; apps: string[] }, actor: 
   let appCount = 0;
   for (const s of plan.sites.filter((x) => select.sites.includes(x.name))) {
     const { wordpress, wpProxyReady, databases, ...site } = s;
+    // Already moved to pano's PHP: a re-import must not send it back to OpenLiteSpeed.
+    if (sites.get(site.name)?.kind === "php") continue;
     sites.upsert(site);
     siteCount++;
   }

@@ -120,7 +120,69 @@ export const v = {
     check(typeof s === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(s), "time must be HH:MM");
     return s;
   },
+  /** Where a process is reachable: "example.com", "*.example.com", "*" (any host) or any of those plus a path prefix. */
+  route(s: unknown): string {
+    const x = String(s ?? "").trim();
+    const i = x.indexOf("/");
+    const host = (i < 0 ? x : x.slice(0, i)).toLowerCase();
+    const h = host === "*" ? "*" : v.domain(host);
+    if (i < 0) return h;
+    const path = x.slice(i).replace(/\/+$/, "");
+    check(path === "" || /^\/[A-Za-z0-9._~\/-]{1,100}$/.test(path), `invalid path in ${x}`);
+    return h + path;
+  },
+  siteName(s: unknown): string {
+    const x = String(s ?? "").trim().toLowerCase();
+    check(/^[a-z0-9][a-z0-9.-]{0,62}$/.test(x) && !x.includes(".."), "site name: letters, digits, dots and dashes (max 63)");
+    return x;
+  },
+  phpVersion(s: unknown): string {
+    check(typeof s === "string" && PHP_VERSIONS.includes(s), `PHP version must be one of ${PHP_VERSIONS.join(", ")}`);
+    return s;
+  },
 };
+
+/** Versions offered for PHP sites (Remi SCL packages), newest first. */
+export const PHP_VERSIONS = ["8.5", "8.4", "8.3", "8.2", "8.1", "8.0", "7.4"];
+/** End of security support; older versions still run imported sites but are flagged. */
+export const PHP_EOL: Record<string, string> = {
+  "8.5": "2029-12-31", "8.4": "2028-12-31", "8.3": "2027-12-31", "8.2": "2026-12-31",
+  "8.1": "2025-12-31", "8.0": "2023-11-26", "7.4": "2022-11-28",
+};
+export const DEFAULT_PHP = "8.5";
+
+export type ProcessSpec = { name: string; dir: string; routes: string[]; memory_mb: number; start: string };
+
+const PROC_NAME = /^[a-z][a-z0-9-]{0,15}$/;
+
+/**
+ * One process per line: `name | dir | routes | memory MB | start command`.
+ * Routes are comma separated (see v.route); "-" or empty means a worker with no port.
+ * An empty start command is detected from the package.json in `dir`.
+ */
+export function parseProcesses(text: string): ProcessSpec[] {
+  const out: ProcessSpec[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const [name = "", dir = "", routes = "", mem = "", ...start] = line.split("|").map((x) => x.trim());
+    check(PROC_NAME.test(name), `process "${name}": 1-16 chars, a-z 0-9 -`);
+    check(!out.some((p) => p.name === name), `process ${name} is listed twice`);
+    out.push({
+      name,
+      dir: dir === "." ? "" : v.subdir(dir),
+      routes: routes && routes !== "-" ? [...new Set(routes.split(/[\s,]+/).filter(Boolean).map(v.route))] : [],
+      memory_mb: v.int(mem || 512, 64, 65536, `${name}: memory`),
+      start: v.command(start.join("|"), `${name}: start command`),
+    });
+  }
+  check(out.length <= 16, "at most 16 processes");
+  return out;
+}
+
+export function formatProcesses(list: ProcessSpec[]): string {
+  return list.map((p) => [p.name, p.dir || ".", p.routes.join(", ") || "-", String(p.memory_mb), p.start].join(" | ")).join("\n");
+}
 
 export function normalize(p: string): string {
   const out: string[] = [];

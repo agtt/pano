@@ -1,3 +1,4 @@
+import { formatProcesses, type ProcessSpec } from "../../shared/validate.ts";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
 
@@ -21,7 +22,9 @@ export type AppRow = {
   current_release: string;
   upstream: string;
   external_unit: string;
-  status: { active: string; memory: number; since: string };
+  processes: (ProcessSpec & { port_a: number; port_b: number })[];
+  ask_url: string;
+  status: { active: string; memory: number; since: string; procs?: { name: string; active: string; memory: number }[] };
   deploys?: { id: number; status: string; trigger: string; commit_sha: string; release: string; error: string; started_at: number; finished_at: number | null }[];
 };
 
@@ -46,7 +49,11 @@ export function AppsPage({ apps }: { apps: AppRow[] }) {
                   <a href={`/apps/${a.name}`}>{a.name}</a>
                   {a.kind === "external" ? <span class="tag">external</span> : null}
                 </td>
-                <td class="muted">{a.domains.join(", ") || (a.kind === "external" ? a.upstream : "—")}</td>
+                <td class="muted">
+                  {a.processes?.length
+                    ? [...new Set(a.processes.flatMap((p) => p.routes.map((r) => r.split("/")[0])))].join(", ")
+                    : a.domains.join(", ") || (a.kind === "external" ? a.upstream : "—")}
+                </td>
                 <td>{a.kind === "managed" ? `${a.runtime} ${a.runtime_version}` : a.external_unit}</td>
                 <td>
                   <Badge state={a.status.active} />
@@ -62,6 +69,11 @@ export function AppsPage({ apps }: { apps: AppRow[] }) {
     </Card>
   );
 }
+
+const PROCESS_EXAMPLE = `pos    | apps/pos    | example.com, www.example.com | 1024 |
+admin  | apps/admin  | admin.example.com            | 768  |
+online | apps/online | *.example.com, *             | 1024 |
+worker | .           | -                            | 256  | bun packages/api/cron/worker.ts`;
 
 export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { runtime: string; version: string }[]; action: string; submit: string }) {
   const a = p.app ?? {};
@@ -91,6 +103,17 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
       <Field label="Start command" name="start_cmd" value={a.start_cmd} hint={t("Leave empty to detect automatically") + " · $PORT"} />
       <Field label="Health check path" name="health_path" value={a.health_path ?? "/"} />
       <Field label="Memory limit (MB)" name="memory_mb" type="number" value={a.memory_mb ?? 1024} />
+      <label class="field wide">
+        <span>{t("Processes")} (monorepo)</span>
+        <textarea name="processes" rows={5} class="mono" spellcheck={false} placeholder={PROCESS_EXAMPLE}>
+          {formatProcesses(a.processes ?? [])}
+        </textarea>
+        <small class="muted">
+          name | dir | routes | memory MB | start command — one build, several processes. Routes: host, host/path, *.host or * (any host); "-" for a worker
+          (no port, never runs twice). Empty start: detected. With processes, Domains and Start command above are not used.
+        </small>
+      </label>
+      <Field label="Ask URL (catch-all TLS)" name="ask_url" value={a.ask_url} placeholder="http://127.0.0.1:4100/api/tls-ask" hint="for a * route" />
       <div class="actions">
         <button class="btn primary">{t(p.submit)}</button>
       </div>
@@ -132,8 +155,12 @@ export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, st
           <dd>
             {fmtBytes(a.status.memory)} {managed ? <span class="muted">/ {a.memory_mb} MB</span> : null}
           </dd>
-          <dt>{t("Domains")}</dt>
-          <dd>{a.domains.join(", ") || "—"}</dd>
+          {a.processes?.length ? null : (
+            <>
+              <dt>{t("Domains")}</dt>
+              <dd>{a.domains.join(", ") || "—"}</dd>
+            </>
+          )}
           {managed ? (
             <>
               <dt>{t("Runtime")}</dt>
@@ -146,7 +173,8 @@ export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, st
               </dd>
               <dt>Slot</dt>
               <dd>
-                {a.active_slot ? `${a.active_slot} → 127.0.0.1:${a.active_slot === "a" ? a.port_a : a.port_b}` : "—"} · release {a.current_release || "—"}
+                {a.active_slot && !a.processes?.length ? `${a.active_slot} → 127.0.0.1:${a.active_slot === "a" ? a.port_a : a.port_b}` : a.active_slot || "—"} ·
+                release {a.current_release || "—"}
               </dd>
             </>
           ) : (
@@ -160,6 +188,38 @@ export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, st
             </>
           )}
         </dl>
+        {a.processes?.length ? (
+          <table class="compact">
+            <thead>
+              <tr>
+                <th>{t("Process")}</th>
+                <th>{t("Routes")}</th>
+                <th>Port</th>
+                <th>{t("Status")}</th>
+                <th class="num">{t("Memory")}</th>
+              </tr>
+            </thead>
+            {a.processes.map((proc) => {
+              const st = a.status.procs?.find((x) => x.name === proc.name);
+              const port = proc.port_a ? (a.active_slot === "b" ? proc.port_b : proc.port_a) : 0;
+              return (
+                <tr>
+                  <td>
+                    {proc.name} <span class="muted small">{proc.dir || "."}</span>
+                  </td>
+                  <td class="small">{proc.routes.join(", ") || <span class="tag">worker</span>}</td>
+                  <td class="muted">{port || "—"}</td>
+                  <td>
+                    <Badge state={st?.active ?? "not deployed"} />
+                  </td>
+                  <td class="num">
+                    {st ? fmtBytes(st.memory) : ""} <span class="muted small">/ {proc.memory_mb} MB</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </table>
+        ) : null}
       </Card>
 
       {p.deployId ? (

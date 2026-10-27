@@ -6,7 +6,8 @@ import { cpus, hostname, loadavg, totalmem, uptime } from "node:os";
 import { env } from "../shared/config.ts";
 import { edgeActive } from "./edge.ts";
 import { bindAddress } from "./mysql.ts";
-import { backups, settings } from "./state.ts";
+import { PHP_EOL } from "../shared/validate.ts";
+import { backups, settings, sites } from "./state.ts";
 import { exists, readText, run } from "./sys.ts";
 import { paths } from "../shared/config.ts";
 
@@ -161,6 +162,14 @@ export async function audit(): Promise<Finding[]> {
 
   if (await exists(`${paths.secrets}/backup.key`))
     f.push({ id: "backup-key", level: "ok", title: "Backup encryption key exists", detail: "Keep an offline copy (Backups page → export key)." });
+
+  // PHP: versions past their security support
+  const today = new Date().toISOString().slice(0, 10);
+  const phpSites = sites.list().filter((s) => s.kind === "php" || (s.kind === "legacy" && s.php_version));
+  const old = phpSites.filter((s) => PHP_EOL[s.php_version] && PHP_EOL[s.php_version]! < today);
+  if (old.length)
+    f.push({ id: "php-eol", level: "warn", title: "Sites on PHP without security updates", detail: old.map((s) => `${s.name} (${s.php_version})`).join(", "), fix: "Sites → site → PHP version (test the site after switching)" });
+  else if (phpSites.length) f.push({ id: "php-eol", level: "ok", title: "PHP versions are supported", detail: `${phpSites.length} PHP sites` });
 
   const order = { fail: 0, warn: 1, ok: 2 } as const;
   return f.sort((a, b) => order[a.level] - order[b.level]);

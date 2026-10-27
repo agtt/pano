@@ -11,10 +11,10 @@ const SYSTEM_DBS = new Set(["mysql", "information_schema", "performance_schema",
 /** Databases other software depends on: visible, never droppable from the panel. */
 const PROTECTED_DBS = new Set([...SYSTEM_DBS, "cyberpanel"]);
 
-const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-const ident = (s: string) => `\`${s}\``;
+export const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+export const ident = (s: string) => `\`${s}\``;
 
-async function sql(query: string): Promise<string[][]> {
+export async function sql(query: string): Promise<string[][]> {
   const r = await run(["mysql", "--batch", "--skip-column-names", "--raw"], { input: query, timeoutMs: 60_000 });
   return r.stdout
     .split("\n")

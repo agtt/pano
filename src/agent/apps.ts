@@ -2,20 +2,29 @@
 // health check -> edge switch. Each app has its own system user, its own
 // directory and hardened units; builds run in a transient systemd sandbox with
 // a memory cap so a runaway build cannot take the server down.
+//
+// An app is one build and one or more processes. A plain app is a single
+// unnamed process; a monorepo (e.g. several Next.js apps and a worker) lists
+// its processes, each with its own directory, routes, ports and memory cap.
 
 import { appendFile, readdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
-import { formatEnv, parseEnv, v } from "../shared/validate.ts";
+import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
-import { runtimeBin, type Runtime } from "./runtimes.ts";
-import { apps, audit, deploys, type App } from "./state.ts";
+import { installed, runtimeBin, type Runtime } from "./runtimes.ts";
+import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
 import { ensureDir, exists, randomToken, readText, remove, run, writeAtomic, type RunOptions } from "./sys.ts";
 
 export const appUser = (name: string) => `app-${name}`;
 export const appHome = (name: string) => `${paths.apps}/${name}`;
-const unitName = (name: string, slot: "a" | "b") => `pano-app-${name}@${slot}.service`;
-const unitFile = (name: string) => `${paths.systemd}/pano-app-${name}@.service`;
+// App names never contain "_", so "<app>_<process>" cannot collide with another app.
+const unitBase = (app: string, p: Process) => (p.name ? `pano-app-${app}_${p.name}` : `pano-app-${app}`);
+const unitName = (app: string, p: Process, slot: "a" | "b") => `${unitBase(app, p)}@${slot}.service`;
+const unitFile = (app: string, p: Process) => `${paths.systemd}/${unitBase(app, p)}@.service`;
+/** Per process and slot: <home>/run/<key>-<slot>.env (PORT) and .sh (start script). Root-owned. */
+const runFile = (app: string, p: Process, slot: string, ext: "env" | "sh") => `${appHome(app)}/run/${p.name || "main"}-${slot}.${ext}`;
+const isWeb = (p: Process) => p.port_a > 0;
 const deployLog = (id: number) => `${paths.deployLogs}/${id}.log`;
 
 // ---- create / update / delete ----------------------------------------------
@@ -33,12 +42,18 @@ export type AppInput = {
   start_cmd: string;
   health_path: string;
   memory_mb: number;
+  processes: ProcessSpec[];
+  ask_url: string;
 };
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
+  const processes = Array.isArray(x.processes) ? parseProcesses(x.processes.join("\n")) : parseProcesses(String(x.processes ?? ""));
+  const askUrl = String(x.ask_url ?? "").trim();
+  if (askUrl && !/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(askUrl)) throw new Error("ask URL must be http://127.0.0.1:PORT/path");
   return {
     name: v.appName(x.name),
-    domains: x.domains ? v.domains(x.domains) : [],
+    // With processes, routes live on each process and the app-level fields are unused.
+    domains: processes.length || !x.domains ? [] : v.domains(x.domains),
     runtime: v.runtime(x.runtime ?? "node"),
     runtime_version: v.version(x.runtime_version),
     repo: v.gitUrl(x.repo),
@@ -46,18 +61,39 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     root_dir: v.subdir(x.root_dir),
     install_cmd: v.command(x.install_cmd, "install command"),
     build_cmd: v.command(x.build_cmd, "build command"),
-    start_cmd: v.command(x.start_cmd, "start command"),
+    start_cmd: processes.length ? "" : v.command(x.start_cmd, "start command"),
     health_path: v.httpPath(x.health_path),
     memory_mb: v.int(x.memory_mb ?? 1024, 128, 65536, "memory limit"),
+    processes,
+    ask_url: askUrl,
   };
+}
+
+/** Host names the input would serve, for the uniqueness check. */
+export function inputHosts(input: AppInput): string[] {
+  if (!input.processes.length) return input.domains;
+  return [...new Set(input.processes.flatMap((p) => p.routes.map((r) => r.split("/")[0]!)))];
 }
 
 export function assertDomainsFree(domains: string[], except: { app?: string; site?: string }, all: { apps: App[]; sites: { name: string; domains: string[] }[] }) {
   for (const d of domains) {
-    const a = all.apps.find((x) => x.name !== except.app && x.domains.includes(d));
+    const a = all.apps.find((x) => x.name !== except.app && appHosts(x).includes(d));
     const s = all.sites.find((x) => x.name !== except.site && x.domains.includes(d));
     if (a || s) throw new Error(`${d} is already used by ${a ? `app ${a.name}` : `site ${s!.name}`}`);
   }
+}
+
+/** Keeps the ports of processes that already had them; new web processes get a fresh pair. */
+function assignPorts(prev: Process[], next: ProcessSpec[]): Process[] {
+  const taken: number[] = [];
+  return next.map((p) => {
+    if (!p.routes.length) return { ...p, port_a: 0, port_b: 0 };
+    const old = prev.find((o) => o.name === p.name && o.port_a);
+    if (old) return { ...p, port_a: old.port_a, port_b: old.port_b };
+    const [a, b] = apps.nextPorts(taken);
+    taken.push(a, b);
+    return { ...p, port_a: a, port_b: b };
+  });
 }
 
 export async function createApp(input: AppInput, actor: string): Promise<App> {
@@ -70,24 +106,25 @@ export async function createApp(input: AppInput, actor: string): Promise<App> {
   await ensureDir(`${home}/releases`, 0o750, user);
   await ensureDir(`${home}/cache`, 0o750, user);
   await ensureDir(`${home}/.ssh`, 0o700, user);
+  await ensureDir(`${home}/run`, 0o755);
   await ensureDir(`${home}/shared`, 0o750);
   await run(["chgrp", user, fsPath(`${home}/shared`)], { check: false });
   if (!(await exists(`${home}/shared/.env`))) await writeAtomic(`${home}/shared/.env`, "", 0o640);
   await run(["chgrp", user, fsPath(`${home}/shared/.env`)], { check: false });
-  await writeAtomic(`${home}/slot-a.env`, `PORT=${port_a}\n`, 0o644);
-  await writeAtomic(`${home}/slot-b.env`, `PORT=${port_b}\n`, 0o644);
-  apps.insert({ ...input, kind: "managed", port_a, port_b, webhook_secret: randomToken(24) });
+  const processes = assignPorts([], input.processes);
+  apps.insert({ ...input, kind: "managed", port_a, port_b, processes, webhook_secret: randomToken(24) });
   const app = apps.get(input.name)!;
-  await writeUnit(app);
-  audit(actor, "app.create", { name: app.name, repo: app.repo });
+  await writeUnits(app);
+  audit(actor, "app.create", { name: app.name, repo: app.repo, processes: processes.map((p) => p.name) });
   return app;
 }
 
 export async function updateApp(name: string, input: AppInput, actor: string) {
   const app = mustGet(name);
-  apps.update(name, { ...input, name: undefined } as Partial<App>);
+  const processes = assignPorts(app.processes, input.processes);
+  apps.update(name, { ...input, processes, name: undefined } as Partial<App>);
   const next = apps.get(name)!;
-  if (app.kind === "managed") await writeUnit(next);
+  if (app.kind === "managed") await writeUnits(next);
   await applyEdge();
   audit(actor, "app.update", { name });
 }
@@ -95,8 +132,11 @@ export async function updateApp(name: string, input: AppInput, actor: string) {
 export async function deleteApp(name: string, actor: string, removeFiles: boolean) {
   const app = mustGet(name);
   if (app.kind === "managed") {
-    for (const slot of ["a", "b"] as const) await run(["systemctl", "disable", "--now", unitName(name, slot)], { check: false });
-    await remove(unitFile(name));
+    for (const file of await unitFiles(name)) {
+      const base = file.replace(/@\.service$/, "");
+      for (const slot of ["a", "b"]) await run(["systemctl", "disable", "--now", `${base}@${slot}.service`], { check: false });
+      await remove(`${paths.systemd}/${file}`);
+    }
     await run(["systemctl", "daemon-reload"], { check: false });
     if (removeFiles) {
       await remove(appHome(name));
@@ -114,14 +154,33 @@ function mustGet(name: string): App {
   return app;
 }
 
+/** Template unit files of an app on disk: "pano-app-<name>@.service" and "pano-app-<name>_<proc>@.service". */
+async function unitFiles(name: string): Promise<string[]> {
+  const all = await readdir(fsPath(paths.systemd)).catch(() => [] as string[]);
+  return all.filter((f) => f === `pano-app-${name}@.service` || (f.startsWith(`pano-app-${name}_`) && f.endsWith("@.service")));
+}
+
 // ---- systemd ---------------------------------------------------------------
 
-export function renderUnit(app: App): string {
+/**
+ * PATH for builds and processes. Monorepos often mix runtimes (bun as package
+ * manager, node to run Next.js), so the newest installed version of the other
+ * runtime follows the app's pinned one.
+ */
+async function toolPath(app: App): Promise<string> {
+  const dirs = [runtimeBin(app.runtime, app.runtime_version)];
+  const other = (await installed()).find((r) => r.runtime !== app.runtime);
+  if (other) dirs.push(runtimeBin(other.runtime, other.version));
+  return [...dirs, "/usr/local/bin", "/usr/bin", "/bin"].join(":");
+}
+
+export function renderUnit(app: App, p: Process, path: string): string {
   const home = appHome(app.name);
-  const workdir = app.root_dir ? `${home}/slot-%i/${app.root_dir}` : `${home}/slot-%i`;
-  const high = Math.floor(app.memory_mb * 0.9);
+  const sub = [app.root_dir, p.dir].filter(Boolean).join("/");
+  const high = Math.floor(p.memory_mb * 0.9);
+  const key = p.name || "main";
   return `[Unit]
-Description=pano app ${app.name} (slot %i)
+Description=pano app ${app.name}${p.name ? ` / ${p.name}` : ""} (slot %i)
 After=network-online.target mariadb.service
 Wants=network-online.target
 
@@ -129,18 +188,18 @@ Wants=network-online.target
 Type=simple
 User=${appUser(app.name)}
 Group=${appUser(app.name)}
-WorkingDirectory=${workdir}
+WorkingDirectory=${home}/slot-%i${sub ? `/${sub}` : ""}
 EnvironmentFile=-${home}/shared/.env
-EnvironmentFile=${home}/slot-%i.env
+EnvironmentFile=${home}/run/${key}-%i.env
 Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} NEXT_TELEMETRY_DISABLED=1
-Environment=PATH=${runtimeBin(app.runtime, app.runtime_version)}:/usr/local/bin:/usr/bin:/bin
-ExecStart=${home}/start.sh
+Environment=PATH=${path}
+ExecStart=${home}/run/${key}-%i.sh
 Restart=always
 RestartSec=2
 TimeoutStopSec=20
 KillMode=mixed
 MemoryHigh=${high}M
-MemoryMax=${app.memory_mb}M
+MemoryMax=${p.memory_mb}M
 TasksMax=1024
 UMask=0027
 NoNewPrivileges=true
@@ -170,42 +229,79 @@ WantedBy=multi-user.target
 `;
 }
 
-async function writeUnit(app: App) {
-  await writeAtomic(unitFile(app.name), renderUnit(app), 0o644);
-  // The start command is written to a root-owned script so no quoting ever
-  // reaches the unit file; it still runs as the app user.
-  const start = app.start_cmd || "npm run start";
-  await writeAtomic(`${appHome(app.name)}/start.sh`, `#!/bin/sh\nset -e\nexec ${start}\n`, 0o755);
+/**
+ * Writes every process's template unit, removes units of processes that no
+ * longer exist and, for a slot being deployed, its env files and start scripts.
+ * Start commands go into root-owned scripts so no quoting ever reaches a unit file.
+ */
+async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: Map<string, string> }) {
+  const path = await toolPath(app);
+  const procs = procsOf(app);
+  const home = appHome(app.name);
+  await ensureDir(`${home}/run`, 0o755);
+  const keep = new Set(procs.map((p) => `${unitBase(app.name, p)}@.service`));
+  for (const file of await unitFiles(app.name)) {
+    if (keep.has(file)) continue;
+    const base = file.replace(/@\.service$/, "");
+    for (const slot of ["a", "b"]) await run(["systemctl", "disable", "--now", `${base}@${slot}.service`], { check: false });
+    await remove(`${paths.systemd}/${file}`);
+  }
+  for (const p of procs) {
+    await writeAtomic(unitFile(app.name, p), renderUnit(app, p, path), 0o644);
+    if (!deploy) continue;
+    const port = deploy.slot === "a" ? p.port_a : p.port_b;
+    const env = `PANO_PROCESS=${p.name || "main"}\n${port ? `PORT=${port}\n` : ""}`;
+    await writeAtomic(runFile(app.name, p, deploy.slot, "env"), env, 0o644);
+    const rootBin = [`${home}/slot-${deploy.slot}`, app.root_dir, "node_modules/.bin"].filter(Boolean).join("/");
+    const start = deploy.starts.get(p.name) || "npm run start";
+    await writeAtomic(
+      runFile(app.name, p, deploy.slot, "sh"),
+      `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:${rootBin}:$PATH"\nexec ${start}\n`,
+      0o755,
+    );
+  }
   await run(["systemctl", "daemon-reload"]);
 }
 
+const activeUnits = (app: App): string[] =>
+  app.kind === "external"
+    ? (app.external_unit ? [app.external_unit] : [])
+    : app.active_slot
+      ? procsOf(app).map((p) => unitName(app.name, p, app.active_slot as "a" | "b"))
+      : [];
+
 export async function appAction(name: string, action: "start" | "stop" | "restart", actor: string) {
   const app = mustGet(name);
-  if (app.kind === "external") {
-    if (!app.external_unit) throw new Error("this app has no service unit to control");
-    await run(["systemctl", action, app.external_unit]);
-  } else {
-    if (!app.active_slot) throw new Error("deploy the app first");
-    await run(["systemctl", action, unitName(name, app.active_slot)]);
-  }
+  const units = activeUnits(app);
+  if (!units.length) throw new Error(app.kind === "external" ? "this app has no service unit to control" : "deploy the app first");
+  await run(["systemctl", action, ...units]);
   audit(actor, `app.${action}`, { name });
 }
 
-export async function appStatus(app: App): Promise<{ active: string; memory: number; since: string }> {
-  const unit = app.kind === "external" ? app.external_unit : app.active_slot ? unitName(app.name, app.active_slot) : "";
-  if (!unit) return { active: app.kind === "external" ? "unknown" : "not deployed", memory: 0, since: "" };
+type UnitStatus = { active: string; memory: number; since: string };
+
+async function unitStatus(unit: string): Promise<UnitStatus> {
   const r = await run(["systemctl", "show", unit, "--property=ActiveState,MemoryCurrent,ActiveEnterTimestamp"], { check: false });
   const props = Object.fromEntries(r.stdout.trim().split("\n").map((l) => l.split(/=(.*)/s).slice(0, 2)));
   const mem = Number(props.MemoryCurrent);
   return { active: props.ActiveState ?? "unknown", memory: Number.isFinite(mem) ? mem : 0, since: props.ActiveEnterTimestamp ?? "" };
 }
 
+export async function appStatus(app: App): Promise<UnitStatus & { procs: (UnitStatus & { name: string })[] }> {
+  const units = activeUnits(app);
+  if (!units.length) return { active: app.kind === "external" ? "unknown" : "not deployed", memory: 0, since: "", procs: [] };
+  const names = app.kind === "external" ? [app.name] : procsOf(app).map((p) => p.name || app.name);
+  const procs = await Promise.all(units.map(async (u, i) => ({ name: names[i]!, ...(await unitStatus(u)) })));
+  const down = procs.find((p) => p.active !== "active");
+  return { active: down?.active ?? "active", memory: procs.reduce((n, p) => n + p.memory, 0), since: procs[0]!.since, procs };
+}
+
 export async function appLogs(name: string, lines = 200): Promise<string> {
   const app = mustGet(name);
-  const unit = app.kind === "external" ? app.external_unit : app.active_slot ? unitName(name, app.active_slot) : "";
-  if (!unit) return "";
+  const units = activeUnits(app);
+  if (!units.length) return "";
   const n = v.int(lines, 10, 5000, "lines");
-  const r = await run(["journalctl", "-u", unit, "-n", String(n), "--no-pager", "-o", "short-iso"], { check: false });
+  const r = await run(["journalctl", ...units.flatMap((u) => ["-u", u]), "-n", String(n), "--no-pager", "-o", "short-iso"], { check: false });
   return r.stdout;
 }
 
@@ -259,8 +355,8 @@ async function deploy(app: App, id: number) {
   const dir = `${home}/releases/${release}`;
   const workdir = app.root_dir ? `${dir}/${app.root_dir}` : dir;
   const slot: "a" | "b" = app.active_slot === "a" ? "b" : "a";
-  const port = slot === "a" ? app.port_a : app.port_b;
-  const binPath = `${runtimeBin(app.runtime, app.runtime_version)}:/usr/local/bin:/usr/bin:/bin`;
+  const procs = procsOf(app);
+  const binPath = await toolPath(app);
 
   try {
     if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
@@ -274,7 +370,10 @@ async function deploy(app: App, id: number) {
     });
     const sha = (await run(["git", "-C", fsPath(dir), "rev-parse", "HEAD"], { user, check: false })).stdout.trim();
     await log(`commit ${sha}`);
-    await run(["ln", "-sfn", fsPath(`${home}/shared/.env`), fsPath(`${workdir}/.env`)], { user });
+    // Every process directory sees the shared .env (Next.js reads it from its own directory).
+    for (const d of new Set(procs.map((p) => (p.dir ? `${workdir}/${p.dir}` : workdir)))) {
+      await run(["ln", "-sfn", fsPath(`${home}/shared/.env`), fsPath(`${d}/.env`)], { user, check: false });
+    }
 
     const plan = await detectPlan(app, workdir);
     if (plan.install) {
@@ -285,27 +384,42 @@ async function deploy(app: App, id: number) {
       await step(plan.build);
       await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true });
     }
-    if (plan.start !== app.start_cmd) {
+    if (!app.processes.length && plan.start !== app.start_cmd) {
       apps.update(app.name, { start_cmd: plan.start });
       app = apps.get(app.name)!;
     }
-    await writeUnit(app);
+    const starts = new Map<string, string>();
+    for (const p of procsOf(app)) {
+      starts.set(p.name, p.start || (p.name ? await detectStart(app.runtime, p.dir ? `${workdir}/${p.dir}` : workdir, plan.pm) : plan.start));
+      if (p.name) await log(`process ${p.name}: ${starts.get(p.name)}`);
+    }
+    await writeUnits(app, { slot, starts });
 
-    await step(`start slot ${slot} on 127.0.0.1:${port}`);
     await run(["ln", "-sfn", fsPath(dir), fsPath(`${home}/slot-${slot}`)]);
-    await run(["systemctl", "restart", unitName(app.name, slot)]);
-    await healthCheck(app, slot, port, log);
+    for (const p of procs.filter(isWeb)) {
+      const port = slot === "a" ? p.port_a : p.port_b;
+      await step(`start ${p.name || "app"} (slot ${slot}) on 127.0.0.1:${port}`);
+      await run(["systemctl", "restart", unitName(app.name, p, slot)]);
+    }
+    for (const p of procs.filter(isWeb)) await healthCheck(app, p, slot, log);
 
     await step("switch traffic");
-    const previous = app.active_slot;
+    const previous = app.active_slot as "a" | "b" | "";
     apps.update(app.name, { active_slot: slot, current_release: release });
-    await run(["systemctl", "enable", unitName(app.name, slot)], { check: false });
+    for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(app.name, p, slot)], { check: false });
     const edge = await applyEdge();
     await log(edge.reloaded ? "edge reloaded" : "edge not running yet (traffic switches at cutover)");
+    // Workers must never run twice (queues, cron): stop the old one, then start the new one.
+    for (const p of procs.filter((x) => !isWeb(x))) {
+      if (previous) await run(["systemctl", "disable", "--now", unitName(app.name, p, previous)], { check: false });
+      await run(["systemctl", "enable", "--now", unitName(app.name, p, slot)]);
+      await log(`worker ${p.name} started`);
+    }
     if (previous) {
       // Let in-flight requests on the old slot finish before stopping it.
+      const old = procs.filter(isWeb).map((p) => unitName(app.name, p, previous));
       setTimeout(() => {
-        run(["systemctl", "disable", "--now", unitName(app.name, previous)], { check: false });
+        run(["systemctl", "disable", "--now", ...old], { check: false });
       }, 15_000);
     }
     await pruneReleases(app.name, [release]);
@@ -314,7 +428,9 @@ async function deploy(app: App, id: number) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await log(`\nFAILED: ${msg}`);
-    await run(["systemctl", "stop", unitName(app.name, slot)], { check: false });
+    if (apps.get(app.name)?.active_slot !== slot) {
+      await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
+    }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
   }
 }
@@ -361,48 +477,52 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
   await run(argv, { onLine: o.onLine, timeoutMs: 1_900_000 });
 }
 
-type Plan = { install: string; build: string; start: string };
+type Plan = { install: string; build: string; start: string; pm: string };
+
+type Pkg = { scripts?: Record<string, string>; dependencies?: Record<string, string> };
+const readPkg = async (dir: string) => JSON.parse((await readText(`${dir}/package.json`)) ?? "{}") as Pkg;
 
 /** Fills in commands the admin left empty, based on the repository's lockfile and scripts. */
 export async function detectPlan(app: Pick<App, "install_cmd" | "build_cmd" | "start_cmd" | "runtime">, workdir: string): Promise<Plan> {
   const has = (f: string) => exists(`${workdir}/${f}`);
-  const pkg = JSON.parse((await readText(`${workdir}/package.json`)) ?? "{}") as { scripts?: Record<string, string>; dependencies?: Record<string, string> };
-  const scripts = pkg.scripts ?? {};
+  const scripts = (await readPkg(workdir)).scripts ?? {};
   let pm = app.runtime === "bun" ? "bun" : "npm";
   let install = app.runtime === "bun" ? "bun install --frozen-lockfile" : "npm ci";
   if ((await has("bun.lock")) || (await has("bun.lockb"))) (pm = "bun"), (install = "bun install --frozen-lockfile");
   else if (await has("pnpm-lock.yaml")) (pm = "npx --yes pnpm@10"), (install = "npx --yes pnpm@10 install --frozen-lockfile");
   else if (await has("yarn.lock")) (pm = "npx --yes yarn@1"), (install = "npx --yes yarn@1 install --frozen-lockfile");
   else if (!(await has("package-lock.json")) && app.runtime !== "bun") install = "npm install";
-  const script = (s: string) => `${pm} run ${s}`;
-
-  const isNext = !!pkg.dependencies?.next || /\bnext (start|build)\b/.test(Object.values(scripts).join(" "));
-  let start = app.start_cmd;
-  if (!start) {
-    // Apps bind to localhost only; the edge is the single public entry point.
-    if (isNext) start = "./node_modules/.bin/next start -H 127.0.0.1 -p $PORT";
-    else if (scripts.start) start = script("start");
-    else start = app.runtime === "bun" ? "bun run index.ts" : "node server.js";
-  }
   return {
     install: app.install_cmd || ((await has("package.json")) ? install : ""),
-    build: app.build_cmd || (scripts.build ? script("build") : ""),
-    start,
+    build: app.build_cmd || (scripts.build ? `${pm} run build` : ""),
+    start: app.start_cmd || (await detectStart(app.runtime, workdir, pm)),
+    pm,
   };
 }
 
-async function healthCheck(app: App, slot: "a" | "b", port: number, log: (l: string) => void) {
+/** Start command for a process directory. Apps bind to localhost only; the edge is the single public entry point. */
+export async function detectStart(runtime: Runtime, dir: string, pm: string): Promise<string> {
+  const pkg = await readPkg(dir);
+  const scripts = pkg.scripts ?? {};
+  // `next` resolves through the start script's PATH (process dir, then repo root node_modules/.bin).
+  if (pkg.dependencies?.next || /\bnext (start|build)\b/.test(Object.values(scripts).join(" "))) return "next start -H 127.0.0.1 -p $PORT";
+  if (scripts.start) return `${pm} run start`;
+  return runtime === "bun" ? "bun run index.ts" : "node server.js";
+}
+
+async function healthCheck(app: App, p: Process, slot: "a" | "b", log: (l: string) => void) {
+  const port = slot === "a" ? p.port_a : p.port_b;
   const url = `http://127.0.0.1:${port}${app.health_path || "/"}`;
   if (DRY_RUN) return log(`[dry-run] health check ${url}`);
   const deadline = Date.now() + 90_000;
   let last = "";
   while (Date.now() < deadline) {
-    const st = await run(["systemctl", "is-active", unitName(app.name, slot)], { check: false });
-    if (st.stdout.trim() === "failed") throw new Error("the app exited during startup (see Logs)");
+    const st = await run(["systemctl", "is-active", unitName(app.name, p, slot)], { check: false });
+    if (st.stdout.trim() === "failed") throw new Error(`${p.name || app.name} exited during startup (see Logs)`);
     try {
       const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5000) });
       if (res.status < 500) {
-        await log(`health ok: ${url} -> ${res.status}`);
+        await log(`health ok: ${p.name ? `${p.name} ` : ""}${url} -> ${res.status}`);
         return;
       }
       last = `HTTP ${res.status}`;

@@ -21,7 +21,8 @@ async function main() {
     case "web": {
       const { createWebApp, createHookApp } = await import("./web/server.tsx");
       const web = createWebApp();
-      Bun.serve({ hostname: env.webHost, port: env.webPort, fetch: web.fetch, maxRequestBodySize: 2_000_000 });
+      // No idle timeout: installs and imports keep a request open for minutes (the panel is never public).
+      Bun.serve({ hostname: env.webHost, port: env.webPort, fetch: web.fetch, maxRequestBodySize: 2_000_000, idleTimeout: 0 });
       const hooks = createHookApp();
       Bun.serve({ hostname: "127.0.0.1", port: env.hookPort, fetch: hooks.fetch, maxRequestBodySize: 1_100_000 });
       console.log(`[web] http://${env.webHost}:${env.webPort} (hooks on 127.0.0.1:${env.hookPort})`);
