@@ -1,0 +1,23 @@
+{
+  "name": "pano",
+  "version": "0.1.0",
+  "description": "Lightweight, security-first server panel for Next.js, Node.js and Bun apps",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": { "pano": "src/cli.ts" },
+  "scripts": {
+    "dev": "bun run dev/dev.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/cli.ts --compile --minify --target=bun-linux-x64 --outfile dist/pano",
+    "build:arm": "bun build src/cli.ts --compile --minify --target=bun-linux-arm64 --outfile dist/pano-arm64"
+  },
+  "dependencies": {
+    "hono": "^4.13.14"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

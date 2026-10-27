@@ -1,0 +1,175 @@
+// Process and filesystem helpers for the agent. Commands are always argv arrays
+// (never a shell string); the only shell ever used is `sh -c` for an app's own
+// build/start commands, and that runs as the app's unprivileged user.
+
+import { chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { DRY_RUN, fsPath } from "../shared/config.ts";
+
+export type RunResult = { code: number; stdout: string; stderr: string };
+
+export type RunOptions = {
+  /** Run as this system user via runuser. */
+  user?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  input?: string;
+  timeoutMs?: number;
+  /** Streams combined output line by line (deploy logs). */
+  onLine?: (line: string) => void;
+  /** Throw when the exit code is not 0 (default true). */
+  check?: boolean;
+  /** Discard output instead of capturing it (for commands that leave a daemon holding stdout). */
+  quiet?: boolean;
+};
+
+export class CommandError extends Error {
+  constructor(public cmd: string[], public result: RunResult) {
+    super(`${cmd[0]} exited with ${result.code}: ${(result.stderr || result.stdout).trim().split("\n").slice(-3).join(" | ")}`);
+  }
+}
+
+const BASE_ENV = { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8", HOME: "/root" };
+
+export async function run(cmd: string[], o: RunOptions = {}): Promise<RunResult> {
+  const argv = o.user ? ["runuser", "-u", o.user, "--", ...cmd] : cmd;
+  if (DRY_RUN) {
+    const line = `[dry-run] ${o.user ? `(${o.user}) ` : ""}${cmd.join(" ")}`;
+    console.log(line);
+    o.onLine?.(line);
+    return { code: 0, stdout: "", stderr: "" };
+  }
+  let proc: Bun.Subprocess;
+  try {
+    proc = Bun.spawn(argv, {
+      cwd: o.cwd,
+      env: { ...BASE_ENV, ...o.env },
+      stdin: o.input !== undefined ? new TextEncoder().encode(o.input) : "ignore",
+      stdout: o.quiet ? "ignore" : "pipe",
+      stderr: o.quiet ? "ignore" : "pipe",
+    });
+  } catch (e) {
+    // Missing binary (e.g. no `nft` on this distro) behaves like exit 127.
+    const result = { code: 127, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+    if (o.check !== false) throw new CommandError(cmd, result);
+    return result;
+  }
+  const timer = o.timeoutMs ? setTimeout(() => proc.kill("SIGKILL"), o.timeoutMs) : undefined;
+  const [stdout, stderr] = o.quiet
+    ? ["", ""]
+    : await Promise.all([
+        collect(proc.stdout as ReadableStream<Uint8Array>, o.onLine),
+        collect(proc.stderr as ReadableStream<Uint8Array>, o.onLine),
+      ]);
+  const code = await proc.exited;
+  if (timer) clearTimeout(timer);
+  const result = { code, stdout, stderr };
+  if (code !== 0 && o.check !== false) throw new CommandError(cmd, result);
+  return result;
+}
+
+async function collect(stream: ReadableStream<Uint8Array>, onLine?: (l: string) => void): Promise<string> {
+  const dec = new TextDecoder();
+  let all = "";
+  let pending = "";
+  for await (const chunk of stream) {
+    const text = dec.decode(chunk, { stream: true });
+    all += text;
+    if (onLine) {
+      pending += text;
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const l of lines) onLine(l);
+    }
+    // Keep memory bounded for chatty builds.
+    if (all.length > 2_000_000) all = all.slice(-1_000_000);
+  }
+  if (onLine && pending) onLine(pending);
+  return all;
+}
+
+export async function exists(abs: string): Promise<boolean> {
+  try {
+    await stat(fsPath(abs));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readText(abs: string): Promise<string | null> {
+  try {
+    return await readFile(fsPath(abs), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+export async function ensureDir(abs: string, mode = 0o755, owner?: string) {
+  const real = fsPath(abs);
+  // mkdir's mode is filtered by the umask (0027 for the agent); fix every directory it created.
+  const first = await mkdir(real, { recursive: true, mode });
+  if (first) for (let d = real; d.length >= first.length; d = dirname(d)) await chmod(d, mode);
+  await chmod(real, mode);
+  if (owner) await chownTo(abs, owner);
+}
+
+/** Atomic write: temp file in the same directory, fsync'd by rename semantics. */
+export async function writeAtomic(abs: string, content: string | Uint8Array, mode = 0o644, owner?: string) {
+  const real = fsPath(abs);
+  await mkdir(dirname(real), { recursive: true });
+  const tmp = `${real}.pano-tmp-${process.pid}`;
+  await writeFile(tmp, content, { mode });
+  await chmod(tmp, mode);
+  if (owner) await chownTo(abs + `.pano-tmp-${process.pid}`, owner);
+  await rename(tmp, real);
+}
+
+export async function remove(abs: string) {
+  await rm(fsPath(abs), { recursive: true, force: true });
+}
+
+const uidCache = new Map<string, { uid: number; gid: number }>();
+
+export async function lookupUser(user: string): Promise<{ uid: number; gid: number } | null> {
+  const hit = uidCache.get(user);
+  if (hit) return hit;
+  const passwd = await readText("/etc/passwd");
+  const line = passwd?.split("\n").find((l) => l.startsWith(user + ":"));
+  if (!line) return null;
+  const [, , uid, gid] = line.split(":");
+  const ids = { uid: Number(uid), gid: Number(gid) };
+  uidCache.set(user, ids);
+  return ids;
+}
+
+async function chownTo(abs: string, owner: string) {
+  if (DRY_RUN || process.getuid?.() !== 0) return;
+  const ids = await lookupUser(owner);
+  if (!ids) throw new Error(`unknown user ${owner}`);
+  await chown(fsPath(abs), ids.uid, ids.gid);
+}
+
+export async function chownR(abs: string, owner: string) {
+  await run(["chown", "-R", `${owner}:${owner}`, fsPath(abs)]);
+}
+
+export function randomToken(bytes = 32): string {
+  return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url");
+}
+
+/** Alphanumeric password, safe in any config file or SQL literal. */
+export function randomPassword(len = 28): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  // Rejection sampling keeps every character equally likely.
+  const limit = 256 - (256 % alphabet.length);
+  let out = "";
+  while (out.length < len) {
+    for (const b of crypto.getRandomValues(new Uint8Array(len * 2))) {
+      if (b >= limit) continue;
+      out += alphabet[b % alphabet.length];
+      if (out.length === len) break;
+    }
+  }
+  return out;
+}

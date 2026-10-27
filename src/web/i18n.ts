@@ -1,0 +1,125 @@
+// UI strings are written in English; this maps them to other languages.
+// Missing entries fall back to English.
+
+import { env } from "../shared/config.ts";
+
+const tr: Record<string, string> = {
+  Home: "Ana sayfa",
+  Apps: "Uygulamalar",
+  Sites: "Siteler",
+  Databases: "Veritabanları",
+  Backups: "Yedekler",
+  Runtimes: "Çalışma ortamları",
+  Security: "Güvenlik",
+  Import: "İçe aktar",
+  Edge: "Edge / SSL",
+  Activity: "Etkinlik",
+  "Sign out": "Çıkış",
+  "Sign in": "Giriş",
+  Username: "Kullanıcı adı",
+  Password: "Şifre",
+  "Authenticator code": "Doğrulama kodu",
+  Server: "Sunucu",
+  Memory: "Bellek",
+  Disk: "Disk",
+  Load: "Yük",
+  Uptime: "Çalışma süresi",
+  Services: "Servisler",
+  "New app": "Yeni uygulama",
+  Name: "Ad",
+  Domains: "Alan adları",
+  Runtime: "Ortam",
+  Version: "Sürüm",
+  Repository: "Depo",
+  Branch: "Dal",
+  "Root directory": "Kök klasör",
+  "Install command": "Kurulum komutu",
+  "Build command": "Derleme komutu",
+  "Start command": "Başlatma komutu",
+  "Health check path": "Sağlık kontrolü yolu",
+  "Memory limit (MB)": "Bellek sınırı (MB)",
+  Create: "Oluştur",
+  Save: "Kaydet",
+  Deploy: "Yayınla",
+  Start: "Başlat",
+  Stop: "Durdur",
+  Restart: "Yeniden başlat",
+  Delete: "Sil",
+  Logs: "Kayıtlar",
+  Status: "Durum",
+  Settings: "Ayarlar",
+  "Environment variables": "Ortam değişkenleri",
+  "Deploy history": "Yayın geçmişi",
+  "Deploy key": "Deploy anahtarı",
+  Webhook: "Webhook",
+  "Leave empty to detect automatically": "Boş bırakılırsa otomatik algılanır",
+  Install: "Kur",
+  Installed: "Kurulu",
+  Available: "Mevcut",
+  "In use": "Kullanımda",
+  Size: "Boyut",
+  Tables: "Tablo",
+  Users: "Kullanıcılar",
+  "New database": "Yeni veritabanı",
+  "User (optional)": "Kullanıcı (isteğe bağlı)",
+  "Password (empty = generate)": "Şifre (boş = üret)",
+  "Reset password": "Şifre sıfırla",
+  "Type the name to confirm": "Onay için adını yazın",
+  "Current authenticator code": "Güncel doğrulama kodu",
+  "Run now": "Şimdi çalıştır",
+  Restore: "Geri yükle",
+  Schedule: "Zamanlama",
+  Keep: "Sakla",
+  Target: "Hedef",
+  Kind: "Tür",
+  "Test connection": "Bağlantıyı test et",
+  "Export encryption key": "Şifreleme anahtarını dışa aktar",
+  "Scan server": "Sunucuyu tara",
+  "Import selected": "Seçilenleri aktar",
+  Warnings: "Uyarılar",
+  Preview: "Önizleme",
+  "Install Caddy": "Caddy'yi kur",
+  Cutover: "Geçiş",
+  Rollback: "Geri al",
+  Enabled: "Etkin",
+  Disabled: "Kapalı",
+  Never: "Hiç",
+  Time: "Zaman",
+  Actor: "Kişi",
+  Action: "İşlem",
+  Detail: "Ayrıntı",
+  Fix: "Düzeltme",
+  "Everything here is read-only. Each fix is a command you run yourself.": "Bu sayfa yalnızca okur. Her düzeltme sizin çalıştıracağınız bir komuttur.",
+  "Apps, databases, backups and security on one lightweight panel.": "Uygulamalar, veritabanları, yedekler ve güvenlik tek hafif panelde.",
+  "No apps yet.": "Henüz uygulama yok.",
+  "No sites yet.": "Henüz site yok.",
+  Routes: "Yönlendirmeler",
+  "Ask URL (catch-all TLS)": "Ask URL (catch-all TLS)",
+  "Automatic TLS (drop imported certificate)": "Otomatik TLS (aktarılan sertifikayı bırak)",
+  Save_site: "Siteyi kaydet",
+};
+
+const dicts = { tr, en: {} as Record<string, string> };
+
+export function t(s: string): string {
+  return dicts[env.lang]?.[s] ?? s;
+}
+
+export function fmtBytes(n: number): string {
+  if (!n) return "0";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i > 1 ? 1 : 0)} ${u[i]}`;
+}
+
+export function fmtTime(sec: number | null | undefined): string {
+  if (!sec) return t("Never");
+  return new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 16);
+}
+
+export function fmtDuration(sec: number): string {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
