@@ -17,6 +17,8 @@ import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
 import * as queues from "./queues.ts";
 import * as realtime from "./realtime.ts";
+import * as turn from "./turn.ts";
+import * as vulns from "./vulns.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
@@ -37,7 +39,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal",
+  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -220,6 +222,14 @@ export const methods: Record<string, Handler> = {
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
 
   // ---- shield (malware scan, IP reputation, login brute force)
+  // ---- vulnerabilities and automatic patching
+  "vulns.status": () => vulns.vulnStatus(),
+  "vulns.scan": () => {
+    void vulns.scan().catch(() => {});
+  },
+  "vulns.patch": (p, actor) => vulns.setPatching({ os: !!p.os, php: !!p.php, edge: !!p.edge }, actor),
+  "vulns.patchNow": (_p, actor) => vulns.patchNow(actor),
+
   // ---- realtime (Pusher-compatible)
   "realtime.status": () => realtime.realtimeStatus(),
   "realtime.install": (_p, actor) => realtime.install(actor),
@@ -249,6 +259,33 @@ export const methods: Record<string, Handler> = {
     return realtime.removeApp(p.name, actor);
   },
   "realtime.app.reveal": (p) => realtime.revealApp(p.name),
+
+  // ---- TURN (WebRTC relay for calls and games)
+  "turn.status": () => turn.turnStatus(),
+  "turn.install": (_p, actor) => turn.install(actor),
+  "turn.domain": (p, actor) => turn.setDomain(String(p.domain ?? "").trim(), actor),
+  "turn.uninstall": (p, actor) => {
+    if (p.confirm !== "turn") throw new Error("type turn to confirm");
+    return turn.uninstall(actor);
+  },
+  "turn.reveal": () => turn.turnSecret(),
+  /** New secret; apps that use TURN get it and restart, so nothing that leaked keeps working. */
+  "turn.rotate": async (_p, actor) => {
+    const secret = await turn.rotate(actor);
+    for (const a of apps.list()) {
+      const env = await appsOps.getEnv(a.name).catch(() => ({}) as Record<string, string>);
+      if (!env.TURN_SECRET) continue;
+      await appsOps.setEnv(a.name, { ...env, TURN_SECRET: secret }, actor);
+      if (a.active_slot) await appsOps.appAction(a.name, "restart", actor).catch(() => {});
+    }
+  },
+  "apps.addTurn": async (p, actor) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    const env = { get: () => appsOps.getEnv(app.name), set: (vars: Record<string, string>) => appsOps.setEnv(app.name, vars, actor) };
+    await turn.toAppEnv(env, app.name, actor);
+    if (app.active_slot) await appsOps.appAction(app.name, "restart", actor).catch(() => {});
+  },
 
   // ---- scheduled jobs and queues
   "jobs.list": async () => ({ jobs: await jobs.listJobs(), crontabs: await jobs.legacyCrontabs() }),

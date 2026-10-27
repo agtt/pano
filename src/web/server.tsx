@@ -20,6 +20,8 @@ import { ShieldPage, type ShieldView } from "./views/shield.tsx";
 import { JobsPage, type JobsView, type QueuesView } from "./views/jobs.tsx";
 import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import type { RealtimeView } from "./views/realtime.tsx";
+import type { TurnView } from "./views/turn.tsx";
+import { VulnsCard, type VulnView } from "./views/vulns.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
@@ -384,14 +386,15 @@ export function createWebApp() {
 
   // ---- database and cache servers
   const servicesPage = async (c: Context<Env>, secret?: { title: string; lines: [string, string][] }) => {
-    const [list, realtime, apps] = await Promise.all([
+    const [list, realtime, turn, apps] = await Promise.all([
       call<ServiceRow[]>("services.status"),
       call<RealtimeView>("realtime.status"),
+      call<TurnView>("turn.status"),
       call<{ name: string; kind: string }[]>("apps.list"),
     ]);
     const pg = list.find((s) => s.key === "postgres")?.installed ? await call<PgDb[]>("pg.list").catch(() => []) : [];
     const appNames = apps.filter((a) => a.kind === "managed").map((a) => a.name);
-    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} realtime={realtime} appNames={appNames} />);
+    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} realtime={realtime} turn={turn} appNames={appNames} />);
   };
   // ---- realtime
   app.post("/services/realtime/install", act("/services", async (c) => `Realtime ${(await call("realtime.install", {}, actor(c))).version} installed`));
@@ -430,6 +433,34 @@ export function createWebApp() {
       needOtp(c, f.otp);
       const a = await call<{ id: string; key: string; secret: string; name: string }>("realtime.app.reveal", { name: c.req.param("name") }, actor(c));
       return servicesPage(c, { title: `Realtime · ${a.name}`, lines: [["PUSHER_APP_ID", a.id], ["PUSHER_APP_KEY", a.key], ["PUSHER_APP_SECRET", a.secret]] });
+    } catch (e) {
+      return c.redirect(err("/services", e));
+    }
+  });
+  // ---- TURN
+  app.post("/services/turn/install", act("/services", async (c) => ((await call("turn.install", {}, actor(c))).adopted ? "TURN taken over (secret kept)" : "TURN installed")));
+  app.post("/services/turn/domain", act("/services", async (c, f) => {
+    await call("turn.domain", { domain: f.domain }, actor(c));
+  }));
+  app.post("/services/turn/to-app", act("/services", async (c, f) => {
+    await call("apps.addTurn", { name: f.app }, actor(c));
+    return `TURN settings added to ${f.app}`;
+  }));
+  app.post("/services/turn/rotate", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("turn.rotate", {}, actor(c));
+    return "New TURN secret; apps that use it were restarted";
+  }));
+  app.post("/services/turn/uninstall", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("turn.uninstall", { confirm: f.confirm }, actor(c));
+    return "TURN removed";
+  }));
+  app.post("/services/turn/reveal", async (c) => {
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      return servicesPage(c, { title: "TURN", lines: [["TURN_SECRET", await call<string>("turn.reveal", {}, actor(c))]] });
     } catch (e) {
       return c.redirect(err("/services", e));
     }
@@ -645,16 +676,36 @@ export function createWebApp() {
 
   // ---- security, import, activity
   app.get("/security", async (c) => {
-    const [findings, guard, alerts, edge] = await Promise.all([call("system.audit"), call<GuardView>("guard.get"), call<AlertsView>("alerts.get"), call("edge.status")]);
+    const [findings, guard, alerts, edge, vulns] = await Promise.all([
+      call("system.audit"),
+      call<GuardView>("guard.get"),
+      call<AlertsView>("alerts.get"),
+      call("edge.status"),
+      call<VulnView>("vulns.status"),
+    ]);
     return page(
       c,
       t("Security"),
       <div class="stack">
+        <VulnsCard csrf={c.get("s").csrf} v={vulns} />
         <ProtectCards csrf={c.get("s").csrf} guard={guard} alerts={alerts} behindCloudflare={edge.settings.behindCloudflare} />
         <SecurityPage findings={findings} />
       </div>,
     );
   });
+  app.post("/security/vulns/scan", act("/security", async (c) => {
+    await call("vulns.scan", {}, actor(c));
+    return "Checking; reload in a minute";
+  }));
+  app.post("/security/vulns/now", act("/security", async (c) => {
+    await call("vulns.patchNow", {}, actor(c));
+    return "Patching and checking; reload in a few minutes";
+  }));
+  app.post("/security/vulns/patch", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("vulns.patch", { os: f.os === "1", php: f.php === "1", edge: f.edge === "1" }, actor(c));
+    return "Automatic updates saved";
+  }));
   app.post("/security/guard", act("/security", async (c, f) => {
     needOtp(c, f.otp);
     await call("guard.set", { ssh: f.ssh === "1", http: f.http === "1" }, actor(c));

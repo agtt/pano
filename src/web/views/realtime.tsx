@@ -22,7 +22,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
       <Card title="Realtime (Pusher-compatible)">
         <p class="muted small">
           WebSockets for live updates (orders, chat, notifications) without Pusher's bill. Sockudo: speaks the Pusher protocol, so <code>pusher-js</code>,
-          Laravel Echo and every Pusher server SDK work unchanged. One binary of a few MB, about 10 MB of memory, nothing on disk until you install it, updates
+          Laravel Echo and every Pusher server SDK work unchanged. One binary (about 160 MB on disk, 40 MB of memory), nothing on disk until you install it, updates
           itself.
         </p>
         <form method="post" action="/services/realtime/install">

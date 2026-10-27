@@ -7,6 +7,8 @@ import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startMonitor } from "./alerts.ts";
 import { startRealtime } from "./realtime.ts";
+import { startVulns } from "./vulns.ts";
+import { applyTuning } from "./tune.ts";
 import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
@@ -102,6 +104,8 @@ export async function startAgent() {
   startMonitor();
   startShield();
   startRealtime();
+  startVulns();
+  applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.

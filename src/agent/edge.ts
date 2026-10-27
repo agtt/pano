@@ -103,9 +103,16 @@ function phpLines(site: Site): string[] {
   if (site.deny_paths.length) {
     out.push(`\t@pano_deny_dirs path ${site.deny_paths.flatMap((p) => (p === "/" ? ["*"] : [p, `${p}/*`])).join(" ")}`, "\trespond @pano_deny_dirs 404");
   }
-  out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`, "\tfile_server");
+  out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`, ...ASSET_CACHE, "\tfile_server");
   return out;
 }
+
+// Static files get a browser cache lifetime unless the site sets its own
+// (WordPress and most themes version their URLs with ?ver=).
+const ASSET_CACHE = [
+  "\t@pano_assets path *.css *.js *.mjs *.woff *.woff2 *.ttf *.otf *.svg *.png *.jpg *.jpeg *.gif *.webp *.avif *.ico *.mp4 *.webm *.pdf",
+  '\theader @pano_assets ?Cache-Control "public, max-age=604800"',
+];
 
 export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[] }): string {
   const { settings: s } = input;
@@ -191,7 +198,7 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
       // Caddy adds X-Forwarded-For/-Proto/-Host and keeps the Host header.
       out.push(`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`);
     } else if (site.kind === "static") {
-      out.push(`\troot * ${site.root}`, "\tfile_server");
+      out.push(`\troot * ${site.root}`, ...ASSET_CACHE, "\tfile_server");
     } else if (site.kind === "php") {
       out.push(...phpLines(site));
     } else {

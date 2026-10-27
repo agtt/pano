@@ -110,11 +110,15 @@ session.cookie_samesite = Lax
 session.gc_probability = 1
 session.gc_divisor = 100
 
+realpath_cache_size = 4096K
+realpath_cache_ttl = 600
+
 [opcache]
 opcache.enable = 1
-opcache.memory_consumption = 64
-opcache.interned_strings_buffer = 8
-opcache.max_accelerated_files = 10000
+; Shared by the site's workers; pages only count once they are used.
+opcache.memory_consumption = 128
+opcache.interned_strings_buffer = 16
+opcache.max_accelerated_files = 20000
 opcache.validate_timestamps = 1
 opcache.revalidate_freq = 2
 opcache.jit = disable
@@ -142,7 +146,7 @@ listen.mode = 0660
 listen.acl_users = ${EDGE_USER}
 pm = ondemand
 pm.max_children = 8
-pm.process_idle_timeout = 20s
+pm.process_idle_timeout = 60s
 pm.max_requests = 1000
 request_terminate_timeout = 300s
 security.limit_extensions = .php

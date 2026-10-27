@@ -8,6 +8,7 @@
 
 import { paths } from "../shared/config.ts";
 import { ensureJob } from "./backup.ts";
+import { sizes } from "./tune.ts";
 import { createDatabase } from "./mysql.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, run, writeAtomic } from "./sys.ts";
@@ -103,13 +104,19 @@ async function installMariadb(): Promise<Record_> {
   const conf = deb ? "/etc/mysql/mariadb.conf.d/90-pano.cnf" : "/etc/my.cnf.d/pano.cnf";
   await writeAtomic(
     conf,
-    `# Written by pano. Localhost only, small footprint.
+    `# Written by pano. Localhost only; memory sized to this server.
 [mysqld]
 bind-address = 127.0.0.1
 local-infile = 0
 performance_schema = OFF
-innodb_buffer_pool_size = 128M
-max_connections = 100
+innodb_buffer_pool_size = ${sizes().innodbPoolMb}M
+innodb_log_file_size = 256M
+innodb_flush_method = O_DIRECT
+max_connections = ${sizes().mariadbConnections}
+thread_cache_size = 32
+table_open_cache = 4000
+tmp_table_size = 64M
+max_heap_table_size = 64M
 character-set-server = utf8mb4
 collation-server = utf8mb4_unicode_ci
 `,
@@ -158,14 +165,18 @@ async function installPostgres(): Promise<Record_> {
   return { unit: `postgresql-${version}.service`, version, managed: true, psql: `/usr/pgsql-${version}/bin/psql`, dataDir };
 }
 
-const pgConf = () => `# Written by pano. Localhost only, small footprint.
+const pgConf = () => `# Written by pano. Localhost only; memory sized to this server.
 listen_addresses = 'localhost'
 password_encryption = 'scram-sha-256'
 max_connections = 50
-shared_buffers = 128MB
-work_mem = 4MB
-max_wal_size = 256MB
-min_wal_size = 64MB
+shared_buffers = ${sizes().pgSharedMb}MB
+effective_cache_size = ${sizes().pgEffectiveCacheMb}MB
+work_mem = 8MB
+maintenance_work_mem = 128MB
+random_page_cost = 1.1
+effective_io_concurrency = 200
+max_wal_size = 1GB
+min_wal_size = 128MB
 `;
 
 async function installValkey(): Promise<Record_> {
@@ -200,7 +211,7 @@ bind 127.0.0.1 -::1
 protected-mode yes
 port 6379
 requirepass ${password}
-maxmemory 256mb
+maxmemory ${sizes().valkeyMaxMb}mb
 maxmemory-policy noeviction
 `,
     0o640,

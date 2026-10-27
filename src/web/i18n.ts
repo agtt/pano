@@ -15,6 +15,7 @@ const tr: Record<string, string> = {
   Jobs: "Görevler",
   "Scheduled jobs": "Zamanlanmış görevler",
   "Backup engine": "Yedekleme yöntemi",
+  "Vulnerabilities and updates": "Güvenlik açıkları ve güncellemeler",
   "Run now": "Şimdi çalıştır",
   "Last run": "Son çalışma",
   "Next run": "Sonraki",

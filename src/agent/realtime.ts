@@ -1,5 +1,5 @@
 // Realtime: a Pusher-compatible WebSocket server, installed only when asked for.
-// Sockudo (MIT, one static Rust binary, a few MB of memory) speaks the Pusher
+// Sockudo (MIT, one static Rust binary, about 40 MB of memory) speaks the Pusher
 // protocol and HTTP API, so pusher-js, Laravel Echo and every Pusher server SDK
 // work unchanged once pointed at this server. Before install nothing is on disk;
 // after it, one binary. It keeps itself up to date within its major version:
