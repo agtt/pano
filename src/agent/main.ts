@@ -6,6 +6,7 @@ import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startMonitor } from "./alerts.ts";
+import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
 import { methods, needsOtp } from "./rpc.ts";
@@ -98,6 +99,7 @@ export async function startAgent() {
 
   startScheduler();
   startMonitor();
+  startShield();
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.

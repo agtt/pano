@@ -16,6 +16,7 @@ import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containe
 import { HomePage, LoginPage } from "./views/home.tsx";
 import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
 import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
+import { ShieldPage, type ShieldView } from "./views/shield.tsx";
 import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
@@ -602,6 +603,31 @@ export function createWebApp() {
     needOtp(c, f.otp);
     await call("alerts.save", { token: f.token, chatId: f.chatId }, actor(c));
     return "Telegram saved";
+  }));
+  // ---- shield
+  app.get("/shield", async (c) => page(c, t("Shield"), <ShieldPage csrf={c.get("s").csrf} s={await call<ShieldView>("shield.status")} />));
+  app.post("/shield/settings", act("/shield", async (c, f) => {
+    needOtp(c, f.otp);
+    const on = (k: string) => f[k] === "1";
+    await call("shield.set", { scan: on("scan"), autoQuarantine: on("autoQuarantine"), reputation: on("reputation"), bruteforce: on("bruteforce") }, actor(c));
+    return "Shield saved";
+  }));
+  app.post("/shield/scan", act("/shield", async (c, f) => {
+    await call("shield.scan", { full: f.full === "1" }, actor(c));
+    return "Scan started";
+  }));
+  app.post("/shield/deep", act("/shield", async (c) => {
+    await call("shield.deepScan", {}, actor(c));
+    return "ClamAV scan started (first run installs it)";
+  }));
+  app.post("/shield/finding", act("/shield", async (c, f) => {
+    if (!["quarantine", "restore", "ignore"].includes(f.action)) throw new Error("bad action");
+    if (f.action !== "quarantine") needOtp(c, f.otp);
+    await call(`shield.${f.action}`, { id: Number(f.id) }, actor(c));
+  }));
+  app.post("/shield/unban", act("/shield", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("shield.unban", { ip: f.ip }, actor(c));
   }));
   app.post("/security/alerts/test", act("/security", async () => call<string>("alerts.test")));
   const importPage = async (c: Context<Env>, cpReport?: CpReportView) => {

@@ -3,6 +3,7 @@ import { AppDetail, AppForm, GitPage } from "../src/web/views/apps.tsx";
 import { ServicesPage } from "../src/web/views/services.tsx";
 import { VpnPage } from "../src/web/views/vpn.tsx";
 import { ProtectCards } from "../src/web/views/protect.tsx";
+import { ShieldPage } from "../src/web/views/shield.tsx";
 import { ImportPage, PhpSiteNew, RuntimesPage, SiteForm } from "../src/web/views/pages.tsx";
 
 const versions = [
@@ -87,4 +88,23 @@ test("security cards render", () => {
   expect(html).toContain("198.51.100.7");
   expect(html).toContain("saved; empty = keep");
   expect(html).toContain("inactive while behind Cloudflare");
+});
+
+test("shield page renders", () => {
+  const html = String(
+    <ShieldPage
+      csrf="c"
+      s={{
+        settings: { scan: true, autoQuarantine: false, reputation: true, bruteforce: true },
+        scan: { running: false, last: { at: Date.now(), full: true, files: 10, found: 1, ms: 300 } },
+        deepScan: null, clamav: false, reputation: { at: Date.now(), v4: 1700, v6: 90, c2: 5 },
+        bans: [{ ip: "198.51.100.4", until: 2e9, reason: "login brute force" }],
+        findings: [{ id: 1, path: "/srv/x.php", rule: "php.eval.decode", severity: "malware", snippet: "eval(", status: "open", found_at: 1 }],
+        roots: ["/srv/pano/sites/a/public"],
+      }}
+    />,
+  );
+  expect(html).toContain("Quarantine");
+  expect(html).toContain("198.51.100.4");
+  expect(html).toContain("Deep scan (ClamAV, installs)");
 });

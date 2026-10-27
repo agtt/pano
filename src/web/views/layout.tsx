@@ -13,6 +13,7 @@ export const NAV: [string, string][] = [
   ["/edge", "Edge"],
   ["/vpn", "Private access"],
   ["/security", "Security"],
+  ["/shield", "Shield"],
   ["/import", "Import"],
   ["/activity", "Activity"],
 ];

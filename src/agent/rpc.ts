@@ -17,6 +17,7 @@ import * as importer from "./importer.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
+import * as shield from "./shield.ts";
 import { apps, audit, auditList, backups, deploys, settings, sites, type Site } from "./state.ts";
 import * as system from "./system.ts";
 import * as vpn from "./vpn.ts";
@@ -32,7 +33,7 @@ const SENSITIVE = new Set([
   "apps.delete", "apps.webhookSecret", "apps.env.reveal", "apps.env.set", "containers.delete", "sites.delete", "sites.revertPhp",
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
-  "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save",
+  "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -206,6 +207,21 @@ export const methods: Record<string, Handler> = {
   "pg.list": () => services.pgList(),
   "pg.create": (p, actor) => services.pgCreate({ name: p.name, user: p.user }, actor),
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
+
+  // ---- shield (malware scan, IP reputation, login brute force)
+  "shield.status": () => shield.shieldStatus(),
+  "shield.set": (p, actor) =>
+    shield.setShield({ scan: !!p.scan, autoQuarantine: !!p.autoQuarantine, reputation: !!p.reputation, bruteforce: !!p.bruteforce }, actor),
+  "shield.scan": (p, actor) => shield.startScan(!!p.full, actor),
+  "shield.deepScan": (_p, actor) => shield.deepScan(actor),
+  "shield.refresh": () => shield.refreshReputation(),
+  "shield.quarantine": (p, actor) => shield.quarantine(v.int(p.id, 1, 1e9, "id"), actor),
+  "shield.restore": (p, actor) => shield.restore(v.int(p.id, 1, 1e9, "id"), actor),
+  "shield.ignore": (p, actor) => shield.ignore(v.int(p.id, 1, 1e9, "id"), actor),
+  "shield.unban": (p, actor) => {
+    if (typeof p.ip !== "string" || !/^[0-9a-fA-F:.]{3,45}$/.test(p.ip)) throw new Error("bad address");
+    return shield.unban(p.ip, actor);
+  },
 
   // ---- alerts (Telegram)
   "alerts.get": () => alerts.alertSettings(),

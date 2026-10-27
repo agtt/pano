@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseRepo } from "../src/agent/github.ts";
 import { renderGuard } from "../src/agent/guard.ts";
+import { countLogins, matchRules, parseLists, renderBans, renderReputation } from "../src/agent/shield.ts";
+import { renderCaddyfile } from "../src/agent/edge.ts";
 import { formatCrons, parseCrons } from "../src/agent/apps.ts";
 import { clientConfig, renderConf, renderRules, renderUnit } from "../src/agent/vpn.ts";
 
@@ -53,5 +55,42 @@ describe("guard and crons", () => {
     expect(parseCrons(formatCrons(c))).toEqual(c);
     expect(() => parseCrons("daily node x.js")).toThrow();
     expect(() => parseCrons("$(reboot) | x")).toThrow();
+  });
+});
+
+describe("shield", () => {
+  const ids = (path: string, text: string) => matchRules(path, text).map((h) => h.rule.id);
+  test("catches web shells, droppers, spam redirects; leaves normal code alone", () => {
+    expect(ids("/s/x.php", "<?php eval(base64_decode($x));")).toContain("php.eval.decode");
+    expect(ids("/s/x.php", "<?php @system($_GET['c']);")).toContain("php.exec.input");
+    expect(ids("/s/x.php", "<?php $_POST['f']($_POST['a']);")).toContain("php.callable.input");
+    expect(ids("/s/x.php", "<?php $default_action = 'FilesMan';")).toContain("php.shell.known");
+    expect(ids("/s/x.php", `<?php preg_replace("/.*/e", $_REQUEST['x'], "");`)).toContain("php.preg.e");
+    expect(ids("/s/logo.png", "GIF89a<?php eval($_POST[1]); ?>")).toContain("php.in.media");
+    expect(ids("/s/wp-content/uploads/2024/x.php", "<?php echo 1;")).toContain("php.in.uploads");
+    expect(ids("/s/.htaccess", "RewriteCond %{HTTP_REFERER} google\nRewriteRule .* https://spam.example/ [R,L]")).toContain("htaccess.spam.redirect");
+    expect(ids("/s/x.php", `<?php $a = "${"QUJD".repeat(1000)}";`)).toContain("php.obfuscated.blob");
+    // ordinary WordPress-style code
+    expect(ids("/s/wp-includes/x.php", "<?php function get_option($n) { return apply_filters('x', base64_encode($n)); } exec('ls'); preg_replace('/a/i', 'b', $c);")).toEqual([]);
+    expect(ids("/s/app.js", "const x = document.createElement('div');")).toEqual([]);
+  });
+  test("reputation lists never block private or reserved networks", () => {
+    const d4 = ['{"cidr":"1.10.16.0/20","sblid":"SBL1"}', '{"cidr":"10.0.0.0/8"}', '{"cidr":"192.168.0.0/16"}', '{"type":"metadata"}'].join("\n");
+    const l = parseLists(d4, '{"cidr":"2001:db8:1::/48"}\n{"cidr":"fd00::/8"}', "# c2\n203.0.113.9\n127.0.0.1\n");
+    expect(l).toEqual({ v4: ["1.10.16.0/20"], v6: ["2001:db8:1::/48"], c2: ["203.0.113.9"] });
+    const nft = renderReputation(l);
+    expect(nft).toContain("ip saddr @drop4 drop");
+    expect(nft).toContain("ip daddr @c2 reject");
+    expect(nft.indexOf('iifname { "lo", "pano0" } accept')).toBeLessThan(nft.indexOf("@drop4 drop"));
+  });
+  test("login brute force: only POSTs to wp-login/xmlrpc, per address, over the limit", () => {
+    const line = (ip: string, uri: string, method = "POST") => JSON.stringify({ request: { client_ip: ip, method, uri } });
+    const now = Date.now();
+    const lines = [...Array(21)].map(() => line("198.51.100.4", "/wp-login.php"));
+    lines.push(...[...Array(30)].map(() => line("198.51.100.5", "/wp-login.php", "GET")), ...[...Array(30)].map(() => line("127.0.0.5", "/xmlrpc.php")));
+    expect(countLogins(lines, now)).toEqual(["198.51.100.4"]);
+    expect(renderBans(["198.51.100.4"], [])).toContain("elements = { 198.51.100.4 }");
+    const caddy = renderCaddyfile({ apps: [], sites: [], settings: { email: "", behindCloudflare: true, hooksDomain: "" }, certs: new Set(), banned: ["198.51.100.4"] });
+    expect(caddy).toContain("@pano_banned client_ip 198.51.100.4");
   });
 });

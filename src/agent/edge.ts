@@ -107,7 +107,7 @@ function phpLines(site: Site): string[] {
   return out;
 }
 
-export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string> }): string {
+export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[] }): string {
   const { settings: s } = input;
   const out: string[] = [
     "# Managed by pano. Every change here is overwritten; edit through the panel.",
@@ -137,6 +137,9 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     "\t\t-Server",
     "\t\t-X-Powered-By",
     "\t}",
+    // Addresses the shield caught brute-forcing logins (client_ip: the real visitor, also behind Cloudflare).
+    // Without Cloudflare the kernel drops them already (shield.ts); this covers visitors behind a proxy.
+    ...(input.banned?.length ? [`\t@pano_banned client_ip ${input.banned.join(" ")}`, "\thandle @pano_banned {", '\t\trespond "Too many login attempts" 429', "\t}"] : []),
     "}",
     "",
   ];
@@ -221,7 +224,8 @@ async function syncCerts(): Promise<Set<string>> {
 
 export async function buildCaddyfile(): Promise<string> {
   const certs = await syncCerts();
-  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs });
+  const banned = (JSON.parse(settings.get("shield.bans") ?? "[]") as string[]).filter((ip) => /^[0-9a-fA-F:.]{3,45}$/.test(ip));
+  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned });
 }
 
 export async function edgeInstalled() {

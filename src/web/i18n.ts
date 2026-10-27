@@ -12,6 +12,7 @@ const tr: Record<string, string> = {
   Runtimes: "Çalışma ortamları",
   Containers: "Konteynerler",
   "Private access": "Özel erişim",
+  Shield: "Kalkan",
   Devices: "Cihazlar",
   Security: "Güvenlik",
   Import: "İçe aktar",
