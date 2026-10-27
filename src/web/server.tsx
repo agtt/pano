@@ -24,6 +24,7 @@ import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
   BackupsPage,
+  type BackupSettings,
   DatabasesPage,
   EdgePage,
   ImportPage,
@@ -467,19 +468,31 @@ export function createWebApp() {
 
   // ---- backups
   const backupsPage = async (c: Context<Env>, key?: string) => {
-    const [r2, jobs, dbs, apps] = await Promise.all([
-      call("backup.r2.get"),
+    const [s, jobs, dbs, apps] = await Promise.all([
+      call<BackupSettings>("backup.settings"),
       call("backup.jobs"),
       call("db.list").then((d: any) => d.databases.filter((x: any) => !x.system).map((x: any) => x.name)).catch(() => []),
       call("apps.list").then((a: any[]) => a.filter((x) => x.kind === "managed").map((x) => x.name)),
     ]);
-    return page(c, t("Backups"), <BackupsPage csrf={c.get("s").csrf} r2={r2} jobs={jobs} dbs={dbs} apps={apps} key={key} />);
+    return page(c, t("Backups"), <BackupsPage csrf={c.get("s").csrf} s={s} jobs={jobs} dbs={dbs} apps={apps} key={key} />);
   };
   app.get("/backups", (c) => backupsPage(c));
-  app.post("/backups/r2", act("/backups", async (c, f) => {
-    await call("backup.r2.set", f, actor(c));
+  app.post("/backups/dest", act("/backups", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("backup.dest.set", f, actor(c));
+    return "Destination saved";
   }));
-  app.post("/backups/r2/test", act("/backups", async () => call<string>("backup.r2.test")));
+  app.post("/backups/dest/test", act("/backups", async (_c, f) => call<string>("backup.dest.test", { dest: f.dest })));
+  app.post("/backups/dest/clear", act("/backups", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("backup.dest.clear", { dest: f.dest }, actor(c));
+    return "Second destination removed";
+  }));
+  app.post("/backups/engine", act("/backups", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("backup.engine", { engine: f.engine }, actor(c));
+    return f.engine === "restic" ? "Incremental backups on" : "Full archives on";
+  }));
   app.post("/backups/key", async (c) => {
     const f = await form(c);
     try {

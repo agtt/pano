@@ -381,12 +381,15 @@ export type JobRow = {
   keep: number;
   last_run_at: number | null;
   last_status: string;
-  runs: { id: number; status: string; bytes: number; object_key: string; error: string; started_at: number }[];
+  runs: { id: number; status: string; bytes: number; object_key: string; error: string; started_at: number; dest: string; engine: string }[];
 };
+
+type Dest = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string };
+export type BackupSettings = { dests: { a: Dest; b: Dest }; engine: "archive" | "restic"; restic: string };
 
 export function BackupsPage(p: {
   csrf: string;
-  r2: { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string };
+  s: BackupSettings;
   jobs: JobRow[];
   dbs: string[];
   apps: string[];
@@ -399,38 +402,82 @@ export function BackupsPage(p: {
           Backup key (base64): <code class="secret">{p.key}</code> — keep an offline copy. Without it no backup can be restored.
         </div>
       ) : null}
-      <Card title="Storage: Cloudflare R2, Backblaze B2 or any S3">
-        <form method="post" action="/backups/r2" class="grid-form">
+      <Card title={t("Backup engine")}>
+        <form method="post" action="/backups/engine" class="row">
           <Csrf token={p.csrf} />
-          <Field label="Account ID" name="accountId" value={p.r2.accountId} placeholder="R2 only: 32 hex chars" />
-          <Field label="Bucket" name="bucket" value={p.r2.bucket} required />
-          <Field label="Prefix" name="prefix" value={p.r2.prefix} />
-          <Field label="Access key ID" name="accessKeyId" value={p.r2.accessKeyId} required />
-          <Field label="Secret access key" name="secretAccessKey" type="password" placeholder={p.r2.hasSecret ? "•••••• (stored; leave empty to keep)" : ""} autocomplete="new-password" />
-          <Field
-            label="Endpoint (other than R2)"
-            name="endpoint"
-            value={p.r2.endpoint}
-            placeholder="https://s3.eu-central-003.backblazeb2.com"
-            hint="B2: the bucket's S3 endpoint · Hetzner: https://fsn1.your-objectstorage.com · empty for R2"
-          />
-          <div class="actions">
-            <button class="btn primary">{t("Save")}</button>
-          </div>
+          <label class="check">
+            <input type="radio" name="engine" value="archive" checked={p.s.engine === "archive"} /> Full archives: every run is a complete encrypted copy;
+            nothing to install
+          </label>
+          <label class="check">
+            <input type="radio" name="engine" value="restic" checked={p.s.engine === "restic"} /> Incremental (restic{p.s.restic ? ` ${p.s.restic}` : ", installs"}):
+            only changes are uploaded, deduplicated and compressed, so many versions cost little more than one
+          </label>
+          <Otp />
+          <button class="btn">{t("Save")}</button>
         </form>
-        <div class="row">
-          <form method="post" action="/backups/r2/test">
-            <Csrf token={p.csrf} />
-            <button class="btn">{t("Test connection")}</button>
-          </form>
-          <form method="post" action="/backups/key" class="row">
-            <Csrf token={p.csrf} />
-            <Otp />
-            <button class="btn">{t("Export encryption key")}</button>
-          </form>
-        </div>
-        <p class="muted small">Backups are gzip-compressed and AES-256-GCM encrypted on this server before upload; the store only sees ciphertext.</p>
+        <p class="muted small">
+          Earlier backups stay restorable after a switch. Both are encrypted on this server before upload with the one backup key below; the store only sees
+          ciphertext. Every job goes to each destination that is set up.
+        </p>
+        <form method="post" action="/backups/key" class="row">
+          <Csrf token={p.csrf} />
+          <Otp />
+          <button class="btn">{t("Export encryption key")}</button>
+        </form>
       </Card>
+
+      <div class="cols">
+        {(["a", "b"] as const).map((d) => {
+          const x = p.s.dests[d];
+          return (
+            <Card title={d === "a" ? "Main destination" : "Second destination (optional)"}>
+              <form method="post" action="/backups/dest" class="grid-form">
+                <Csrf token={p.csrf} />
+                <input type="hidden" name="dest" value={d} />
+                <Field label="Account ID" name="accountId" value={x.accountId} placeholder="R2 only: 32 hex chars" />
+                <Field label="Bucket" name="bucket" value={x.bucket} required />
+                <Field label="Prefix" name="prefix" value={x.prefix} />
+                <Field label="Access key ID" name="accessKeyId" value={x.accessKeyId} required />
+                <Field label="Secret access key" name="secretAccessKey" type="password" placeholder={x.hasSecret ? "•••••• (stored; leave empty to keep)" : ""} autocomplete="new-password" />
+                <Field
+                  label="Endpoint (other than R2)"
+                  name="endpoint"
+                  value={x.endpoint}
+                  placeholder="https://s3.eu-central-003.backblazeb2.com"
+                  hint="B2: the bucket's S3 endpoint · Hetzner: https://fsn1.your-objectstorage.com · empty for R2"
+                />
+                <label class="field">
+                  <span>{t("Authenticator code")}</span>
+                  <Otp />
+                </label>
+                <div class="actions">
+                  <button class="btn primary">{t("Save")}</button>
+                </div>
+              </form>
+              {x.bucket ? (
+                <div class="row">
+                  <form method="post" action="/backups/dest/test">
+                    <Csrf token={p.csrf} />
+                    <input type="hidden" name="dest" value={d} />
+                    <button class="btn">{t("Test connection")}</button>
+                  </form>
+                  {d === "b" ? (
+                    <form method="post" action="/backups/dest/clear" class="row">
+                      <Csrf token={p.csrf} />
+                      <input type="hidden" name="dest" value="b" />
+                      <Otp />
+                      <button class="btn">Stop using it</button>
+                    </form>
+                  ) : null}
+                </div>
+              ) : d === "b" ? (
+                <p class="muted small">Another provider than the main one (for example R2 + Backblaze B2): one account or region going away cannot take the backups with it.</p>
+              ) : null}
+            </Card>
+          );
+        })}
+      </div>
 
       <Card title={t("Backups")}>
         {p.jobs.map((j) => (
@@ -457,7 +504,12 @@ export function BackupsPage(p: {
                     <Badge state={r.status} />
                   </td>
                   <td class="muted">{fmtTime(r.started_at)}</td>
-                  <td class="num">{r.bytes ? fmtBytes(r.bytes) : ""}</td>
+                  <td class="small muted">
+                    {r.dest === "b" ? "2nd" : "main"} · {r.engine === "restic" ? "incremental" : "full"}
+                  </td>
+                  <td class="num" title={r.engine === "restic" ? "new data uploaded" : "size"}>
+                    {r.bytes ? fmtBytes(r.bytes) : ""}
+                  </td>
                   <td class="small muted">{r.error || r.object_key}</td>
                   <td>
                     {r.status === "success" && r.object_key ? (

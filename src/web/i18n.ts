@@ -14,6 +14,7 @@ const tr: Record<string, string> = {
   "Private access": "Özel erişim",
   Jobs: "Görevler",
   "Scheduled jobs": "Zamanlanmış görevler",
+  "Backup engine": "Yedekleme yöntemi",
   "Run now": "Şimdi çalıştır",
   "Last run": "Son çalışma",
   "Next run": "Sonraki",

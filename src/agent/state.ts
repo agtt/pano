@@ -108,6 +108,10 @@ export type BackupRun = {
   error: string;
   started_at: number;
   finished_at: number | null;
+  /** "a" main store, "b" second store */
+  dest: string;
+  /** "archive": object_key is a file; "restic": object_key is a snapshot id */
+  engine: string;
 };
 
 const SCHEMA = `
@@ -235,6 +239,8 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
+  ["backup_runs", "dest", "TEXT NOT NULL DEFAULT 'a'"],
+  ["backup_runs", "engine", "TEXT NOT NULL DEFAULT 'archive'"],
 ];
 
 function migrate(d: Database) {
@@ -399,10 +405,10 @@ export const backups = {
     state().query("DELETE FROM backup_jobs WHERE id = ?").run(id);
     state().query("DELETE FROM backup_runs WHERE job_id = ?").run(id);
   },
-  startRun(jobId: number): number {
+  startRun(jobId: number, dest = "a", engine = "archive"): number {
     const r = state()
-      .query("INSERT INTO backup_runs (job_id, status, started_at) VALUES (?, 'running', ?) RETURNING id")
-      .get(jobId, now()) as { id: number };
+      .query("INSERT INTO backup_runs (job_id, status, started_at, dest, engine) VALUES (?, 'running', ?, ?, ?) RETURNING id")
+      .get(jobId, now(), dest, engine) as { id: number };
     return r.id;
   },
   finishRun(id: number, jobId: number, patch: { status: "success" | "failed"; object_key?: string; bytes?: number; error?: string }) {
@@ -418,8 +424,11 @@ export const backups = {
   run(id: number): BackupRun | null {
     return (state().query("SELECT * FROM backup_runs WHERE id = ?").get(id) as BackupRun) ?? null;
   },
-  successfulRuns(jobId: number): BackupRun[] {
-    return state().query("SELECT * FROM backup_runs WHERE job_id = ? AND status = 'success' ORDER BY id DESC").all(jobId) as BackupRun[];
+  /** Kept versions of a job in one store and engine, newest first. */
+  successfulRuns(jobId: number, dest: string, engine: string): BackupRun[] {
+    return state()
+      .query("SELECT * FROM backup_runs WHERE job_id = ? AND status = 'success' AND object_key != '' AND dest = ? AND engine = ? ORDER BY id DESC")
+      .all(jobId, dest, engine) as BackupRun[];
   },
   markDeleted(id: number) {
     state().query("UPDATE backup_runs SET object_key = '' WHERE id = ?").run(id);

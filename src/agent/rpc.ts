@@ -37,7 +37,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal",
+  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -424,9 +424,16 @@ export const methods: Record<string, Handler> = {
   "db.grant": (p, actor) => mysql.grant(p.db, p.user, actor),
 
   // ---- backups
-  "backup.r2.get": () => backup.getR2(),
-  "backup.r2.set": (p, actor) => backup.setR2(p, actor),
-  "backup.r2.test": () => backup.testR2(),
+  "backup.settings": async () => ({
+    dests: { a: await backup.getDest("a"), b: await backup.getDest("b") },
+    engine: backup.engine(),
+    restic: await backup.resticVersion(),
+  }),
+  "backup.dest.set": (p, actor) => backup.setDest(backup.parseDest(p.dest), p, actor),
+  "backup.dest.clear": (p, actor) => backup.clearDest(backup.parseDest(p.dest), actor),
+  "backup.dest.test": (p) => backup.testDest(backup.parseDest(p.dest)),
+  "backup.engine": (p, actor) => backup.setEngine(p.engine, actor),
+  "backup.prune": (_p, actor) => backup.pruneRepos(actor),
   "backup.key.export": (_p, actor) => backup.exportKey(actor),
   "backup.jobs": () => backups.jobs().map((j) => ({ ...j, runs: backups.runs(j.id, 10) })),
   "backup.job.add": (p, actor) => {

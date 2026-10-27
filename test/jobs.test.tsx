@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { due, regionFor } from "../src/agent/backup.ts";
+import { due, parseSummary, regionFor } from "../src/agent/backup.ts";
 import { maskSecrets, renderSiteCron } from "../src/agent/jobs.ts";
 import { judge, type Queue } from "../src/agent/queues.ts";
 import type { BackupJob, Site } from "../src/agent/state.ts";
@@ -75,6 +75,12 @@ test("backup store region follows the endpoint", () => {
   expect(regionFor("https://s3.eu-central-1.wasabisys.com")).toBe("eu-central-1");
   expect(regionFor("https://abc123.r2.cloudflarestorage.com")).toBe("auto");
   expect(regionFor("https://minio.local:9000")).toBe("us-east-1");
+});
+
+test("restic summary line", () => {
+  const out = '{"message_type":"status","percent_done":0.5}\n{"message_type":"summary","data_added":900,"data_added_packed":300,"snapshot_id":"abc"}\n';
+  expect(parseSummary(out)).toEqual({ snapshot: "abc", added: 300 });
+  expect(parseSummary('{"message_type":"error"}')).toBeNull();
 });
 
 test("daily and weekly backup schedules", () => {
