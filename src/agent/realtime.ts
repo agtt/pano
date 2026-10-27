@@ -146,6 +146,15 @@ export function renderConfig(apps: RealtimeApp[]): string {
     "[metrics]",
     "enabled = false",
     "",
+    // Mobile push (APNs/FCM/Web Push) is not used; one node needs no durable push store.
+    "[push]",
+    `storage_driver = "memory"`,
+    `queue_driver = "memory"`,
+    "allow_memory_drivers = true",
+    "fcm_enabled = false",
+    "apns_enabled = false",
+    "webpush_enabled = false",
+    "",
     "[app_manager]",
     `driver = "memory"`,
     "",
@@ -179,12 +188,16 @@ Wants=network-online.target
 
 [Service]
 DynamicUser=yes
-# The config holds the app secrets: root-only on disk, handed to the service as a credential.
-LoadCredential=config:${CONFIG}
+# The config holds the app secrets: root-only on disk; a copy only the service
+# can read lives in memory (/run) while it runs. (Not LoadCredential: containers
+# without credential support start it with no config, on defaults.)
+RuntimeDirectory=pano-realtime
+RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/bin/install -m 0400 -o pano-realtime ${CONFIG} /run/pano-realtime/config.toml
 # Even with a broken config file it stays on localhost without metrics.
 Environment=HOST=127.0.0.1 PORT=${PORT} METRICS_ENABLED=false
 WorkingDirectory=/
-ExecStart=${DIR}/current/sockudo --config \${CREDENTIALS_DIRECTORY}/config
+ExecStart=${DIR}/current/sockudo --config /run/pano-realtime/config.toml
 Restart=always
 RestartSec=2
 MemoryHigh=192M

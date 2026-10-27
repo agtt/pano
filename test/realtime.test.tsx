@@ -19,8 +19,8 @@ test("config is valid TOML with our apps, localhost only, no client events", () 
 test("unit: dynamic user, config as a credential, localhost forced by env", () => {
   const u = renderUnit("5.2.0");
   expect(u).toContain("DynamicUser=yes");
-  expect(u).toContain("LoadCredential=config:/etc/pano/realtime.toml");
-  expect(u).toContain("--config ${CREDENTIALS_DIRECTORY}/config");
+  expect(u).toContain("install -m 0400 -o pano-realtime /etc/pano/realtime.toml /run/pano-realtime/config.toml");
+  expect(u).toContain("--config /run/pano-realtime/config.toml");
   expect(u).toContain("HOST=127.0.0.1");
 });
 
