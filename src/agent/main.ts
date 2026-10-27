@@ -10,6 +10,7 @@ import { methods } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { appHosts, apps, backups, deploys, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
+import { recoverPending } from "./vpn.ts";
 
 export async function startAgent() {
   if (!DRY_RUN && process.getuid?.() !== 0) throw new Error("pano agent must run as root");
@@ -79,6 +80,8 @@ export async function startAgent() {
   });
 
   startScheduler();
+  // A lock change still waiting for confirmation survives agent restarts and reboots.
+  await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);

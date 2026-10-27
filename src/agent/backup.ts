@@ -8,6 +8,7 @@ import { hostname } from "node:os";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { appHome } from "./apps.ts";
+import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
 import { decryptStream, encryptStream } from "./crypto-stream.ts";
 import { dumpCommand, restoreCommand } from "./mysql.ts";
 import { apps, audit, backups, settings, type BackupJob } from "./state.ts";
@@ -95,9 +96,9 @@ export async function exportKey(actor: string): Promise<string> {
 
 export function validateJob(x: Record<string, unknown>) {
   const kind = x.kind;
-  if (kind !== "mysql" && kind !== "path" && kind !== "app") throw new Error("kind must be mysql, path or app");
+  if (kind !== "mysql" && kind !== "postgres" && kind !== "path" && kind !== "app") throw new Error("kind must be mysql, postgres, path or app");
   const target =
-    kind === "mysql" ? v.dbName(x.target) : kind === "app" ? v.appName(x.target) : v.pathUnder(x.target, PATH_ROOTS);
+    kind === "mysql" ? v.dbName(x.target) : kind === "postgres" ? pgName(x.target) : kind === "app" ? v.appName(x.target) : v.pathUnder(x.target, PATH_ROOTS);
   const schedule = String(x.schedule ?? "manual");
   if (!/^(manual|hourly|daily [0-2]\d:[0-5]\d)$/.test(schedule)) throw new Error("schedule: manual, hourly or 'daily HH:MM'");
   const name = String(x.name ?? "").trim() || `${kind}-${String(target).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
@@ -107,12 +108,13 @@ export function validateJob(x: Record<string, unknown>) {
 
 function sourceCommand(job: BackupJob): { cmd: string[]; ext: string } {
   if (job.kind === "mysql") return { cmd: dumpCommand(job.target), ext: "sql" };
+  if (job.kind === "postgres") return { cmd: pgDumpCommand(job.target), ext: "sql" };
   const excludes = ["--exclude=node_modules", "--exclude=.next/cache", "--exclude=./cache", "--exclude=.git"];
   if (job.kind === "app") {
     if (!apps.get(job.target)) throw new Error(`app ${job.target} no longer exists`);
     const home = fsPath(appHome(job.target));
     // slot-a/slot-b are symlinks to releases; --dereference stores their contents.
-    return { cmd: ["tar", "-cf", "-", "--dereference", "--ignore-failed-read", ...excludes, "-C", home, "shared", "slot-a", "slot-b"], ext: "tar" };
+    return { cmd: ["tar", "-cf", "-", "--dereference", "--ignore-failed-read", ...excludes, "-C", home, "shared", "data", "slot-a", "slot-b"], ext: "tar" };
   }
   return { cmd: ["tar", "-cf", "-", "--exclude=node_modules", "--exclude=.git", "-C", fsPath(job.target), "."], ext: "tar" };
 }
@@ -151,7 +153,7 @@ async function execute(job: BackupJob, runId: number) {
     const code = await proc.exited;
     const stderr = await new Response(proc.stderr).text();
     // tar exits 1 for "file changed as we read it", which is fine for live sites.
-    if (code !== 0 && !(job.kind !== "mysql" && code === 1)) {
+    if (code !== 0 && !((job.kind === "path" || job.kind === "app") && code === 1)) {
       await Promise.resolve(writer.end()).catch(() => {});
       await s3.delete(objectKey).catch(() => {});
       throw new Error(`${cmd[0]} exited ${code}: ${stderr.trim().split("\n").slice(-2).join(" ")}`);
@@ -191,6 +193,10 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
     const db = v.dbName(target || job.target);
     cmd = restoreCommand(db);
     where = `database ${db}`;
+  } else if (job.kind === "postgres") {
+    const db = pgName(target || job.target);
+    cmd = pgRestoreCommand(db);
+    where = `PostgreSQL database ${db}`;
   } else {
     const dir = `${paths.data}/restore/${job.name}-${runId}-${Date.now()}`;
     await ensureDir(dir, 0o700);

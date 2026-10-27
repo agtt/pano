@@ -11,6 +11,8 @@ const tr: Record<string, string> = {
   Backups: "Yedekler",
   Runtimes: "Çalışma ortamları",
   Containers: "Konteynerler",
+  "Private access": "Özel erişim",
+  Devices: "Cihazlar",
   Security: "Güvenlik",
   Import: "İçe aktar",
   Edge: "Edge / SSL",

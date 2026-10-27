@@ -24,6 +24,7 @@ export const paths = {
   containers: "/srv/pano/containers",
   containerEnv: "/etc/pano/containers",
   quadlets: "/etc/containers/systemd",
+  vpn: "/etc/pano/vpn",
   phpEtc: "/etc/pano/php",
   phpRun: "/run/pano-php",
   /** Drop cPanel cpmove archives here (scp) to import them. */
@@ -46,6 +47,8 @@ export const env = {
   /** Where the web UI listens. Keep it on localhost or a Tailscale address. */
   webHost: process.env.PANO_WEB_HOST ?? "127.0.0.1",
   webPort: Number(process.env.PANO_WEB_PORT ?? 7800),
+  /** Set by the panel when "panel over WireGuard" is on: the UI also listens on this VPN address. */
+  webVpnHost: process.env.PANO_WEB_VPN_HOST ?? "",
   /** Caddy's on-demand TLS "ask" endpoint, served by the agent on localhost only. */
   askPort: Number(process.env.PANO_ASK_PORT ?? 7801),
   /** Localhost-only listener for GitHub webhooks; the edge exposes just /hooks/* on the hooks domain. */

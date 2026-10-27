@@ -438,7 +438,7 @@ export function BackupsPage(p: {
                     {r.status === "success" && r.object_key ? (
                       <form method="post" action={`/backups/runs/${r.id}/restore`} class="row">
                         <Csrf token={p.csrf} />
-                        {j.kind === "mysql" ? <input name="target" value={j.target} class="short" title="target database" /> : null}
+                        {j.kind === "mysql" || j.kind === "postgres" ? <input name="target" value={j.target} class="short" title="target database" /> : null}
                         <Otp />
                         <button class="btn small">{t("Restore")}</button>
                       </form>
@@ -456,6 +456,7 @@ export function BackupsPage(p: {
             <span>{t("Kind")}</span>
             <select name="kind">
               <option value="mysql">mysql</option>
+              <option value="postgres">postgres</option>
               <option value="app">app</option>
               <option value="path">path</option>
             </select>

@@ -11,9 +11,11 @@ import { csrfOk, login, logout, pruneSessions, session, stepUp, type Session } f
 import { t } from "./i18n.ts";
 import css from "./static/app.css" with { type: "text" };
 import js from "./static/app.js" with { type: "text" };
-import { AppDetail, AppForm, AppsPage, type AppRow } from "./views/apps.tsx";
+import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
+import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
+import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
@@ -33,7 +35,12 @@ import {
 
 type Env = { Variables: { s: Session } };
 
-const COOKIE = env.insecureCookies ? "pano_session" : "__Host-pano_session";
+/**
+ * On the WireGuard address the panel is plain HTTP inside an encrypted tunnel, where
+ * browsers refuse Secure cookies; everywhere else (localhost via SSH tunnel) they are Secure.
+ */
+const plainHttp = (c: Context) => env.insecureCookies || (!!env.webVpnHost && new URL(c.req.url).hostname === env.webVpnHost);
+const cookieName = (c: Context) => (plainHttp(c) ? "pano_session" : "__Host-pano_session");
 const WP_SNIPPET = `// Added for pano edge (TLS terminates at Caddy)
 if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
     $_SERVER['HTTPS'] = 'on';
@@ -57,7 +64,7 @@ export function createWebApp() {
   app.use("*", async (c, next) => {
     await next();
     for (const [k, val] of Object.entries(SECURITY_HEADERS)) c.res.headers.set(k, val);
-    if (!env.insecureCookies) c.res.headers.set("Strict-Transport-Security", "max-age=31536000");
+    if (!plainHttp(c)) c.res.headers.set("Strict-Transport-Security", "max-age=31536000");
   });
 
   app.get("/static/app.css", (c) => c.body(css, 200, { "content-type": "text/css; charset=utf-8", "cache-control": "max-age=3600" }));
@@ -71,13 +78,13 @@ export function createWebApp() {
     const ip = getConnInfo(c).remote.address ?? "?";
     const r = await login(String(f.username ?? ""), String(f.password ?? ""), String(f.otp ?? ""), ip);
     if ("error" in r) return c.html(<Layout title={t("Sign in")} path="/login"><LoginPage error={r.error} /></Layout>, 401);
-    setCookie(c, COOKIE, r.sid, { httpOnly: true, secure: !env.insecureCookies, sameSite: "Strict", path: "/" });
+    setCookie(c, cookieName(c), r.sid, { httpOnly: true, secure: !plainHttp(c), sameSite: "Strict", path: "/" });
     return c.redirect("/");
   });
 
   // Everything below needs a session; every POST also needs the CSRF token and a same-origin request.
   app.use("*", async (c, next) => {
-    const s = session(getCookie(c, COOKIE));
+    const s = session(getCookie(c, cookieName(c)));
     if (!s) return c.req.method === "GET" ? c.redirect("/login") : c.text("unauthorized", 401);
     if (c.req.method === "POST") {
       if (!sameOrigin(c)) return c.text("bad origin", 403);
@@ -89,8 +96,8 @@ export function createWebApp() {
   });
 
   app.post("/logout", (c) => {
-    logout(getCookie(c, COOKIE));
-    deleteCookie(c, COOKIE, { path: "/", secure: !env.insecureCookies });
+    logout(getCookie(c, cookieName(c)));
+    deleteCookie(c, cookieName(c), { path: "/", secure: !plainHttp(c) });
     return c.redirect("/login");
   });
 
@@ -133,9 +140,35 @@ export function createWebApp() {
   };
 
   app.get("/apps", async (c) => page(c, t("Apps"), <AppsPage apps={await call("apps.list")} />));
-  app.get("/apps/new", async (c) =>
-    page(c, t("New app"), <Card title={t("New app")}><AppForm csrf={c.get("s").csrf} runtimes={await runtimeList()} action="/apps" submit="Create" /></Card>),
-  );
+  app.get("/apps/new", async (c) => {
+    const [runtimes, repos] = await Promise.all([runtimeList(), call<RepoOption[]>("github.repos").catch(() => [])]);
+    return page(c, t("New app"), <Card title={t("New app")}><AppForm csrf={c.get("s").csrf} runtimes={runtimes} repos={repos} action="/apps" submit="Create" /></Card>);
+  });
+
+  // ---- git connections
+  app.get("/git", async (c) => {
+    const [github, edge] = await Promise.all([call("github.status"), call("edge.status")]);
+    return page(c, "Git", <GitPage csrf={c.get("s").csrf} github={github} hooksDomain={edge.settings.hooksDomain} />);
+  });
+  app.post("/git/github/connect", act("/git", async (c, f) => {
+    needOtp(c, f.otp);
+    const r = await call("github.connect", { token: f.token }, actor(c));
+    return `GitHub: ${r.login}`;
+  }));
+  app.post("/git/github/disconnect", act("/git", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("github.disconnect", {}, actor(c));
+  }));
+  app.post("/apps/:name/github-link", async (c) => {
+    const name = c.req.param("name");
+    await form(c);
+    try {
+      const r = await call("github.link", { name }, actor(c));
+      return back(c, `/apps/${name}`, `Linked ${r.repo}: pushes now deploy`);
+    } catch (e) {
+      return c.redirect(err(`/apps/${name}`, e));
+    }
+  });
   app.post("/apps", act("/apps/new", async (c, f) => {
     const a = await call("apps.create", appParams(f), actor(c));
     return `/apps/${a.name}`;
@@ -150,9 +183,12 @@ export function createWebApp() {
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
       ]);
-      const hooks = (await call("edge.status")).settings.hooksDomain;
+      const [edge, gh] = await Promise.all([call("edge.status"), call("github.status")]);
+      const hooks = edge.settings.hooksDomain;
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} />);
+      const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
+      const github = { connected: gh.connected, repo: m?.[1] ?? "" };
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} />);
     } catch (e) {
       return c.redirect(err("/apps", e));
     }
@@ -309,6 +345,44 @@ export function createWebApp() {
     await call("db.drop", { name: f.name, confirm: f.confirm }, actor(c));
   }));
 
+  // ---- database and cache servers
+  const servicesPage = async (c: Context<Env>, secret?: { title: string; lines: [string, string][] }) => {
+    const list = await call<ServiceRow[]>("services.status");
+    const pg = list.find((s) => s.key === "postgres")?.installed ? await call<PgDb[]>("pg.list").catch(() => []) : [];
+    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} />);
+  };
+  app.get("/services", (c) => servicesPage(c));
+  app.post("/services/:key/install", act("/services", async (c) => {
+    const r = await call("services.install", { service: c.req.param("key") }, actor(c));
+    return `${c.req.param("key")} ${r.version} installed`;
+  }));
+  app.post("/services/:key/action", act("/services", async (c, f) => {
+    await call("services.action", { service: c.req.param("key"), action: f.action }, actor(c));
+  }));
+  // Secrets are rendered in the POST response only, never put in a redirect URL.
+  app.post("/services/valkey/url", async (c) => {
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      return servicesPage(c, { title: "Valkey", lines: [["REDIS_URL", await call<string>("services.valkeyUrl", {}, actor(c))]] });
+    } catch (e) {
+      return c.redirect(err("/services", e));
+    }
+  });
+  app.post("/services/postgres/create", async (c) => {
+    const f = await form(c);
+    try {
+      const r = await call("pg.create", { name: f.name, user: f.user }, actor(c));
+      return servicesPage(c, { title: `PostgreSQL · ${r.name}`, lines: [["User", r.user], ["Password", r.password], ["DATABASE_URL", r.url]] });
+    } catch (e) {
+      return c.redirect(err("/services", e));
+    }
+  });
+  app.post("/services/postgres/drop", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("pg.drop", { name: f.name, confirm: f.confirm }, actor(c));
+  }));
+
   // ---- backups
   const backupsPage = async (c: Context<Env>, key?: string) => {
     const [r2, jobs, dbs, apps] = await Promise.all([
@@ -405,6 +479,42 @@ export function createWebApp() {
     needOtp(c, f.otp);
     await call("containers.delete", { name: c.req.param("name"), confirm: f.confirm, removeData: f.removeData === "1" }, actor(c));
     return "/containers";
+  }));
+
+  // ---- private access (WireGuard)
+  const remoteIp = (c: Context<Env>) => (getConnInfo(c).remote.address ?? "").replace(/^::ffff:/, "");
+  const viaVpn = (c: Context<Env>) => /^10\.77\.0\.\d+$/.test(remoteIp(c));
+  app.get("/vpn", async (c) => page(c, t("Private access"), <VpnPage csrf={c.get("s").csrf} s={await call<VpnStatus>("vpn.status")} viaVpn={viaVpn(c)} />));
+  app.post("/vpn/enable", act("/vpn", async (c, f) => {
+    await call("vpn.enable", { port: f.port, endpoint: f.endpoint }, actor(c));
+    return "Private access enabled";
+  }));
+  app.post("/vpn/disable", act("/vpn", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("vpn.disable", {}, actor(c));
+  }));
+  app.post("/vpn/peer/add", async (c) => {
+    const f = await form(c);
+    try {
+      // The config (and for phones the private key) is rendered once in this response, never put in a URL.
+      const created = await call("vpn.peer.add", { name: f.name, publicKey: f.publicKey }, actor(c));
+      return page(c, t("Private access"), <VpnPage csrf={c.get("s").csrf} s={await call<VpnStatus>("vpn.status")} viaVpn={viaVpn(c)} created={created} />);
+    } catch (e) {
+      return c.redirect(err("/vpn", e));
+    }
+  });
+  app.post("/vpn/peer/remove", act("/vpn", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("vpn.peer.remove", { id: Number(f.id) }, actor(c));
+  }));
+  app.post("/vpn/locks", act("/vpn", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("vpn.locks", { panel: f.panel === "1", ssh: f.ssh === "1", services: f.services === "1", confirmSeconds: Number(f.confirmSeconds) }, actor(c));
+    return "Locks applied";
+  }));
+  app.post("/vpn/confirm", act("/vpn", async (c) => {
+    await call("vpn.confirm", { remote: remoteIp(c) }, actor(c));
+    return "Locks confirmed";
   }));
 
   // ---- edge
@@ -518,6 +628,23 @@ export function createHookApp() {
     }
     try {
       const r = await call("apps.webhook", { name: c.req.param("name"), body, signature: c.req.header("x-hub-signature-256") ?? "", ref }, "github");
+      return c.json(r, 202);
+    } catch {
+      return c.text("rejected", 403);
+    }
+  });
+  app.post("/hooks/gitlab/:name", async (c) => {
+    const body = await c.req.text();
+    if (body.length > 1_000_000) return c.text("too large", 413);
+    if (c.req.header("x-gitlab-event") !== "Push Hook") return c.text("ignored", 202);
+    let ref = "";
+    try {
+      ref = String(JSON.parse(body).ref ?? "");
+    } catch {
+      return c.text("bad json", 400);
+    }
+    try {
+      const r = await call("apps.webhook", { name: c.req.param("name"), body, gitlabToken: c.req.header("x-gitlab-token") ?? "-", ref }, "gitlab");
       return c.json(r, 202);
     } catch {
       return c.text("rejected", 403);

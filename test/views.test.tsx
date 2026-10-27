@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { AppDetail, AppForm } from "../src/web/views/apps.tsx";
+import { AppDetail, AppForm, GitPage } from "../src/web/views/apps.tsx";
+import { ServicesPage } from "../src/web/views/services.tsx";
+import { VpnPage } from "../src/web/views/vpn.tsx";
 import { ImportPage, PhpSiteNew, RuntimesPage, SiteForm } from "../src/web/views/pages.tsx";
 
 const versions = [
@@ -27,7 +29,10 @@ test("new views render", () => {
   expect(html(<SiteForm site={{ ...site, kind: "legacy", converted_from: null }} csrf="c" versions={versions} />)).toContain("Move to pano PHP");
   expect(html(<PhpSiteNew csrf="c" versions={versions} />)).toContain("end of life");
   expect(html(<RuntimesPage csrf="c" installed={[]} available={null} php={versions} />)).toContain("PHP 8.5");
-  expect(html(<AppDetail csrf="c" app={app} env={{}} logs="" runtimes={[]} hookUrl="" />)).toContain("worker");
+  expect(html(<AppDetail csrf="c" app={app} env={{}} logs="" runtimes={[]} hookUrl="https://h/hooks/github/fp" github={{ connected: true, repo: "me/fp" }} />)).toContain("worker");
+  expect(html(<AppDetail csrf="c" app={app} env={{}} logs="" runtimes={[]} hookUrl="https://h/hooks/github/fp" github={{ connected: true, repo: "me/fp" }} />)).toContain("/hooks/gitlab/fp");
+  expect(html(<AppForm csrf="c" runtimes={[]} action="/x" submit="Create" repos={[{ full_name: "me/fp", ssh_url: "git@github.com:me/fp.git", default_branch: "main", private: true }]} />)).toContain("git@github.com:me/fp.git");
+  expect(html(<GitPage csrf="c" github={{ connected: false, login: "" }} hooksDomain="" />)).toContain("github_pat_");
   expect(html(<AppForm csrf="c" app={app} runtimes={[]} action="/x" submit="Save" />)).toContain("jobs | . | - | 128 | bun w.ts");
   const imp = html(
     <ImportPage
@@ -47,4 +52,31 @@ test("new views render", () => {
   );
   expect(imp).toContain("cpanel/apply");
   expect(imp).toContain("New passwords are shown only now");
+});
+
+test("vpn and services views render", () => {
+  const html = (x: unknown) => String(x);
+  const base = {
+    installed: true, enabled: true, running: true, address: "10.77.0.1", port: 51820, endpoint: "203.0.113.1", publicKey: "k",
+    peers: [{ id: 1, name: "laptop", ip: "10.77.0.2", public_key: "p", created_at: 0, endpoint: "1.2.3.4:5", handshake: 1, rx: 10, tx: 20 }],
+    locks: { panel: true, ssh: true, services: false }, pending: { previous: { panel: false, ssh: false, services: false }, deadline: Date.now() + 60_000 }, sshPort: 22,
+  };
+  expect(html(<VpnPage csrf="c" s={{ ...base, enabled: false }} viaVpn={false} />)).toContain("Enable private access");
+  const on = html(<VpnPage csrf="c" s={base} viaVpn={true} created={{ name: "phone", ip: "10.77.0.3", config: "[Interface]", qr: "data:image/svg+xml;base64,AA", generated: true }} />);
+  expect(on).toContain("Confirm, it works");
+  expect(on).toContain("laptop");
+  const svc = html(
+    <ServicesPage
+      csrf="c"
+      list={[
+        { key: "postgres", label: "PostgreSQL", port: 5432, note: "", installed: true, version: "18", managed: true, active: "active", memory: 1, enabled: true },
+        { key: "valkey", label: "Valkey", port: 6379, note: "", installed: false, version: "", managed: false, active: "", memory: 0, enabled: false },
+      ]}
+      pg={[{ name: "app", sizeMb: 7.5, owner: "app", system: false }]}
+      secret={{ title: "x", lines: [["DATABASE_URL", "postgres://a"]] }}
+    />,
+  );
+  expect(svc).toContain("/services/valkey/install");
+  expect(svc).toContain("postgres://a");
+  expect(svc).toContain("$DATA_DIR");
 });

@@ -24,13 +24,22 @@ export type AppRow = {
   external_unit: string;
   processes: (ProcessSpec & { port_a: number; port_b: number })[];
   ask_url: string;
+  auto_deploy: number;
   status: { active: string; memory: number; since: string; procs?: { name: string; active: string; memory: number }[] };
   deploys?: { id: number; status: string; trigger: string; commit_sha: string; release: string; error: string; started_at: number; finished_at: number | null }[];
 };
 
 export function AppsPage({ apps }: { apps: AppRow[] }) {
   return (
-    <Card title={t("Apps")} actions={<a class="btn primary" href="/apps/new">{t("New app")}</a>}>
+    <Card
+      title={t("Apps")}
+      actions={
+        <span class="row">
+          <a class="btn" href="/git">Git</a>
+          <a class="btn primary" href="/apps/new">{t("New app")}</a>
+        </span>
+      }
+    >
       {apps.length ? (
         <table>
           <thead>
@@ -75,7 +84,9 @@ admin  | apps/admin  | admin.example.com            | 768  |
 online | apps/online | *.example.com, *             | 1024 |
 worker | .           | -                            | 256  | bun packages/api/cron/worker.ts`;
 
-export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { runtime: string; version: string }[]; action: string; submit: string }) {
+export type RepoOption = { full_name: string; ssh_url: string; default_branch: string; private: boolean };
+
+export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { runtime: string; version: string }[]; action: string; submit: string; repos?: RepoOption[] }) {
   const a = p.app ?? {};
   const opts = p.runtimes.map((r) => `${r.runtime}@${r.version}`);
   const current = a.runtime ? `${a.runtime}@${a.runtime_version}` : opts[0];
@@ -95,7 +106,17 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           ))}
         </select>
       </label>
-      <Field label="Repository" name="repo" value={a.repo} required placeholder="https://github.com/me/app.git or git@github.com:me/app.git" />
+      <label class="field">
+        <span>{t("Repository")}</span>
+        <input name="repo" value={a.repo} required list="repo-list" placeholder="https://github.com/me/app.git or git@github.com:me/app.git" />
+        {p.repos?.length ? (
+          <datalist id="repo-list">
+            {p.repos.map((r) => (
+              <option value={r.ssh_url}>{`${r.full_name}${r.private ? " (private)" : ""} · ${r.default_branch}`}</option>
+            ))}
+          </datalist>
+        ) : null}
+      </label>
       <Field label="Branch" name="branch" value={a.branch ?? "main"} required />
       <Field label="Root directory" name="root_dir" value={a.root_dir} placeholder="apps/web (monorepo)" />
       <Field label="Install command" name="install_cmd" value={a.install_cmd} hint={t("Leave empty to detect automatically")} />
@@ -114,6 +135,10 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         </small>
       </label>
       <Field label="Ask URL (catch-all TLS)" name="ask_url" value={a.ask_url} placeholder="http://127.0.0.1:4100/api/tls-ask" hint="for a * route" />
+      <label class="check">
+        <input type="hidden" name="auto_deploy" value="0" />
+        <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
+      </label>
       <div class="actions">
         <button class="btn primary">{t(p.submit)}</button>
       </div>
@@ -121,7 +146,16 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
   );
 }
 
-export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, string>; logs: string; runtimes: { runtime: string; version: string }[]; deployId?: number; hookUrl: string }) {
+export function AppDetail(p: {
+  csrf: string;
+  app: AppRow;
+  env: Record<string, string>;
+  logs: string;
+  runtimes: { runtime: string; version: string }[];
+  deployId?: number;
+  hookUrl: string;
+  github: { connected: boolean; repo: string };
+}) {
   const a = p.app;
   const managed = a.kind === "managed";
   return (
@@ -270,14 +304,28 @@ export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, st
             </form>
           </Card>
 
-          <Card title={`${t("Deploy key")} · ${t("Webhook")}`}>
+          <Card title={`Git · ${t("Webhook")}`}>
+            {p.github.connected && p.github.repo ? (
+              <form method="post" action={`/apps/${a.name}/github-link`} class="row">
+                <Csrf token={p.csrf} />
+                <button class="btn primary">Link {p.github.repo}</button>
+                <span class="muted small">Adds a read-only deploy key and the push webhook on GitHub; deploys then show as a check on each commit.</span>
+              </form>
+            ) : p.github.repo ? (
+              <p class="muted small">
+                <a href="/git">Connect GitHub</a> to link this repository in one click, or set it up by hand below.
+              </p>
+            ) : null}
+            <p class="muted small">{a.auto_deploy !== 0 ? `Every push to ${a.branch} deploys.` : "Automatic deploys are off: pushes are ignored."}</p>
             <form method="post" action={`/apps/${a.name}/deploy-key`} class="row">
               <Csrf token={p.csrf} />
               <button class="btn">Show deploy key</button>
-              <span class="muted small">Add it as a read-only deploy key on the repository (private repos, git@ URL).</span>
+              <span class="muted small">Read-only deploy key for private repos (git@ URL): GitHub, GitLab, Gitea, Forgejo, Bitbucket.</span>
             </form>
-            <p>
-              GitHub webhook: <code>{p.hookUrl}</code> · content type <code>application/json</code> · event <code>push</code>
+            <p class="small">
+              GitHub / Gitea / Forgejo webhook: <code>{p.hookUrl}</code> · <code>application/json</code> · event <code>push</code>
+              <br />
+              GitLab webhook: <code>{p.hookUrl.replace("/hooks/github/", "/hooks/gitlab/")}</code> · secret token = webhook secret · push events
             </p>
             <form method="post" action={`/apps/${a.name}/webhook-secret`} class="row">
               <Csrf token={p.csrf} />
@@ -307,6 +355,51 @@ export function AppDetail(p: { csrf: string; app: AppRow; env: Record<string, st
           }
         />
       </Card>
+    </div>
+  );
+}
+
+export function GitPage(p: { csrf: string; github: { connected: boolean; login: string }; hooksDomain: string }) {
+  return (
+    <div class="stack">
+      <Card title="GitHub">
+        {p.github.connected ? (
+          <>
+            <p>
+              Connected as <b>{p.github.login}</b>. New apps can pick a repository from the list, and "Link" on an app adds its deploy key and webhook. Each deploy
+              reports back to the commit as the <code>pano/deploy</code> check.
+            </p>
+            <form method="post" action="/git/github/disconnect" class="row">
+              <Csrf token={p.csrf} />
+              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+              <button class="btn danger">Disconnect</button>
+            </form>
+          </>
+        ) : (
+          <form method="post" action="/git/github/connect">
+            <Csrf token={p.csrf} />
+            <p class="muted small">
+              Create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens), limited to the repositories you deploy, with
+              repository permissions: Contents read, Metadata read, Administration read and write (deploy keys), Webhooks read and write, Commit statuses read
+              and write. It is stored root-only on this server and never shown again.
+            </p>
+            <Field label="Token" name="token" type="password" autocomplete="off" required placeholder="github_pat_…" />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+            <button class="btn primary">Connect GitHub</button>
+          </form>
+        )}
+      </Card>
+      <Card title="GitLab · Gitea · Forgejo · Bitbucket">
+        <p class="muted small">
+          No token needed: add the app's deploy key (read-only) to the repository and the webhook shown on the app page. GitLab sends the webhook secret as its
+          secret token; Gitea and Forgejo sign like GitHub.
+        </p>
+      </Card>
+      {p.hooksDomain ? null : (
+        <p class="flash err">
+          Automatic deploys need a webhook domain so the Git host can reach this server: <a href="/edge">Edge page</a>.
+        </p>
+      )}
     </div>
   );
 }

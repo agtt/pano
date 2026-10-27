@@ -196,3 +196,5 @@ details.job .row { margin: 8px 0; }
   .top { gap: 10px; padding: 0 12px; }
   .logout .muted { display: none; }
 }
+img.qr { display: block; background: #fff; padding: 8px; border-radius: 8px; margin-bottom: 12px; }
+form.inline { display: inline; }

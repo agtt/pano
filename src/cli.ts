@@ -23,6 +23,18 @@ async function main() {
       const web = createWebApp();
       // No idle timeout: installs and imports keep a request open for minutes (the panel is never public).
       Bun.serve({ hostname: env.webHost, port: env.webPort, fetch: web.fetch, maxRequestBodySize: 2_000_000, idleTimeout: 0 });
+      if (env.webVpnHost) {
+        // Also on the WireGuard address; the interface may come up after us, so keep trying.
+        const listenVpn = () => {
+          try {
+            Bun.serve({ hostname: env.webVpnHost, port: env.webPort, fetch: web.fetch, maxRequestBodySize: 2_000_000, idleTimeout: 0 });
+            console.log(`[web] also on http://${env.webVpnHost}:${env.webPort} (WireGuard)`);
+          } catch {
+            setTimeout(listenVpn, 10_000);
+          }
+        };
+        listenVpn();
+      }
       const hooks = createHookApp();
       Bun.serve({ hostname: "127.0.0.1", port: env.hookPort, fetch: hooks.fetch, maxRequestBodySize: 1_100_000 });
       console.log(`[web] http://${env.webHost}:${env.webPort} (hooks on 127.0.0.1:${env.hookPort})`);

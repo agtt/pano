@@ -11,6 +11,7 @@ import { appendFile, readdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
+import { reportStatus } from "./github.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { installed, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
@@ -44,6 +45,7 @@ export type AppInput = {
   memory_mb: number;
   processes: ProcessSpec[];
   ask_url: string;
+  auto_deploy: number;
 };
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
@@ -66,6 +68,8 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     memory_mb: v.int(x.memory_mb ?? 1024, 128, 65536, "memory limit"),
     processes,
     ask_url: askUrl,
+    // The form sends a hidden "0" plus the checkbox's "1"; API callers may leave it out (on).
+    auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
   };
 }
 
@@ -105,6 +109,8 @@ export async function createApp(input: AppInput, actor: string): Promise<App> {
   await ensureDir(home, 0o750, user);
   await ensureDir(`${home}/releases`, 0o750, user);
   await ensureDir(`${home}/cache`, 0o750, user);
+  // Survives deploys (releases do not): SQLite files, uploads. Exposed as DATA_DIR.
+  await ensureDir(`${home}/data`, 0o700, user);
   await ensureDir(`${home}/.ssh`, 0o700, user);
   await ensureDir(`${home}/run`, 0o755);
   await ensureDir(`${home}/shared`, 0o750);
@@ -191,7 +197,7 @@ Group=${appUser(app.name)}
 WorkingDirectory=${home}/slot-%i${sub ? `/${sub}` : ""}
 EnvironmentFile=-${home}/shared/.env
 EnvironmentFile=${home}/run/${key}-%i.env
-Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} NEXT_TELEMETRY_DISABLED=1
+Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} DATA_DIR=${home}/data NEXT_TELEMETRY_DISABLED=1
 Environment=PATH=${path}
 ExecStart=${home}/run/${key}-%i.sh
 Restart=always
@@ -357,6 +363,7 @@ async function deploy(app: App, id: number) {
   const slot: "a" | "b" = app.active_slot === "a" ? "b" : "a";
   const procs = procsOf(app);
   const binPath = await toolPath(app);
+  let commit = "";
 
   try {
     if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
@@ -370,6 +377,8 @@ async function deploy(app: App, id: number) {
     });
     const sha = (await run(["git", "-C", fsPath(dir), "rev-parse", "HEAD"], { user, check: false })).stdout.trim();
     await log(`commit ${sha}`);
+    commit = sha;
+    void reportStatus(app, sha, "pending", `Deploying (deploy ${id})`);
     // Every process directory sees the shared .env (Next.js reads it from its own directory).
     for (const d of new Set(procs.map((p) => (p.dir ? `${workdir}/${p.dir}` : workdir)))) {
       await run(["ln", "-sfn", fsPath(`${home}/shared/.env`), fsPath(`${d}/.env`)], { user, check: false });
@@ -425,6 +434,7 @@ async function deploy(app: App, id: number) {
     await pruneReleases(app.name, [release]);
     await log(`\ndeploy ${id} done: ${release} (${sha.slice(0, 7)})`);
     deploys.finish(id, { status: "success", commit_sha: sha, release });
+    void reportStatus(app, sha, "success", `Live: release ${release}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await log(`\nFAILED: ${msg}`);
@@ -432,6 +442,7 @@ async function deploy(app: App, id: number) {
       await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
+    if (commit) void reportStatus(app, commit, "failure", msg);
   }
 }
 
@@ -559,13 +570,17 @@ export async function readDeployLog(id: number, offset = 0): Promise<{ text: str
   return { text: await file.slice(offset, size).text(), offset: size };
 }
 
-// ---- GitHub webhook ----------------------------------------------------------
+// ---- push webhooks -------------------------------------------------------------
 
-export function verifyWebhook(name: string, body: string, signature: string, ref: string): { deploy: boolean; reason: string } {
+/**
+ * GitHub, Gitea and Forgejo sign the body (X-Hub-Signature-256); GitLab sends the
+ * secret itself (X-Gitlab-Token). Either way it is compared in constant time.
+ */
+export function verifyWebhook(name: string, body: string, signature: string, ref: string, gitlabToken = ""): { deploy: boolean; reason: string } {
   const app = mustGet(name);
-  const expected = "sha256=" + createHmac("sha256", app.webhook_secret).update(body).digest("hex");
+  const expected = gitlabToken ? app.webhook_secret : "sha256=" + createHmac("sha256", app.webhook_secret).update(body).digest("hex");
   const a = Buffer.from(expected);
-  const b = Buffer.from(signature || "");
+  const b = Buffer.from(gitlabToken || signature || "");
   if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("bad signature");
   if (ref && ref !== `refs/heads/${app.branch}`) return { deploy: false, reason: `ignored push to ${ref}` };
   return { deploy: true, reason: "ok" };

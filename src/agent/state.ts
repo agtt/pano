@@ -33,6 +33,8 @@ export type App = {
   processes: Process[];
   /** on-demand TLS for a "*" route: local URL asked whether a host may get a certificate */
   ask_url: string;
+  /** 1: a push to the branch deploys (webhook); 0: only manual deploys */
+  auto_deploy: number;
   created_at: number;
   updated_at: number;
 };
@@ -84,7 +86,7 @@ export type Deploy = {
 export type BackupJob = {
   id: number;
   name: string;
-  kind: "mysql" | "path" | "app";
+  kind: "mysql" | "postgres" | "path" | "app";
   target: string;
   schedule: string;
   keep: number;
@@ -190,6 +192,14 @@ CREATE TABLE IF NOT EXISTS containers (
   memory_mb INTEGER NOT NULL DEFAULT 512,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS vpn_peers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  public_key TEXT NOT NULL UNIQUE,
+  psk TEXT NOT NULL,
+  ip TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL,
@@ -216,6 +226,7 @@ export function state(): Database {
 const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "processes", "TEXT NOT NULL DEFAULT '[]'"],
   ["apps", "ask_url", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "auto_deploy", "INTEGER NOT NULL DEFAULT 1"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
 ];

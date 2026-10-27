@@ -12,7 +12,8 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 
 | Area | |
 |---|---|
-| Apps | git → sandboxed install/build → blue/green systemd slots → health check → traffic switch. Zero-downtime deploys, rollback by redeploying, GitHub push webhooks, deploy keys, per-app env, logs, memory limits. Lockfile-aware (bun, npm, pnpm, yarn). |
+| Apps | git → sandboxed install/build → blue/green systemd slots → health check → traffic switch. Zero-downtime deploys, rollback by redeploying, per-app env, logs, memory limits. Lockfile-aware (bun, npm, pnpm, yarn). `DATA_DIR` is a per-app directory kept across deploys (SQLite, uploads) and included in app backups. |
+| Git | Push-to-deploy from GitHub, GitLab, Gitea, Forgejo (webhook per app, HMAC or token checked in constant time; can be switched off per app). Optional GitHub connection (one fine-grained token, root-only): repository picker, one-click link (read-only deploy key + webhook) and a `pano/deploy` commit status on every deploy, Vercel-style. No preview environments yet. |
 | Runtimes | Any Node.js / Bun version side by side under `/opt/pano/runtimes`, checksum-verified. Apps pin their own version; OS updates never change them. |
 | Edge | Caddy (pinned, checksum-verified) on :80/:443: automatic HTTPS, HTTP/3, on-demand TLS for customer domains, Cloudflare real-IP. Config is rendered from state and validated before every reload. |
 | Monorepos | One build, several processes: `name \| dir \| routes \| memory \| start` per line. Routes are hosts, `host/path`, `*.host` or `*` (any host, on-demand TLS with an ask URL). Web processes get blue/green slots and health checks; workers have no port and never run twice (old one stops before the new one starts). |
@@ -20,6 +21,8 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 | Sites | Proxy (path → port routes), static, PHP, and legacy sites still served by the old OpenLiteSpeed on localhost. |
 | Containers (optional) | Off until enabled; then Podman comes from the distribution (no daemon, nothing runs without a container). Each container is a Quadlet systemd unit in its own user namespace (root inside = unprivileged uid outside), memory/pids capped, published on 127.0.0.1 only, HTTPS through the edge when given a domain. Templates: Redis, PostgreSQL, Meilisearch, Uptime Kuma, n8n; empty passwords/keys are generated. |
 | Databases | MariaDB/MySQL: list with sizes and grants, create db + user, reset passwords, drop (with 2FA). |
+| Services | MariaDB, PostgreSQL (latest major from postgresql.org, signed) and Valkey (Redis-compatible) installed on demand, natively, on 127.0.0.1 only, with small memory settings and passwords (scram-sha-256 / requirepass). PostgreSQL databases with their own role, `DATABASE_URL` shown once; encrypted PostgreSQL backups. An existing MariaDB (CyberPanel) is used as is, never reconfigured. |
+| Private access | Optional WireGuard network of your own (no coordination server, no account): devices by public key, or phone config + QR shown once; preshared key per device. Locks close SSH and admin/database ports to everything but the tunnel and serve the panel on the tunnel address; a new lock is undone automatically unless confirmed from inside the tunnel, so a mistake cannot lock you out. |
 | Backups | mysqldump / tar → gzip → **AES-256-GCM on the server** → streamed multipart upload to R2. Schedules, retention, restore. R2 only ever sees ciphertext. |
 | Import | Reads a CyberPanel/OLS server (vhosts, proxies, PHP versions, certificates, suspended sites, databases, the systemd/PM2 services behind each port) into pano. Read-only until cutover. Legacy sites can then be moved one by one onto pano PHP (files copied, `deny from all` directories stay closed, one-click revert). |
 | cPanel | Imports `cpmove-USER.tar.gz` full backups: one PHP site per domain (main, addon, subdomain, parked as aliases), databases loaded by their own user (never root), users recreated with their original password hashes, `.htaccess` deny rules kept, escaping symlinks removed. Mail, cron, DNS and FTP are listed for manual follow-up. |
@@ -82,13 +85,14 @@ dev/vm.sh            # full test in an OrbStack AlmaLinux 9 VM (real systemd, Ma
 dev/vm-e2e.sh        # then: import, deploy Next.js/Bun, cutover, zero-downtime redeploy, rollback
 dev/vm-e2e-php.sh    # then: monorepo app, PHP site, OLS → PHP move/revert, cPanel import
 dev/vm-e2e-containers.sh  # then: enable Podman, nginx behind the edge, Redis template
+dev/vm-e2e-vpn-services.sh  # then: WireGuard from a netns "laptop", locks + auto-undo, PostgreSQL/Valkey on demand
 ```
 
 Layout: `src/agent` (root: state, apps, php, edge, backups, importer, cpanel, cutover, audit), `src/web` (UI, auth), `src/shared` (paths, validation).
 
 ## Roadmap
 
-WordPress one-click install · CyberPanel backup files from another server · Debian/Ubuntu PHP (sury) · Postgres ·
+WordPress one-click install · CyberPanel backup files from another server · Debian/Ubuntu PHP (sury) · preview deployments per branch / PR · Android build runner ·
 DNS-01 / Cloudflare Origin CA certificates · metrics history · multiple admins with roles · mail (deliberately out of scope).
 
 ## License

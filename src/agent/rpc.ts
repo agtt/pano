@@ -6,17 +6,25 @@ import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
 import * as cpanel from "./cpanel.ts";
+import * as github from "./github.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
 import * as importer from "./importer.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
+import * as services from "./services.ts";
 import { apps, audit, auditList, backups, deploys, settings, sites, type Site } from "./state.ts";
 import * as system from "./system.ts";
+import * as vpn from "./vpn.ts";
 
 type P = Record<string, any>;
 type Handler = (p: P, actor: string) => unknown | Promise<unknown>;
+
+const serviceKey = (s: unknown): services.ServiceKey => {
+  if (typeof s !== "string" || !(s in services.SERVICES)) throw new Error("unknown service");
+  return s as services.ServiceKey;
+};
 
 const allDomains = () => ({ apps: apps.list(), sites: sites.list() });
 
@@ -67,9 +75,24 @@ export const methods: Record<string, Handler> = {
     return a.webhook_secret;
   },
   "apps.webhook": (p) => {
-    const r = appsOps.verifyWebhook(p.name, String(p.body ?? ""), String(p.signature ?? ""), String(p.ref ?? ""));
+    const source = p.gitlabToken ? "gitlab" : "github";
+    const r = appsOps.verifyWebhook(p.name, String(p.body ?? ""), String(p.signature ?? ""), String(p.ref ?? ""), String(p.gitlabToken ?? ""));
     if (!r.deploy) return r;
-    return { ...r, id: appsOps.startDeploy(p.name, "webhook", "github") };
+    if (apps.get(p.name)?.auto_deploy === 0) return { deploy: false, reason: "auto deploy is off" };
+    return { ...r, id: appsOps.startDeploy(p.name, "push", source) };
+  },
+
+  // ---- GitHub connection (optional)
+  "github.status": () => github.status(),
+  "github.connect": (p, actor) => github.connect({ token: p.token }, actor),
+  "github.disconnect": (_p, actor) => github.disconnect(actor),
+  "github.repos": () => github.repos(),
+  "github.link": async (p, actor) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    const linked = await github.link(app, await appsOps.deployKey(app.name), actor);
+    if (app.repo !== linked.sshUrl) apps.update(app.name, { repo: linked.sshUrl });
+    return linked;
   },
 
   // ---- runtimes
@@ -102,6 +125,28 @@ export const methods: Record<string, Handler> = {
     if (p.confirm !== p.name) throw new Error("type the container name to confirm");
     return containers.deleteContainer(String(p.name), !!p.removeData, actor);
   },
+
+  // ---- database and cache servers (installed on demand)
+  "services.status": () => services.status(),
+  "services.install": (p, actor) => services.install(serviceKey(p.service), actor),
+  "services.action": (p, actor) => {
+    if (!["start", "stop", "restart"].includes(p.action)) throw new Error("bad action");
+    return services.action(serviceKey(p.service), p.action, actor);
+  },
+  "services.valkeyUrl": () => services.valkeyUrl(),
+  "pg.list": () => services.pgList(),
+  "pg.create": (p, actor) => services.pgCreate({ name: p.name, user: p.user }, actor),
+  "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
+
+  // ---- private access (WireGuard, off until enabled)
+  "vpn.status": () => vpn.status(),
+  "vpn.enable": (p, actor) => vpn.enable({ port: p.port, endpoint: p.endpoint }, actor),
+  "vpn.disable": (_p, actor) => vpn.disable(actor),
+  "vpn.peer.add": (p, actor) => vpn.addPeer({ name: p.name, publicKey: p.publicKey }, actor),
+  "vpn.peer.remove": (p, actor) => vpn.removePeer(v.int(p.id, 1, 1e9, "id"), actor),
+  "vpn.locks": (p, actor) => vpn.setLocks({ panel: !!p.panel, ssh: !!p.ssh, services: !!p.services }, Number(p.confirmSeconds ?? 300), actor),
+  // `remote` is the address the web process saw the request come from.
+  "vpn.confirm": (p, actor) => vpn.confirm(String(p.remote ?? ""), actor),
 
   // ---- PHP (installed per version, only when a site needs it)
   "php.versions": async () => {
