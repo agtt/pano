@@ -6,7 +6,8 @@ import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startScheduler } from "./backup.ts";
-import { methods } from "./rpc.ts";
+import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
+import { methods, needsOtp } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { appHosts, apps, backups, deploys, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
@@ -22,6 +23,9 @@ export async function startAgent() {
   // Only root and the web process (group pano) may reach the socket.
   if (group && process.getuid?.() === 0) await chown(fsPath(paths.run), 0, group.gid);
 
+  await migrateFromWeb().catch((e) => console.error(`[agent] otp migration: ${e}`));
+  const cli = await cliToken();
+
   const socket = fsPath(paths.agentSocket);
   await unlink(socket).catch(() => {});
   Bun.serve({
@@ -31,16 +35,28 @@ export async function startAgent() {
       const method = url.pathname.replace(/^\/rpc\//, "");
       const handler = methods[method];
       if (req.method !== "POST" || !handler) return Response.json({ ok: false, error: "unknown method" }, { status: 404 });
-      let body: { params?: Record<string, unknown>; actor?: string };
+      let body: { params?: Record<string, unknown>; actor?: string; otp?: string; grant?: string };
       try {
         body = (await req.json()) as typeof body;
       } catch {
         return Response.json({ ok: false, error: "bad json" }, { status: 400 });
       }
       const actor = String(body.actor ?? "unknown").slice(0, 64);
+      const params = body.params ?? {};
+      // Step-up: a code checked here (not in the web process), or a grant from one checked moments ago.
+      let grant: string | undefined;
+      let stepped = req.headers.get("x-pano-cli") === cli || grantValid(body.grant, actor);
+      if (!stepped && body.otp) {
+        if (!checkOtp(actor, body.otp)) return Response.json({ ok: false, error: "Authenticator code wrong or already used (wait for a new code)." }, { status: 403 });
+        stepped = true;
+        grant = issueGrant(actor);
+      }
+      if (!stepped && needsOtp(method, params)) {
+        return Response.json({ ok: false, error: "Authenticator code required for this action." }, { status: 403 });
+      }
       try {
-        const result = await handler(body.params ?? {}, actor);
-        return Response.json({ ok: true, result: result ?? null });
+        const result = await handler(params, actor);
+        return Response.json({ ok: true, result: result ?? null, grant });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (!(e instanceof ValidationError)) console.error(`[agent] ${method}: ${msg}`);

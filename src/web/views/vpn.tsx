@@ -123,6 +123,7 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
               hint="Best: create the key on the device and paste only its public key; the private key then never exists anywhere else."
             />
           </div>
+          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
           <button class="btn primary">+ Device</button>
         </form>
       </Card>

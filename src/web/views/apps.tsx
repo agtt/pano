@@ -139,6 +139,14 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         <input type="hidden" name="auto_deploy" value="0" />
         <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
       </label>
+      {a.name ? (
+        <Field
+          label="Authenticator code"
+          name="otp"
+          autocomplete="one-time-code"
+          hint="Only when changing the repository, branch, directory or commands: they decide what runs with the app's secrets."
+        />
+      ) : null}
       <div class="actions">
         <button class="btn primary">{t(p.submit)}</button>
       </div>
@@ -155,6 +163,7 @@ export function AppDetail(p: {
   deployId?: number;
   hookUrl: string;
   github: { connected: boolean; repo: string };
+  revealed?: boolean;
 }) {
   const a = p.app;
   const managed = a.kind === "managed";
@@ -294,13 +303,34 @@ export function AppDetail(p: {
           <Card title={t("Environment variables")}>
             <form method="post" action={`/apps/${a.name}/env`}>
               <Csrf token={p.csrf} />
-              <textarea name="env" rows={8} spellcheck={false} class="mono" placeholder="DATABASE_URL=mysql://...">
+              <textarea name="env" rows={8} spellcheck={false} class="mono" placeholder="DATABASE_URL=postgres://...">
                 {Object.entries(p.env)
                   .map(([k, val]) => `${k}=${val}`)
                   .join("\n")}
               </textarea>
-              <p class="muted small">KEY=value, one per line. Applied on the next deploy or restart.</p>
-              <button class="btn">{t("Save")}</button>
+              <p class="muted small">
+                KEY=value, one per line. {p.revealed ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."} Saving
+                needs a code. Applied on the next deploy or restart.
+              </p>
+              <div class="row">
+                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+                <button class="btn">{t("Save")}</button>
+                {p.revealed ? null : (
+                  <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
+                    Show values
+                  </button>
+                )}
+              </div>
+            </form>
+            <form method="post" action={`/apps/${a.name}/database`} class="row">
+              <Csrf token={p.csrf} />
+              <select name="engine">
+                <option value="postgres">PostgreSQL → DATABASE_URL</option>
+                <option value="mariadb">MariaDB / MySQL → DATABASE_URL</option>
+                <option value="valkey">Valkey / Redis → REDIS_URL</option>
+              </select>
+              <button class="btn primary">+ Database</button>
+              <span class="muted small">Creates the database and its own user (server installed on first use), writes the URL here and restarts the app.</span>
             </form>
           </Card>
 

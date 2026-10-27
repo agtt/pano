@@ -23,6 +23,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 | Databases | MariaDB/MySQL: list with sizes and grants, create db + user, reset passwords, drop (with 2FA). |
 | Services | MariaDB, PostgreSQL (latest major from postgresql.org, signed) and Valkey (Redis-compatible) installed on demand, natively, on 127.0.0.1 only, with small memory settings and passwords (scram-sha-256 / requirepass). PostgreSQL databases with their own role, `DATABASE_URL` shown once; encrypted PostgreSQL backups. An existing MariaDB (CyberPanel) is used as is, never reconfigured. |
 | Private access | Optional WireGuard network of your own (no coordination server, no account): devices by public key, or phone config + QR shown once; preshared key per device. Locks close SSH and admin/database ports to everything but the tunnel and serve the panel on the tunnel address; a new lock is undone automatically unless confirmed from inside the tunnel, so a mistake cannot lock you out. |
+| Disk | Two releases per app (live + instant rollback); a release that never went live is removed at once. bun/pnpm hard-link packages from a per-app store, Next.js keeps one build cache outside the releases (faster rebuilds). Journal capped at 300 MB. PostgreSQL WAL capped at 256 MB. |
 | Backups | mysqldump / tar → gzip → **AES-256-GCM on the server** → streamed multipart upload to R2. Schedules, retention, restore. R2 only ever sees ciphertext. |
 | Import | Reads a CyberPanel/OLS server (vhosts, proxies, PHP versions, certificates, suspended sites, databases, the systemd/PM2 services behind each port) into pano. Read-only until cutover. Legacy sites can then be moved one by one onto pano PHP (files copied, `deny from all` directories stay closed, one-click revert). |
 | cPanel | Imports `cpmove-USER.tar.gz` full backups: one PHP site per domain (main, addon, subdomain, parked as aliases), databases loaded by their own user (never root), users recreated with their original password hashes, `.htaccess` deny rules kept, escaping symlinks removed. Mail, cron, DNS and FTP are listed for manual follow-up. |
@@ -34,10 +35,18 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
   `pano-agent` over a unix socket (`root:pano 0660`). The agent exposes a fixed list of typed operations, validates every argument and never
   runs a caller-supplied shell command as root.
 - **Apps are isolated.** Each app has its own system user and directory; units use `ProtectSystem=strict`, `NoNewPrivileges`, an empty
-  capability set, a syscall filter and a memory cap. Builds run in a transient `systemd-run` sandbox as the app user.
+  capability set, a syscall filter and a memory cap, no access to cloud metadata (169.254.169.254) or other users' processes. Builds run in a
+  transient `systemd-run` sandbox as the app user.
 - **Panel is never public.** It listens on `127.0.0.1` (SSH tunnel) or a Tailscale address. Only `/hooks/*` can be exposed through the edge for GitHub.
 - **Login:** argon2id + mandatory TOTP, lockout after 5 failures, hashed session ids, 30 min idle / 12 h absolute expiry, `SameSite=Strict`
-  cookies, CSRF tokens + origin checks, strict CSP. Destructive actions (delete, drop, restore, cutover, key export) require a fresh TOTP code.
+  cookies, CSRF tokens + origin checks, strict CSP.
+- **2FA is enforced by the agent, not the UI.** TOTP secrets live root-only with the agent; the web process can ask whether a code is right
+  but cannot make one (5 wrong codes lock the user for 15 minutes, each code works once). Revealing a secret (env values, webhook secret,
+  Valkey password, backup key), changing env or what an app runs (repository, branch, commands), dropping/restoring data, adding a VPN device
+  and cutover all need a fresh code checked by the agent. So even a fully compromised `pano-web` cannot read secrets, plant code into an app
+  or open the network. Root's `pano rpc` uses a root-only token instead.
+- **Env values are masked.** The UI shows keys and `••••••••`; a masked line is kept as is when saving. "+ Database" creates the database and
+  its own user and writes `DATABASE_URL`/`REDIS_URL` straight into the app's env: the password never passes through the browser.
 - **Secrets:** R2 secret and backup key are root-only files and write-only from the UI. Every action is in the audit log.
 - **Independent of CyberPanel.** pano keeps its own binary, runtimes, Caddy, users and units; CyberPanel/OS updates do not change them.
 
@@ -85,6 +94,7 @@ dev/vm.sh            # full test in an OrbStack AlmaLinux 9 VM (real systemd, Ma
 dev/vm-e2e.sh        # then: import, deploy Next.js/Bun, cutover, zero-downtime redeploy, rollback
 dev/vm-e2e-php.sh    # then: monorepo app, PHP site, OLS → PHP move/revert, cPanel import
 dev/vm-e2e-containers.sh  # then: enable Podman, nginx behind the edge, Redis template
+dev/vm-e2e-secrets.sh     # then: + Database into an app env, masked env, agent-side 2FA, a compromised pano-web
 dev/vm-e2e-vpn-services.sh  # then: WireGuard from a netns "laptop", locks + auto-undo, PostgreSQL/Valkey on demand
 ```
 

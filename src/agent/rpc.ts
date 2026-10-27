@@ -1,7 +1,8 @@
 // The complete list of things the web UI can ask the root agent to do. Each
 // handler validates its own input; there is no generic "run command" method.
 
-import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, v } from "../shared/validate.ts";
+import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
+import { checkOtp } from "./otp.ts";
 import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
@@ -19,6 +20,39 @@ import * as system from "./system.ts";
 import * as vpn from "./vpn.ts";
 
 type P = Record<string, any>;
+
+/**
+ * Operations that need a fresh authenticator code, checked by the agent itself:
+ * anything that reveals a secret, destroys data, opens network access or changes
+ * which code an app runs.
+ */
+const SENSITIVE = new Set([
+  "apps.delete", "apps.webhookSecret", "apps.env.reveal", "apps.env.set", "containers.delete", "sites.delete", "sites.revertPhp",
+  "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
+  "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
+  "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove",
+]);
+export const ENV_MASK = "••••••••";
+
+/** App fields that decide what runs as the app (and so can read its secrets). */
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes"] as const;
+
+export function needsOtp(method: string, p: P): boolean {
+  if (SENSITIVE.has(method)) return true;
+  if (method === "apps.update") {
+    const cur = apps.get(String(p.name ?? ""));
+    if (!cur) return false;
+    let next: appsOps.AppInput;
+    try {
+      next = appsOps.validateAppInput(p);
+    } catch {
+      return false; // the handler rejects it the same way
+    }
+    const norm = (a: Pick<appsOps.AppInput, (typeof CODE_FIELDS)[number]>) => CODE_FIELDS.map((k) => (k === "processes" ? formatProcesses(a.processes) : a[k]));
+    return JSON.stringify(norm(next)) !== JSON.stringify(norm(cur));
+  }
+  return false;
+}
 type Handler = (p: P, actor: string) => unknown | Promise<unknown>;
 
 const serviceKey = (s: unknown): services.ServiceKey => {
@@ -29,6 +63,9 @@ const serviceKey = (s: unknown): services.ServiceKey => {
 const allDomains = () => ({ apps: apps.list(), sites: sites.list() });
 
 export const methods: Record<string, Handler> = {
+  // ---- login: the web checks the password, the agent checks the code
+  "auth.otp": (p) => checkOtp(String(p.username ?? ""), p.code),
+
   // ---- overview
   "system.info": () => system.info(),
   "system.audit": () => system.audit(),
@@ -62,11 +99,30 @@ export const methods: Record<string, Handler> = {
   },
   "apps.logs": (p) => appsOps.appLogs(p.name, p.lines ?? 300),
   "apps.deployLog": (p) => appsOps.readDeployLog(v.int(p.id, 1, 1e9, "id"), v.int(p.offset ?? 0, 0, 1e12, "offset")),
-  "apps.env.get": (p) => appsOps.getEnv(p.name),
-  "apps.env.set": (p, actor) => {
+  // Values never leave the agent without a code; the editor shows masks and keeps masked values unchanged.
+  "apps.env.get": async (p) => Object.fromEntries(Object.keys(await appsOps.getEnv(p.name)).map((k) => [k, ENV_MASK])),
+  "apps.env.reveal": (p) => appsOps.getEnv(p.name),
+  "apps.env.set": async (p, actor) => {
+    const current = await appsOps.getEnv(p.name);
     const vars: Record<string, string> = {};
-    for (const [k, val] of Object.entries((p.vars ?? {}) as Record<string, unknown>)) vars[v.envKey(k)] = v.envValue(val);
+    for (const [k, val] of Object.entries((p.vars ?? {}) as Record<string, unknown>)) {
+      const key = v.envKey(k);
+      if (val === ENV_MASK) {
+        if (!(key in current)) throw new Error(`${key}: enter a value`);
+        vars[key] = current[key]!;
+      } else vars[key] = v.envValue(val);
+    }
     return appsOps.setEnv(p.name, vars, actor);
+  },
+  "apps.addDatabase": async (p, actor) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    if (!["postgres", "mariadb", "valkey"].includes(p.engine)) throw new Error("engine: postgres, mariadb or valkey");
+    const env = { get: () => appsOps.getEnv(app.name), set: (vars: Record<string, string>) => appsOps.setEnv(app.name, vars, actor) };
+    const r = await services.databaseForApp(app.name, p.engine, env, actor);
+    // Running apps pick it up now (DATABASE_URL is read at runtime, also by Next.js).
+    if (app.active_slot) await appsOps.appAction(app.name, "restart", actor).catch(() => {});
+    return r;
   },
   "apps.deployKey": (p) => appsOps.deployKey(p.name),
   "apps.webhookSecret": (p) => {

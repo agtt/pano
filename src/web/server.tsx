@@ -6,8 +6,8 @@ import { getConnInfo } from "hono/bun";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Child } from "hono/jsx";
 import { env } from "../shared/config.ts";
-import { call } from "./agent.ts";
-import { csrfOk, login, logout, pruneSessions, session, stepUp, type Session } from "./auth.ts";
+import { call, stepUp } from "./agent.ts";
+import { csrfOk, login, logout, pruneSessions, session, type Session } from "./auth.ts";
 import { t } from "./i18n.ts";
 import css from "./static/app.css" with { type: "text" };
 import js from "./static/app.js" with { type: "text" };
@@ -61,6 +61,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 export function createWebApp() {
   const app = new Hono<Env>();
 
+  app.use("*", (c, next) => stepUp.run({}, next));
   app.use("*", async (c, next) => {
     await next();
     for (const [k, val] of Object.entries(SECURITY_HEADERS)) c.res.headers.set(k, val);
@@ -116,7 +117,9 @@ export function createWebApp() {
   const back = (c: Context<Env>, to: string, ok?: string) => c.redirect(ok ? `${to}${to.includes("?") ? "&" : "?"}ok=${encodeURIComponent(ok)}` : to);
   const err = (to: string, e: unknown) => `${to}${to.includes("?") ? "&" : "?"}err=${encodeURIComponent(e instanceof Error ? e.message : String(e))}`;
   const needOtp = (c: Context<Env>, otp: unknown) => {
-    if (!stepUp(c.get("s"), otp)) throw new Error("Authenticator code required (wait for a new code if you just used one).");
+    // Checked by the agent with the next call, not here: this process holds no TOTP secrets.
+    if (!/^\d{6}$/.test(String(otp ?? ""))) throw new Error("Authenticator code required.");
+    stepUp.getStore()!.otp = String(otp);
   };
   /** Runs an action and redirects back with a message either way. */
   const act = (to: string, fn: (c: Context<Env>, f: Record<string, any>) => Promise<string | void>) => async (c: Context<Env>) => {
@@ -173,13 +176,13 @@ export function createWebApp() {
     const a = await call("apps.create", appParams(f), actor(c));
     return `/apps/${a.name}`;
   }));
-  app.get("/apps/:name", async (c) => {
-    const name = c.req.param("name");
+  app.get("/apps/:name", (c) => appPage(c, c.req.param("name")));
+  async function appPage(c: Context<Env>, name: string, revealed?: Record<string, string>) {
     const deploy = Number(c.req.query("deploy")) || undefined;
     try {
       const [a, envVars, logs, runtimes] = await Promise.all([
         call<AppRow>("apps.get", { name }),
-        call("apps.env.get", { name }).catch(() => ({})),
+        revealed ?? call("apps.env.get", { name }).catch(() => ({})),
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
       ]);
@@ -188,11 +191,11 @@ export function createWebApp() {
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
       const github = { connected: gh.connected, repo: m?.[1] ?? "" };
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} />);
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} />);
     } catch (e) {
       return c.redirect(err("/apps", e));
     }
-  });
+  }
   app.get("/apps/:name/deploys/:id/log", async (c) =>
     c.json(await call("apps.deployLog", { id: Number(c.req.param("id")), offset: Number(c.req.query("offset") ?? 0) })),
   );
@@ -218,11 +221,34 @@ export function createWebApp() {
       if (m) vars[m[1]!] = m[2]!.trim().replace(/^(['"])(.*)\1$/, "$2");
       else if (line.trim() && !line.trim().startsWith("#")) throw new Error(`cannot parse line: ${line.slice(0, 40)}`);
     }
+    needOtp(c, f.otp);
     await call("apps.env.set", { name, vars }, actor(c));
     return `/apps/${name}`;
   }));
+  app.post("/apps/:name/database", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      const r = await call("apps.addDatabase", { name, engine: f.engine }, actor(c));
+      return back(c, `/apps/${name}`, `${r.key} added (${r.engine} ${r.database})`);
+    } catch (e) {
+      return c.redirect(err(`/apps/${name}`, e));
+    }
+  });
+  app.post("/apps/:name/env/reveal", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      // Rendered into this response only; the redirect-free page keeps values out of URLs and history.
+      return appPage(c, name, await call("apps.env.reveal", { name }, actor(c)));
+    } catch (e) {
+      return c.redirect(err(`/apps/${name}`, e));
+    }
+  });
   app.post("/apps/:name/settings", act("/apps", async (c, f) => {
     const name = c.req.param("name")!;
+    if (f.otp) needOtp(c, f.otp);
     await call("apps.update", { ...appParams(f), name }, actor(c));
     return `/apps/${name}`;
   }));
@@ -334,6 +360,7 @@ export function createWebApp() {
     const f = await form(c);
     try {
       const [user, host] = String(f.userhost ?? "").split("@");
+      needOtp(c, f.otp);
       const r = await call("db.password", { user, host, password: f.password || undefined }, actor(c));
       return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={await call("db.list")} created={{ name: "password", user: r.user, password: r.password }} />);
     } catch (e) {
@@ -497,6 +524,7 @@ export function createWebApp() {
     const f = await form(c);
     try {
       // The config (and for phones the private key) is rendered once in this response, never put in a URL.
+      needOtp(c, f.otp);
       const created = await call("vpn.peer.add", { name: f.name, publicKey: f.publicKey }, actor(c));
       return page(c, t("Private access"), <VpnPage csrf={c.get("s").csrf} s={await call<VpnStatus>("vpn.status")} viaVpn={viaVpn(c)} created={created} />);
     } catch (e) {

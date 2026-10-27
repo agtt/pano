@@ -1,13 +1,15 @@
 // Users, sessions and login throttling for the web UI. Passwords are argon2id,
 // every login needs a TOTP code, session ids are stored hashed, and sessions
-// expire after 30 idle minutes or 12 hours.
+// expire after 30 idle minutes or 12 hours. The TOTP secret is not here: the
+// agent holds it and checks codes, so this process cannot make its own.
 
 import { Database } from "bun:sqlite";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
-import { newSecret, verify } from "./totp.ts";
+import { call } from "./agent.ts";
+import { newSecret } from "./totp.ts";
 
 const IDLE = 30 * 60;
 const ABSOLUTE = 12 * 3600;
@@ -58,10 +60,11 @@ export async function createUser(username: string, password: string): Promise<{ 
   if (!/^[a-z][a-z0-9_.-]{2,31}$/.test(username)) throw new Error("username: 3-32 lowercase chars");
   if (password.length < 12) throw new Error("password must be at least 12 characters");
   const hash = await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
+  // Returned to `pano admin` (root), which hands it to the agent's store; never kept here.
   const secret = newSecret();
   webDb()
-    .query("INSERT INTO users (username, password_hash, totp_secret, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, totp_secret = excluded.totp_secret, totp_last = 0")
-    .run(username, hash, secret, now());
+    .query("INSERT INTO users (username, password_hash, totp_secret, created_at) VALUES (?, ?, '', ?) ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, totp_secret = '', totp_last = 0")
+    .run(username, hash, now());
   // A reset invalidates every existing session of that user.
   const u = webDb().query("SELECT id FROM users WHERE username = ?").get(username) as { id: number };
   webDb().query("DELETE FROM sessions WHERE user_id = ?").run(u.id);
@@ -95,12 +98,11 @@ export async function login(username: string, password: string, otp: string, ip:
   const user = webDb().query("SELECT * FROM users WHERE username = ?").get(username.toLowerCase()) as User | null;
   dummyHash ??= await Bun.password.hash(randomBytes(16).toString("hex"), { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
   const passOk = await Bun.password.verify(password, user?.password_hash ?? dummyHash);
-  const step = user && passOk ? verify(user.totp_secret, otp, user.totp_last) : null;
-  if (!user || !passOk || step === null) {
+  const codeOk = user && passOk ? await call<boolean>("auth.otp", { username: user.username, code: otp }).catch(() => false) : false;
+  if (!user || !passOk || !codeOk) {
     keys.forEach(fail);
     return { error: "Invalid username, password or code." };
   }
-  webDb().query("UPDATE users SET totp_last = ? WHERE id = ?").run(step, user.id);
   keys.forEach((k) => webDb().query("DELETE FROM login_failures WHERE key = ?").run(k));
   const sid = randomBytes(32).toString("base64url");
   webDb()
@@ -133,15 +135,6 @@ export function csrfOk(s: Session, token: unknown): boolean {
   const a = Buffer.from(s.csrf);
   const b = Buffer.from(String(token ?? ""));
   return a.length === b.length && timingSafeEqual(a, b);
-}
-
-/** Step-up check for destructive actions: a fresh TOTP code. */
-export function stepUp(s: Session, otp: unknown): boolean {
-  const step = verify(s.user.totp_secret, String(otp ?? ""), s.user.totp_last);
-  if (step === null) return false;
-  webDb().query("UPDATE users SET totp_last = ? WHERE id = ?").run(step, s.user.id);
-  s.user.totp_last = step;
-  return true;
 }
 
 export function pruneSessions() {

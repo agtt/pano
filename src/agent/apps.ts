@@ -226,6 +226,9 @@ RestrictRealtime=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Cloud metadata (user-data can hold root passwords and keys) and other users' processes are out of reach.
+IPAddressDeny=169.254.169.254/32
+ProtectProc=invisible
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
@@ -385,6 +388,14 @@ async function deploy(app: App, id: number) {
     }
 
     const plan = await detectPlan(app, workdir);
+    // One Next.js build cache per process, outside the releases: faster rebuilds, no copy per release.
+    for (const p of procs) {
+      const d = p.dir ? `${workdir}/${p.dir}` : workdir;
+      if (!(await readText(`${d}/package.json`))?.includes('"next"')) continue;
+      await ensureDir(`${home}/cache/next-${p.name || "main"}`, 0o750, user);
+      await ensureDir(`${d}/.next`, 0o750, user);
+      await run(["ln", "-sfn", fsPath(`${home}/cache/next-${p.name || "main"}`), fsPath(`${d}/.next/cache`)], { user, check: false });
+    }
     if (plan.install) {
       await step(plan.install);
       await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false });
@@ -440,6 +451,8 @@ async function deploy(app: App, id: number) {
     await log(`\nFAILED: ${msg}`);
     if (apps.get(app.name)?.active_slot !== slot) {
       await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
+      // A release that never went live is only disk space.
+      await remove(dir).catch(() => {});
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
     if (commit) void reportStatus(app, commit, "failure", msg);
@@ -475,6 +488,8 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     NEXT_TELEMETRY_DISABLED: "1",
     npm_config_cache: `${home}/cache/npm`,
     BUN_INSTALL_CACHE_DIR: `${home}/cache/bun`,
+    // bun and pnpm hard-link packages from these stores: node_modules of each release costs almost no disk.
+    npm_config_store_dir: `${home}/cache/pnpm`,
     XDG_CACHE_HOME: `${home}/cache`,
     ...o.env,
   };
@@ -545,7 +560,8 @@ async function healthCheck(app: App, p: Process, slot: "a" | "b", log: (l: strin
   throw new Error(`health check failed for ${url}: ${last}`);
 }
 
-async function pruneReleases(name: string, keepAlso: string[], keep = 5) {
+/** The live release, the one before it (instant rollback) and anything a slot still points at. */
+async function pruneReleases(name: string, keepAlso: string[], keep = 2) {
   const dir = `${appHome(name)}/releases`;
   let all: string[] = [];
   try {

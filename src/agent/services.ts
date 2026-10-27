@@ -7,6 +7,7 @@
 // never rewrites the configuration of something it did not install.
 
 import { paths } from "../shared/config.ts";
+import { createDatabase } from "./mysql.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, run, writeAtomic } from "./sys.ts";
 
@@ -155,6 +156,8 @@ password_encryption = 'scram-sha-256'
 max_connections = 50
 shared_buffers = 128MB
 work_mem = 4MB
+max_wal_size = 256MB
+min_wal_size = 64MB
 `;
 
 async function installValkey(): Promise<Record_> {
@@ -293,4 +296,42 @@ export function pgDumpCommand(db: string): string[] {
 /** Restores into an existing database; stops at the first error. */
 export function pgRestoreCommand(db: string): string[] {
   return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", pgName(db)];
+}
+
+// ---- one click: a database for an app, straight into its environment ---------------
+
+export type Engine = "postgres" | "mariadb" | "valkey";
+
+/**
+ * Creates a database (and its own user) for an app, installing the server first
+ * if needed, and writes the connection URL into the app's environment. The
+ * password goes from here into the app's env file only; it is not returned.
+ * An existing variable is never overwritten.
+ */
+export async function databaseForApp(
+  app: string,
+  engine: Engine,
+  env: { get: () => Promise<Record<string, string>>; set: (vars: Record<string, string>) => Promise<void> },
+  actor: string,
+) {
+  const key = engine === "valkey" ? "REDIS_URL" : "DATABASE_URL";
+  const current = await env.get();
+  if (current[key]) throw new Error(`${key} is already set for ${app}; remove it from the environment first`);
+  if (!(await detect(engine))) await install(engine, actor);
+  const name = app.replace(/-/g, "_").slice(0, 32);
+  let url: string;
+  if (engine === "postgres") url = (await pgCreate({ name, user: name }, actor)).url;
+  else if (engine === "mariadb") {
+    const r = await createDatabase({ name, user: name }, actor);
+    url = `mysql://${r.user}:${r.password}@127.0.0.1:3306/${r.name}`;
+  } else {
+    // One Valkey for the server; each app gets its own logical database number.
+    const n = Number(settings.get("svc.valkey.nextDb") ?? 1);
+    if (n > 15) throw new Error("all 15 Valkey databases are in use");
+    settings.set("svc.valkey.nextDb", String(n + 1));
+    url = `${await valkeyUrl()}/${n}`;
+  }
+  await env.set({ ...current, [key]: url });
+  audit(actor, "app.database", { app, engine, key });
+  return { key, engine, database: engine === "valkey" ? url.split("/").pop()! : name };
 }

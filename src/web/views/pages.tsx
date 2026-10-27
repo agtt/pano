@@ -322,6 +322,7 @@ export function DatabasesPage(p: {
               </select>
             </label>
             <Field label="Password (empty = generate)" name="password" type="password" autocomplete="new-password" />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
             <button class="btn">{t("Reset password")}</button>
           </form>
         </Card>

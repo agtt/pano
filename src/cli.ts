@@ -48,6 +48,8 @@ async function main() {
       const { otpauthUri } = await import("./web/totp.ts");
       const { secret } = await createUser(username, password);
       webDb().close();
+      const { setAdminSecret } = await import("./agent/otp.ts");
+      setAdminSecret(username, secret);
       await ownWebDb();
       console.log(`\nAdmin "${username}" saved. Add this to your authenticator app:\n`);
       console.log(`  secret: ${secret}`);
@@ -209,6 +211,13 @@ async function install() {
   if (!(await Bun.file(fsPath(`${paths.etc}/pano.env`)).exists())) {
     // Read by systemd (root) when starting the units; the services never open it.
     await writeFile(fsPath(`${paths.etc}/pano.env`), ENV_TEMPLATE, { mode: 0o600 });
+  }
+  // Cap the system journal (default: 10% of the disk) unless the admin already set it.
+  const journald = fsPath("/etc/systemd/journald.conf.d/pano.conf");
+  if (!(await Bun.file(journald).exists())) {
+    await mkdir(fsPath("/etc/systemd/journald.conf.d"), { recursive: true });
+    await writeFile(journald, "[Journal]\nSystemMaxUse=300M\nMaxRetentionSec=1month\n", { mode: 0o644 });
+    await sh(["systemctl", "restart", "systemd-journald"], false);
   }
   await writeFile(fsPath(`${paths.systemd}/pano-agent.service`), AGENT_UNIT, { mode: 0o644 });
   await writeFile(fsPath(`${paths.systemd}/pano-web.service`), WEB_UNIT, { mode: 0o644 });
