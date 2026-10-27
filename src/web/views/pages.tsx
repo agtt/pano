@@ -399,15 +399,21 @@ export function BackupsPage(p: {
           Backup key (base64): <code class="secret">{p.key}</code> — keep an offline copy. Without it no backup can be restored.
         </div>
       ) : null}
-      <Card title="Cloudflare R2">
+      <Card title="Storage: Cloudflare R2, Backblaze B2 or any S3">
         <form method="post" action="/backups/r2" class="grid-form">
           <Csrf token={p.csrf} />
-          <Field label="Account ID" name="accountId" value={p.r2.accountId} placeholder="32 hex chars" />
+          <Field label="Account ID" name="accountId" value={p.r2.accountId} placeholder="R2 only: 32 hex chars" />
           <Field label="Bucket" name="bucket" value={p.r2.bucket} required />
           <Field label="Prefix" name="prefix" value={p.r2.prefix} />
           <Field label="Access key ID" name="accessKeyId" value={p.r2.accessKeyId} required />
           <Field label="Secret access key" name="secretAccessKey" type="password" placeholder={p.r2.hasSecret ? "•••••• (stored; leave empty to keep)" : ""} autocomplete="new-password" />
-          <Field label="Endpoint (non-R2 S3, optional)" name="endpoint" value={p.r2.endpoint} placeholder="https://s3.example.com" />
+          <Field
+            label="Endpoint (other than R2)"
+            name="endpoint"
+            value={p.r2.endpoint}
+            placeholder="https://s3.eu-central-003.backblazeb2.com"
+            hint="B2: the bucket's S3 endpoint · Hetzner: https://fsn1.your-objectstorage.com · empty for R2"
+          />
           <div class="actions">
             <button class="btn primary">{t("Save")}</button>
           </div>
@@ -423,7 +429,7 @@ export function BackupsPage(p: {
             <button class="btn">{t("Export encryption key")}</button>
           </form>
         </div>
-        <p class="muted small">Backups are gzip-compressed and AES-256-GCM encrypted on this server before upload; R2 only stores ciphertext.</p>
+        <p class="muted small">Backups are gzip-compressed and AES-256-GCM encrypted on this server before upload; the store only sees ciphertext.</p>
       </Card>
 
       <Card title={t("Backups")}>
@@ -489,7 +495,7 @@ export function BackupsPage(p: {
               ))}
             </datalist>
           </label>
-          <Field label="Schedule" name="schedule" value="daily 03:30" hint="manual · hourly · daily HH:MM" />
+          <Field label="Schedule" name="schedule" value="daily 03:30" hint="manual · hourly · daily HH:MM · weekly Sun HH:MM" />
           <Field label="Keep" name="keep" type="number" value={7} />
           <Field label="Name" name="name" placeholder="(auto)" />
           <div class="actions">

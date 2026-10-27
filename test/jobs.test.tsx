@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { due, regionFor } from "../src/agent/backup.ts";
 import { maskSecrets, renderSiteCron } from "../src/agent/jobs.ts";
 import { judge, type Queue } from "../src/agent/queues.ts";
-import type { Site } from "../src/agent/state.ts";
+import type { BackupJob, Site } from "../src/agent/state.ts";
 import { JobsPage } from "../src/web/views/jobs.tsx";
 
 const site = {
@@ -65,4 +66,25 @@ test("jobs page renders", () => {
   expect(html).toContain("exit-code");
   expect(html).toContain("/root/backup.sh");
   expect(html).toContain("bull:mail");
+});
+
+test("backup store region follows the endpoint", () => {
+  expect(regionFor("")).toBe("auto");
+  expect(regionFor("https://s3.eu-central-003.backblazeb2.com")).toBe("eu-central-003");
+  expect(regionFor("https://fsn1.your-objectstorage.com/")).toBe("fsn1");
+  expect(regionFor("https://s3.eu-central-1.wasabisys.com")).toBe("eu-central-1");
+  expect(regionFor("https://abc123.r2.cloudflarestorage.com")).toBe("auto");
+  expect(regionFor("https://minio.local:9000")).toBe("us-east-1");
+});
+
+test("daily and weekly backup schedules", () => {
+  const job = (schedule: string, last: Date | null) => ({ enabled: 1, schedule, last_run_at: last ? last.getTime() / 1000 : null }) as BackupJob;
+  const wed = new Date(2026, 9, 28, 10, 0); // Wednesday
+  expect(due(job("daily 03:30", new Date(2026, 9, 27, 3, 31)), wed)).toBe(true);
+  expect(due(job("daily 03:30", new Date(2026, 9, 28, 3, 31)), wed)).toBe(false);
+  expect(due(job("daily 23:00", new Date(2026, 9, 27, 23, 1)), wed)).toBe(false);
+  expect(due(job("weekly Sun 03:30", new Date(2026, 9, 25, 3, 31)), wed)).toBe(false);
+  expect(due(job("weekly Sun 03:30", new Date(2026, 9, 24, 3, 31)), wed)).toBe(true);
+  expect(due(job("weekly Wed 11:00", new Date(2026, 9, 21, 11, 1)), wed)).toBe(false);
+  expect(due(job("weekly Wed 09:00", new Date(2026, 9, 21, 9, 1)), wed)).toBe(true);
 });

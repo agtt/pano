@@ -1,4 +1,5 @@
-// Encrypted backups to Cloudflare R2 (any S3-compatible store works).
+// Encrypted backups to Cloudflare R2 or any S3-compatible store (Backblaze B2,
+// Hetzner Object Storage, Wasabi, AWS S3, MinIO).
 // source (mysqldump | tar) -> gzip -> AES-256-GCM -> multipart upload, all
 // streamed: nothing is staged on disk and memory stays around one chunk.
 
@@ -65,9 +66,21 @@ async function client(): Promise<{ s3: S3Client; prefix: string }> {
     secretAccessKey: secret,
     bucket: cfg.bucket,
     endpoint: cfg.endpoint || `https://${cfg.accountId}.r2.cloudflarestorage.com`,
-    region: "auto",
+    region: regionFor(cfg.endpoint),
   });
   return { s3, prefix: cfg.prefix };
+}
+
+/** Requests are signed for a region; outside R2 it has to match the one in the endpoint. */
+export function regionFor(endpoint: string): string {
+  const host = endpoint.replace(/^https:\/\//, "").replace(/[:/].*$/, "");
+  if (!host || host.endsWith(".r2.cloudflarestorage.com")) return "auto";
+  const m =
+    host.match(/^s3\.([a-z0-9-]+)\.backblazeb2\.com$/) ?? // Backblaze B2
+    host.match(/^([a-z0-9-]+)\.your-objectstorage\.com$/) ?? // Hetzner
+    host.match(/^s3\.([a-z0-9-]+)\.wasabisys\.com$/) ??
+    host.match(/^s3[.-]([a-z0-9-]+)\.amazonaws\.com$/);
+  return m?.[1] ?? "us-east-1";
 }
 
 export async function testR2(): Promise<string> {
@@ -101,7 +114,9 @@ export function validateJob(x: Record<string, unknown>) {
   const target =
     kind === "mysql" ? v.dbName(x.target) : kind === "postgres" ? pgName(x.target) : kind === "app" ? v.appName(x.target) : v.pathUnder(x.target, PATH_ROOTS);
   const schedule = String(x.schedule ?? "manual");
-  if (!/^(manual|hourly|daily [0-2]\d:[0-5]\d)$/.test(schedule)) throw new Error("schedule: manual, hourly or 'daily HH:MM'");
+  if (!/^(manual|hourly|daily [0-2]\d:[0-5]\d|weekly (Sun|Mon|Tue|Wed|Thu|Fri|Sat) [0-2]\d:[0-5]\d)$/.test(schedule)) {
+    throw new Error("schedule: manual, hourly, 'daily HH:MM' or 'weekly Sun HH:MM'");
+  }
   const name = String(x.name ?? "").trim() || `${kind}-${String(target).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) throw new Error("job name: letters, digits, . _ -");
   return { name, kind, target, schedule, keep: v.int(x.keep ?? 7, 1, 365, "keep") } as const;
@@ -216,14 +231,20 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
 
 // ---- scheduler -------------------------------------------------------------
 
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 export function due(job: BackupJob, now: Date): boolean {
   if (!job.enabled || job.schedule === "manual") return false;
   const last = job.last_run_at ? job.last_run_at * 1000 : 0;
   if (job.schedule === "hourly") return now.getTime() - last >= 3600_000 - 30_000;
-  const [hh, mm] = job.schedule.slice(6).split(":").map(Number);
+  const parts = job.schedule.split(" ");
+  const [hh, mm] = parts.at(-1)!.split(":").map(Number);
+  // The latest planned time that is not in the future.
   const slot = new Date(now);
   slot.setHours(hh!, mm!, 0, 0);
-  return now >= slot && last < slot.getTime();
+  if (parts[0] === "weekly") slot.setDate(slot.getDate() - ((now.getDay() - DAYS.indexOf(parts[1]!) + 7) % 7));
+  if (slot > now) slot.setDate(slot.getDate() - (parts[0] === "weekly" ? 7 : 1));
+  return last < slot.getTime();
 }
 
 /**
