@@ -46,7 +46,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - "+ Database" creates DB + user and writes `DATABASE_URL`/`REDIS_URL` into the app env; the password never reaches the browser.
 - Memory of each service sized to the server's RAM.
 
-**Realtime and games (on demand)**
+**Realtime and games (optional extensions, nothing on disk until installed)**
 - Pusher-compatible WebSocket server (Sockudo): pusher-js, Laravel Echo and Pusher SDKs work unchanged; apps, keys, allowed origins, public wss domain, auto-update with rollback.
 - TURN relay for WebRTC: short-lived per-user credentials, private networks refused, quotas, secret rotation; takes over an existing coturn.
 - WebSocket game servers (Colyseus, Socket.IO, uWS) run as normal apps.
@@ -60,6 +60,15 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Full archives (AES-256-GCM, encrypted on the server) or incremental (restic: deduplicated, encrypted with restic's own AES-256-CTR + Poly1305-AES).
 - One or two destinations at once: Cloudflare R2, Backblaze B2, Hetzner Object Storage, Wasabi, AWS S3, MinIO.
 - Hourly/daily/weekly schedules, retention, restore; the storage provider only sees ciphertext.
+- Protected stores: pano never deletes from them (retention is left to the store's own lifecycle rule / object lock), so a stolen server key cannot wipe the backups; the store test shows whether the key could still delete.
+
+**Disaster recovery**
+- The panel backs itself up daily (state, settings, edge certificates) next to the app, database and site backups; every PHP site gets a file backup job.
+- Recovery kit: one line (backup key + stores) shown with 2FA, kept in a password manager; the security audit warns when it is missing or out of date.
+- `pano install` + `pano recover` on a new server: panel, admins, services (MariaDB/PostgreSQL/Valkey as the data needs), runtimes, app env/data/deploy keys, databases with the same users and passwords, PHP sites with their files, realtime/TURN, then every app deploys from git.
+
+**Updating pano itself**
+- `pano update <binary> [sha256]`: the new binary must run first; the old one and a copy of the state are kept; if the agent or UI does not answer within a minute it rolls back by itself; `pano update-rollback` by hand. Apps and sites keep serving throughout.
 
 **Security**
 - Privilege separation: unprivileged web UI talks to a root agent over a unix socket with a fixed list of typed operations.
@@ -77,7 +86,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Telegram alerts: failed deploys/crons/backups, app or service down, disk/memory pressure, new high/critical vulnerabilities.
 
 **Performance defaults**
-- BBR, larger network queues and UDP buffers for HTTP/3, journal size cap, opcache/realpath cache for PHP, browser caching of static files.
+- BBR, larger network queues and UDP buffers for HTTP/3 (one switch on the Security page, current vs pano values shown), journal size cap, opcache/realpath cache for PHP, browser caching of static files.
 
 **Migration**
 - From CyberPanel/OpenLiteSpeed: scans the server (vhosts, proxies, PHP versions, certificates, databases, crontabs), imports while the old panel keeps serving, moves sites one by one, cutover of ports 80/443 with one-click rollback, CyberPanel removed last.

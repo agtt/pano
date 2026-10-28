@@ -384,8 +384,8 @@ export type JobRow = {
   runs: { id: number; status: string; bytes: number; object_key: string; error: string; started_at: number; dest: string; engine: string }[];
 };
 
-type Dest = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string };
-export type BackupSettings = { dests: { a: Dest; b: Dest }; engine: "archive" | "restic"; restic: string };
+type Dest = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string; protect: boolean };
+export type BackupSettings = { dests: { a: Dest; b: Dest }; engine: "archive" | "restic"; restic: string; kit: "none" | "outdated" | "ok" };
 
 export function BackupsPage(p: {
   csrf: string;
@@ -399,7 +399,17 @@ export function BackupsPage(p: {
     <div class="stack">
       {p.key ? (
         <div class="flash ok">
-          Backup key (base64): <code class="secret">{p.key}</code> — keep an offline copy. Without it no backup can be restored.
+          <p>
+            Recovery kit — keep it in a password manager, never on this server. It holds the backup key and the store keys, so anyone with it can read the
+            backups.
+          </p>
+          <code class="secret" data-copy>
+            {p.key}
+          </code>
+          <p class="small">
+            New server: <code>pano install</code>, then <code>pano recover '&lt;kit&gt;'</code>: the panel comes back from its own nightly backup and rebuilds
+            services, databases, apps (deployed again from git), PHP sites and their files.
+          </p>
         </div>
       ) : null}
       <Card title={t("Backup engine")}>
@@ -420,10 +430,20 @@ export function BackupsPage(p: {
           Earlier backups stay restorable after a switch. Both are encrypted on this server before upload with the one backup key below; the store only sees
           ciphertext. Every job goes to each destination that is set up.
         </p>
+      </Card>
+
+      <Card
+        title="Recovery kit"
+        actions={<Badge state={p.s.kit === "ok" ? "ok" : "warn"} />}
+      >
+        <p class="muted small">
+          If this server is lost, the panel can rebuild it on a new one from the backups: its own state is backed up every night (job "panel"). What it
+          cannot back up is the key to read them. {p.s.kit === "ok" ? "A kit for the current stores was shown before." : p.s.kit === "outdated" ? "A store changed since the kit was saved: save the new one." : "No kit was saved yet."}
+        </p>
         <form method="post" action="/backups/key" class="row">
           <Csrf token={p.csrf} />
           <Otp />
-          <button class="btn">{t("Export encryption key")}</button>
+          <button class="btn">Show recovery kit</button>
         </form>
       </Card>
 
@@ -447,6 +467,10 @@ export function BackupsPage(p: {
                   placeholder="https://s3.eu-central-003.backblazeb2.com"
                   hint="B2: the bucket's S3 endpoint · Hetzner: https://fsn1.your-objectstorage.com · empty for R2"
                 />
+                <label class="check">
+                  <input type="checkbox" name="protect" value="1" checked={x.protect} /> Protected: never delete here. Use a key without delete permission (or
+                  Object Lock); old versions leave by the bucket's lifecycle rules. Someone who takes over this server cannot erase these backups.
+                </label>
                 <label class="field">
                   <span>{t("Authenticator code")}</span>
                   <Otp />

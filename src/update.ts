@@ -1,0 +1,98 @@
+// Updating pano itself without risking what runs on it. The new binary has to
+// run before it is installed, the old one and a consistent copy of the state
+// database are kept, and the panel restarts; if the agent or the UI does not
+// answer within a minute, the old binary and state come back by themselves.
+// Apps, PHP sites and the edge are their own services and keep serving
+// throughout. The state only ever gains columns, so an older binary still runs
+// on a newer database (a manual rollback keeps today's state).
+
+import { Database } from "bun:sqlite";
+import { chmod, copyFile, rename, rm } from "node:fs/promises";
+import { VERSION, fsPath, paths } from "./shared/config.ts";
+
+const BIN = fsPath(`${paths.bin}/pano`);
+const PREV = `${BIN}.prev`;
+const STAGED = `${BIN}.new`;
+const STATE_PREV = fsPath(`${paths.data}/state.db.prev`);
+
+const sh = (argv: string[]) => Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
+const exists = (p: string) => Bun.file(p).exists();
+
+export async function update(src: string, sha?: string) {
+  if (process.getuid?.() !== 0) throw new Error("run as root");
+  const bytes = await Bun.file(src).bytes();
+  if (sha && new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== sha.toLowerCase()) throw new Error("checksum does not match");
+  await Bun.write(STAGED, bytes);
+  await chmod(STAGED, 0o755);
+  let next = "";
+  let why = "";
+  try {
+    const probe = sh([STAGED, "version"]);
+    next = probe.exitCode === 0 ? probe.stdout.toString().trim() : "";
+    why = probe.stderr.toString().trim().split("\n").at(-1) ?? "";
+  } catch (e) {
+    why = (e as Error).message;
+  }
+  if (!/^\d+\.\d+\.\d+/.test(next)) {
+    await rm(STAGED, { force: true });
+    throw new Error(`the new binary does not run here${why ? `: ${why}` : ""}`);
+  }
+  console.log(`pano ${VERSION} → ${next}`);
+
+  await copyFile(BIN, `${PREV}.tmp`);
+  await chmod(`${PREV}.tmp`, 0o755);
+  await rename(`${PREV}.tmp`, PREV);
+  await rm(STATE_PREV, { force: true });
+  const db = new Database(fsPath(paths.stateDb), { readonly: true });
+  db.exec(`VACUUM INTO '${STATE_PREV}'`);
+  db.close();
+  // rename, not copy: the running binary stays valid until the restart
+  await rename(STAGED, BIN);
+  sh(["systemctl", "reset-failed", "pano-agent", "pano-web"]);
+  sh(["systemctl", "restart", "pano-agent", "pano-web"]);
+  if (await healthy()) {
+    console.log(`updated to ${next}; the previous version is kept (pano update-rollback)`);
+    return;
+  }
+  console.error("the new version did not come up; going back");
+  await rollbackUpdate(true);
+  throw new Error("update rolled back");
+}
+
+/** Back to the binary before the last update. Automatic rollbacks also put back the state from just before it. */
+export async function rollbackUpdate(withState = false) {
+  if (process.getuid?.() !== 0) throw new Error("run as root");
+  if (!(await exists(PREV))) throw new Error("no previous version is kept");
+  sh(["systemctl", "stop", "pano-web", "pano-agent"]);
+  await copyFile(PREV, `${BIN}.tmp`);
+  await chmod(`${BIN}.tmp`, 0o755);
+  await rename(`${BIN}.tmp`, BIN);
+  if (withState && (await exists(STATE_PREV))) {
+    const stamp = Date.now();
+    for (const f of ["", "-wal", "-shm"]) {
+      const cur = fsPath(paths.stateDb) + f;
+      if (await exists(cur)) await rename(cur, `${fsPath(paths.stateDb)}.failed-${stamp}${f}`);
+    }
+    await copyFile(STATE_PREV, fsPath(paths.stateDb));
+    await chmod(fsPath(paths.stateDb), 0o640);
+  }
+  // a release that crashed on start leaves systemd's start limit hit
+  sh(["systemctl", "reset-failed", "pano-agent", "pano-web"]);
+  sh(["systemctl", "start", "pano-agent", "pano-web"]);
+  console.log((await healthy()) ? "previous version running" : "previous version started but does not answer (journalctl -u pano-agent -n 50)");
+}
+
+/** The agent answers on its socket and the UI on its port, within a minute. */
+async function healthy(): Promise<boolean> {
+  const { call } = await import("./web/agent.ts");
+  const conf = (await Bun.file(fsPath(`${paths.etc}/pano.env`)).text().catch(() => "")) as string;
+  const host = conf.match(/^PANO_WEB_HOST=(\S+)/m)?.[1] ?? "127.0.0.1";
+  const port = conf.match(/^PANO_WEB_PORT=(\d+)/m)?.[1] ?? "7800";
+  for (let i = 0; i < 60; i++) {
+    await Bun.sleep(1000);
+    const agent = await call("system.info", {}, "cli").then(() => true, () => false);
+    const web = agent && (await fetch(`http://${host}:${port}/login`, { signal: AbortSignal.timeout(2000) }).then((r) => r.status < 500, () => false));
+    if (agent && web) return true;
+  }
+  return false;
+}

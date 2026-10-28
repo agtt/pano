@@ -3,6 +3,9 @@
 
 const ROOT = (process.env.PANO_ROOT ?? "").replace(/\/+$/, "");
 
+import pkg from "../../package.json";
+
+export const VERSION: string = pkg.version;
 export const DRY_RUN = process.env.PANO_DRY_RUN === "1";
 
 /** Real filesystem location of a logical absolute path. */

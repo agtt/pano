@@ -318,6 +318,16 @@ async function fetchVersion(ver: string) {
 
 const point = (ver: string) => run(["ln", "-sfn", ver, fsPath(`${DIR}/current`)]);
 
+/** Recovery on a new server: the recorded version again, with its apps from the restored state. */
+export async function reinstall(actor: string) {
+  const ver = installedVersion();
+  if (!ver) return;
+  await fetchVersion(ver);
+  await point(ver);
+  await apply();
+  audit(actor, "realtime.reinstall", { version: ver });
+}
+
 /** Removes every downloaded version except the one in use. */
 async function prune(keep: string) {
   for (const d of await readdir(fsPath(DIR)).catch(() => [] as string[])) {

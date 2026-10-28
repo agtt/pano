@@ -7,7 +7,7 @@
 //   pano rpc <method> [json]  call the agent directly (root)
 
 import { chmod, copyFile, mkdir, rename, writeFile } from "node:fs/promises";
-import { DRY_RUN, env, fsPath, paths } from "./shared/config.ts";
+import { DRY_RUN, VERSION, env, fsPath, paths } from "./shared/config.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -66,9 +66,51 @@ async function main() {
     case "install":
       await install();
       break;
+    case "version":
+      console.log(VERSION);
+      break;
+    case "recover": {
+      if (!DRY_RUN && process.getuid?.() !== 0) fail("run as root");
+      // Read from the terminal, not the command line: the kit must not land in shell history.
+      const text = args.find((a) => a.startsWith("pano-recovery-")) ?? (await promptHidden("Recovery kit: "));
+      const hostAt = args.indexOf("--host");
+      const host = hostAt >= 0 ? args[hostAt + 1] : undefined;
+      const { parseKit, restorePanel } = await import("./agent/recovery.ts");
+      await restorePanel(parseKit(text), host);
+      const { call } = await import("./web/agent.ts");
+      await waitForAgent(call);
+      await call("recovery.rebuild", {}, "cli");
+      let shown = 0;
+      for (;;) {
+        await Bun.sleep(2000);
+        const s = await call<{ running: boolean; lines: string[]; failed: number }>("recovery.status", {}, "cli");
+        for (const l of s.lines.slice(shown)) console.log(l);
+        shown = s.lines.length;
+        if (!s.running) process.exit(s.failed ? 1 : 0);
+      }
+    }
+    case "update": {
+      const { update } = await import("./update.ts");
+      await update(args[0] ?? fail("usage: pano update <path to the new pano binary> [sha256]"), args[1]);
+      break;
+    }
+    case "update-rollback": {
+      const { rollbackUpdate } = await import("./update.ts");
+      await rollbackUpdate();
+      break;
+    }
     default:
-      fail("usage: pano install | agent | web | admin <username> | rpc <method> [json]");
+      fail("usage: pano install | version | update <binary> [sha256] | update-rollback | recover | agent | web | admin <username> | rpc <method> [json]");
   }
+}
+
+/** The agent answers once its socket is up (after a restart: a few seconds). */
+export async function waitForAgent(call: (m: string, p?: Record<string, unknown>, a?: string) => Promise<unknown>, seconds = 60) {
+  for (let i = 0; i < seconds; i++) {
+    if (await call("system.info", {}, "cli").then(() => true, () => false)) return;
+    await Bun.sleep(1000);
+  }
+  throw new Error("the agent did not come up (journalctl -u pano-agent -n 50)");
 }
 
 function fail(msg: string): never {

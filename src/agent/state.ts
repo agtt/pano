@@ -90,7 +90,7 @@ export type Deploy = {
 export type BackupJob = {
   id: number;
   name: string;
-  kind: "mysql" | "postgres" | "path" | "app";
+  kind: "mysql" | "postgres" | "path" | "app" | "panel";
   target: string;
   schedule: string;
   keep: number;

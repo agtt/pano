@@ -106,8 +106,19 @@ function assignPorts(prev: Process[], next: ProcessSpec[]): Process[] {
 export async function createApp(input: AppInput, actor: string): Promise<App> {
   if (apps.get(input.name)) throw new Error(`app ${input.name} already exists`);
   const [port_a, port_b] = apps.nextPorts();
-  const user = appUser(input.name);
-  const home = appHome(input.name);
+  await ensureAppHome(input.name);
+  const processes = assignPorts([], input.processes);
+  apps.insert({ ...input, kind: "managed", port_a, port_b, processes, webhook_secret: randomToken(24) });
+  const app = apps.get(input.name)!;
+  await writeUnits(app);
+  audit(actor, "app.create", { name: app.name, repo: app.repo, processes: processes.map((p) => p.name) });
+  return app;
+}
+
+/** The app's system user and directories; idempotent (also used by recovery). */
+export async function ensureAppHome(name: string) {
+  const user = appUser(name);
+  const home = appHome(name);
   await ensureUser(user, home);
   await ensureDir(home, 0o750, user);
   await ensureDir(`${home}/releases`, 0o750, user);
@@ -120,12 +131,6 @@ export async function createApp(input: AppInput, actor: string): Promise<App> {
   await run(["chgrp", user, fsPath(`${home}/shared`)], { check: false });
   if (!(await exists(`${home}/shared/.env`))) await writeAtomic(`${home}/shared/.env`, "", 0o640);
   await run(["chgrp", user, fsPath(`${home}/shared/.env`)], { check: false });
-  const processes = assignPorts([], input.processes);
-  apps.insert({ ...input, kind: "managed", port_a, port_b, processes, webhook_secret: randomToken(24) });
-  const app = apps.get(input.name)!;
-  await writeUnits(app);
-  audit(actor, "app.create", { name: app.name, repo: app.repo, processes: processes.map((p) => p.name) });
-  return app;
 }
 
 export async function updateApp(name: string, input: AppInput, actor: string) {
@@ -263,7 +268,7 @@ WantedBy=multi-user.target
  * longer exist and, for a slot being deployed, its env files and start scripts.
  * Start commands go into root-owned scripts so no quoting ever reaches a unit file.
  */
-async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: Map<string, string> }) {
+export async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: Map<string, string> }) {
   const path = await toolPath(app);
   const procs = procsOf(app);
   const home = appHome(app.name);

@@ -84,9 +84,9 @@ export async function status() {
 
 // ---- install -------------------------------------------------------------------
 
-export async function install(k: ServiceKey, actor: string) {
+export async function install(k: ServiceKey, actor: string, valkeyPassword?: string) {
   if (await detect(k)) throw new Error(`${SERVICES[k].label} is already installed`);
-  const r = k === "mariadb" ? await installMariadb() : k === "postgres" ? await installPostgres() : await installValkey();
+  const r = k === "mariadb" ? await installMariadb() : k === "postgres" ? await installPostgres() : await installValkey(valkeyPassword);
   save(k, r);
   await run(["systemctl", "enable", "--now", r.unit]);
   if (k === "mariadb") await secureMariadb();
@@ -179,7 +179,7 @@ max_wal_size = 1GB
 min_wal_size = 128MB
 `;
 
-async function installValkey(): Promise<Record_> {
+async function installValkey(password = randomPassword(40)): Promise<Record_> {
   const deb = await debian();
   let unit = "";
   let conf = "";
@@ -199,7 +199,6 @@ async function installValkey(): Promise<Record_> {
       [unit, conf, group] = ["redis.service", (await exists("/etc/redis/redis.conf")) ? "/etc/redis/redis.conf" : "/etc/redis.conf", "redis"];
     }
   }
-  const password = randomPassword(40);
   await ensureDir(paths.secrets, 0o700);
   await writeAtomic(VALKEY_PASS, password + "\n", 0o600);
   // Last directive wins, so an include at the end of the stock file overrides it.
@@ -279,12 +278,12 @@ export async function pgList() {
   return rows.map(([name, size, owner]) => ({ name: name!, sizeMb: Math.round(Number(size) / 104857.6) / 10, owner: owner!, system: RESERVED_PG.has(name!) }));
 }
 
-export async function pgCreate(input: { name?: unknown; user?: unknown }, actor: string) {
+export async function pgCreate(input: { name?: unknown; user?: unknown; password?: string }, actor: string) {
   const name = String(input.name ?? "").trim();
   const user = String(input.user ?? "").trim() || name;
   if (!PG_NAME.test(name) || !PG_NAME.test(user)) throw new Error("names: lowercase letters, digits and _, starting with a letter");
   if (RESERVED_PG.has(name) || RESERVED_PG.has(user)) throw new Error("reserved name");
-  const password = randomPassword();
+  const password = input.password || randomPassword();
   // CREATE DATABASE cannot run in a transaction: psql sends each statement on its own.
   await psql(
     [
@@ -332,6 +331,38 @@ export function pgDumpCommand(db: string): string[] {
 /** Restores into an existing database; stops at the first error. */
 export function pgRestoreCommand(db: string): string[] {
   return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", pgName(db)];
+}
+
+/**
+ * Recovery on a new server: the service as recorded in the restored panel state
+ * is installed again; Valkey keeps its old password (apps have it in REDIS_URL).
+ */
+export async function reinstall(k: ServiceKey, actor: string) {
+  if (!rec(k) || (await unitExists(rec(k)!.unit))) return;
+  const password = k === "valkey" ? (await readText(VALKEY_PASS))?.trim() : undefined;
+  settings.set(`svc.${k}`, "null");
+  await install(k, actor, password || undefined);
+}
+
+/** Installs a service unless one is already there (recovery: what the restored data needs). */
+export async function ensureService(k: ServiceKey, actor: string, valkeyPassword?: string) {
+  if (!(await detect(k))) await install(k, actor, valkeyPassword);
+}
+
+export const recordedServices = (): ServiceKey[] => (Object.keys(SERVICES) as ServiceKey[]).filter((k) => !!rec(k));
+
+/** An empty database for a dump to load into (recovery); the owner comes from the dump or an app's env. */
+export async function pgEnsureDb(name: string) {
+  if (!(await psql(`SELECT 1 FROM pg_database WHERE datname = ${pgLit(name)};`)).length) await psql(`CREATE DATABASE ${pgIdent(name)} ENCODING 'UTF8';`);
+}
+
+/** A database role/user with the password an app already has in its env (recovery). */
+export async function pgEnsure(name: string, user: string, password: string) {
+  const exists = (await psql(`SELECT 1 FROM pg_roles WHERE rolname = ${pgLit(user)};`)).length > 0;
+  await psql(exists ? `ALTER ROLE ${pgIdent(user)} LOGIN PASSWORD ${pgLit(password)};` : `CREATE ROLE ${pgIdent(user)} LOGIN PASSWORD ${pgLit(password)};`);
+  if (!(await psql(`SELECT 1 FROM pg_database WHERE datname = ${pgLit(name)};`)).length) {
+    await psql(`CREATE DATABASE ${pgIdent(name)} OWNER ${pgIdent(user)} ENCODING 'UTF8';\nREVOKE ALL ON DATABASE ${pgIdent(name)} FROM PUBLIC;`);
+  }
 }
 
 // ---- one click: a database for an app, straight into its environment ---------------

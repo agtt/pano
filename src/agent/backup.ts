@@ -13,6 +13,7 @@
 // Both run at low CPU and disk priority.
 
 import { S3Client } from "bun";
+import { Database } from "bun:sqlite";
 import { createHmac, randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -23,10 +24,18 @@ import { appHome } from "./apps.ts";
 import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
 import { decryptStream, encryptStream } from "./crypto-stream.ts";
 import { dumpCommand, restoreCommand } from "./mysql.ts";
-import { apps, audit, backups, settings, type BackupJob, type BackupRun } from "./state.ts";
+import { apps, audit, backups, settings, state, type BackupJob, type BackupRun } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
 const KEY_FILE = `${paths.secrets}/backup.key`;
+
+/** The name backups are stored under; kept in the panel state, so a recovered server continues the same history. */
+export function backupHost(): string {
+  const h = settings.get("backup.host");
+  if (h) return h;
+  settings.set("backup.host", hostname());
+  return hostname();
+}
 const PATH_ROOTS = ["/home", "/srv", "/var/www", "/opt", "/etc/pano"];
 const RESTIC_CACHE = `${paths.data}/restic-cache`;
 const LOW = ["nice", "-n", "10", "ionice", "-c2", "-n7"];
@@ -40,7 +49,15 @@ export const DESTS: DestId[] = ["a", "b"];
 const pfx = (d: DestId) => (d === "a" ? "r2" : "r2b");
 const secretFile = (d: DestId) => `${paths.secrets}/${pfx(d)}.secret`;
 
-export type R2Settings = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string };
+export type R2Settings = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string; protect: boolean };
+
+/**
+ * A protected store is never deleted from: old versions leave by the store's own
+ * lifecycle rules or Object Lock, so its key can be one without delete permission
+ * and someone who takes over this server cannot erase the backups. Runs to it
+ * are always full archives (restic needs to delete its lock files).
+ */
+export const isProtected = (d: DestId) => settings.get(`${pfx(d)}.protect`) === "1";
 
 export async function getDest(d: DestId): Promise<R2Settings> {
   const p = pfx(d);
@@ -51,6 +68,7 @@ export async function getDest(d: DestId): Promise<R2Settings> {
     accessKeyId: settings.get(`${p}.accessKeyId`) ?? "",
     endpoint: settings.get(`${p}.endpoint`) ?? "",
     hasSecret: await exists(secretFile(d)),
+    protect: isProtected(d),
   };
 }
 
@@ -85,6 +103,7 @@ export async function setDest(d: DestId, input: Record<string, unknown>, actor: 
   settings.set(`${p}.bucket`, v.bucket(input.bucket));
   settings.set(`${p}.prefix`, prefix);
   settings.set(`${p}.accessKeyId`, accessKeyId);
+  settings.set(`${p}.protect`, input.protect === true || input.protect === "1" ? "1" : "0");
   // The secret is write-only: stored root-only, never sent back to the UI.
   if (secret) {
     await ensureDir(paths.secrets, 0o700);
@@ -96,19 +115,19 @@ export async function setDest(d: DestId, input: Record<string, unknown>, actor: 
 /** Forgets the second destination (what is stored there stays there). */
 export async function clearDest(d: DestId, actor: string) {
   if (d === "a") throw new Error("the main destination can only be changed, not removed");
-  for (const k of ["accountId", "endpoint", "bucket", "prefix", "accessKeyId"]) settings.set(`${pfx(d)}.${k}`, "");
+  for (const k of ["accountId", "endpoint", "bucket", "prefix", "accessKeyId", "protect"]) settings.set(`${pfx(d)}.${k}`, "");
   await remove(secretFile(d));
   audit(actor, "backup.dest.clear", { dest: d });
 }
 
-async function creds(d: DestId) {
+export async function creds(d: DestId) {
   const cfg = await getDest(d);
   const secret = (await readText(secretFile(d)))?.trim();
   if (!cfg.bucket || !cfg.accessKeyId || !secret || (!cfg.accountId && !cfg.endpoint)) throw new Error(`destination ${d} is not configured`);
   return { ...cfg, secret, url: (cfg.endpoint || `https://${cfg.accountId}.r2.cloudflarestorage.com`).replace(/\/$/, "") };
 }
 
-async function client(d: DestId): Promise<{ s3: S3Client; prefix: string }> {
+export async function client(d: DestId): Promise<{ s3: S3Client; prefix: string }> {
   const c = await creds(d);
   const s3 = new S3Client({ accessKeyId: c.accessKeyId, secretAccessKey: c.secret, bucket: c.bucket, endpoint: c.url, region: regionFor(c.endpoint) });
   return { s3, prefix: c.prefix };
@@ -130,12 +149,15 @@ export async function testDest(d: DestId): Promise<string> {
   const { s3, prefix } = await client(d);
   const key = `${prefix}/.pano-test-${Date.now()}`;
   await s3.write(key, "ok");
-  await s3.delete(key);
-  return `destination ${d}: connection works (write + delete)`;
+  const deleted = await s3.delete(key).then(() => true, () => false);
+  if (!isProtected(d)) return `destination ${d}: connection works (write + delete)`;
+  return deleted
+    ? `destination ${d}: writes work, but this key can also delete. Protect the bucket with Object Lock/versioning, or use a key without delete permission.`
+    : `destination ${d}: writes work and this key cannot delete: backups here cannot be erased from this server.`;
 }
 
 /** 32-byte key, created on first use. Losing it makes every backup unreadable. */
-async function backupKey(): Promise<Buffer> {
+export async function backupKey(): Promise<Buffer> {
   const existing = await readText(KEY_FILE);
   if (existing) return Buffer.from(existing.trim(), "base64");
   const key = randomBytes(32);
@@ -159,7 +181,7 @@ export async function resticVersion(): Promise<string> {
   return r.code === 0 ? (r.stdout.match(/restic (\d+\.\d+\.\d+)/)?.[1] ?? "") : "";
 }
 
-async function ensureRestic() {
+export async function ensureRestic() {
   if (await resticVersion()) return;
   const deb = /^(ID|ID_LIKE)=.*\b(debian|ubuntu)\b/m.test((await readText("/etc/os-release")) ?? "");
   if (deb) await run(["apt-get", "install", "-y", "restic"], { timeoutMs: 600_000 });
@@ -185,14 +207,22 @@ export async function setEngine(e: unknown, actor: string) {
 
 export function validateJob(x: Record<string, unknown>) {
   const kind = x.kind;
-  if (kind !== "mysql" && kind !== "postgres" && kind !== "path" && kind !== "app") throw new Error("kind must be mysql, postgres, path or app");
+  if (kind !== "mysql" && kind !== "postgres" && kind !== "path" && kind !== "app" && kind !== "panel") throw new Error("kind must be mysql, postgres, path, app or panel");
   const target =
-    kind === "mysql" ? v.dbName(x.target) : kind === "postgres" ? pgName(x.target) : kind === "app" ? v.appName(x.target) : v.pathUnder(x.target, PATH_ROOTS);
+    kind === "panel"
+      ? "panel"
+      : kind === "mysql"
+        ? v.dbName(x.target)
+        : kind === "postgres"
+          ? pgName(x.target)
+          : kind === "app"
+            ? v.appName(x.target)
+            : v.pathUnder(x.target, PATH_ROOTS);
   const schedule = String(x.schedule ?? "manual");
   if (!/^(manual|hourly|daily [0-2]\d:[0-5]\d|weekly (Sun|Mon|Tue|Wed|Thu|Fri|Sat) [0-2]\d:[0-5]\d)$/.test(schedule)) {
     throw new Error("schedule: manual, hourly, 'daily HH:MM' or 'weekly Sun HH:MM'");
   }
-  const name = String(x.name ?? "").trim() || `${kind}-${String(target).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+  const name = kind === "panel" ? "panel" : String(x.name ?? "").trim() || `${kind}-${String(target).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) throw new Error("job name: letters, digits, . _ -");
   return { name, kind, target, schedule, keep: v.int(x.keep ?? 7, 1, 365, "keep") } as const;
 }
@@ -213,9 +243,30 @@ function archiveCommand(job: BackupJob): { cmd: string[]; ext: string } {
     if (!apps.get(job.target)) throw new Error(`app ${job.target} no longer exists`);
     const home = fsPath(appHome(job.target));
     // slot-a/slot-b are symlinks to releases; --dereference stores their contents.
-    return { cmd: ["tar", "-cf", "-", "--dereference", "--ignore-failed-read", ...excludes, "-C", home, "shared", "data", "slot-a", "slot-b"], ext: "tar" };
+    // .ssh: the deploy key, so a recovered server can pull without adding a new key.
+    return { cmd: ["tar", "-cf", "-", "--dereference", "--ignore-failed-read", ...excludes, "-C", home, "shared", "data", ".ssh", "slot-a", "slot-b"], ext: "tar" };
   }
   return { cmd: ["tar", "-cf", "-", "--exclude=node_modules", "--exclude=.git", "-C", fsPath(job.target), "."], ext: "tar" };
+}
+
+/**
+ * The panel itself: consistent copies of its two databases (apps, sites, jobs,
+ * settings; admins), its configuration and secrets, and the edge's certificates.
+ * Small; with the recovery kit it rebuilds the server elsewhere (recovery.ts).
+ */
+async function panelArchive() {
+  const tmp = `${paths.data}/tmp/panel-${Date.now()}`;
+  await ensureDir(tmp, 0o700);
+  const files = ["state.db"];
+  state().exec(`VACUUM INTO '${fsPath(tmp)}/state.db'`);
+  if (await exists(paths.webDb)) {
+    const web = new Database(fsPath(paths.webDb), { readonly: true });
+    web.exec(`VACUUM INTO '${fsPath(tmp)}/web.db'`);
+    web.close();
+    files.push("web.db");
+  }
+  const cmd = ["tar", "-cf", "-", "--ignore-failed-read", "-C", fsPath("/"), paths.etc.slice(1), paths.edgeData.slice(1), "-C", fsPath(tmp), ...files];
+  return { cmd, ext: "tar", cleanup: () => remove(tmp) };
 }
 
 /** Directories restic reads for a file job: an app's env, data and live release. */
@@ -223,7 +274,7 @@ async function resticPaths(job: BackupJob): Promise<string[]> {
   if (job.kind === "path") return [fsPath(job.target)];
   if (!apps.get(job.target)) throw new Error(`app ${job.target} no longer exists`);
   const home = fsPath(appHome(job.target));
-  const out = [`${home}/shared`, `${home}/data`];
+  const out = [`${home}/shared`, `${home}/data`, `${home}/.ssh`];
   const live = await realpath(`${home}/current`).catch(() => "");
   if (live) out.push(live);
   const have = await Promise.all(out.map((p) => exists(p)));
@@ -241,13 +292,14 @@ export function runJob(jobId: number, actor: string): number {
   if (!job) throw new Error("no such backup job");
   const dests = destIds();
   if (!dests.length) throw new Error("no backup destination is configured");
-  const eng = engine();
   const ids = dests.map((d) => {
+    // The panel's own state is one small archive, restorable without restic.
+    const eng = job.kind === "panel" || isProtected(d) ? "archive" : engine();
     const runId = backups.startRun(jobId, d, eng);
     enqueue(() => (eng === "restic" ? executeRestic(job, runId, d) : executeArchive(job, runId, d)));
     return runId;
   });
-  audit(actor, "backup.run", { job: job.name, runs: ids, engine: eng });
+  audit(actor, "backup.run", { job: job.name, runs: ids });
   return ids[0]!;
 }
 
@@ -261,10 +313,11 @@ async function executeArchive(job: BackupJob, runId: number, d: DestId) {
   try {
     const { s3, prefix } = await client(d);
     const key = await backupKey();
-    const { cmd, ext } = archiveCommand(job);
+    const { cmd, ext, cleanup } = job.kind === "panel" ? await panelArchive() : { ...archiveCommand(job), cleanup: async () => {} };
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "").replace("T", "-");
-    const objectKey = `${prefix}/${hostname()}/${job.name}/${stamp}.${ext}.gz.enc`;
+    const objectKey = `${prefix}/${backupHost()}/${job.name}/${stamp}.${ext}.gz.enc`;
     if (DRY_RUN) {
+      await cleanup();
       console.log(`[dry-run] backup ${cmd.join(" ")} -> ${d}://${objectKey}`);
       backups.finishRun(runId, job.id, { status: "success", object_key: objectKey, bytes: 0 });
       return;
@@ -279,14 +332,16 @@ async function executeArchive(job: BackupJob, runId: number, d: DestId) {
     }
     const code = await proc.exited;
     const stderr = await new Response(proc.stderr).text();
+    await cleanup();
     // tar exits 1 for "file changed as we read it", which is fine for live sites.
-    if (code !== 0 && !((job.kind === "path" || job.kind === "app") && code === 1)) {
+    if (code !== 0 && !((job.kind === "path" || job.kind === "app" || job.kind === "panel") && code === 1)) {
       await Promise.resolve(writer.end()).catch(() => {});
       await s3.delete(objectKey).catch(() => {});
       throw new Error(`${cmd[0]} exited ${code}: ${stderr.trim().split("\n").slice(-2).join(" ")}`);
     }
     await writer.end();
     backups.finishRun(runId, job.id, { status: "success", object_key: objectKey, bytes });
+    if (isProtected(d)) return;
     for (const old of backups.successfulRuns(job.id, d, "archive").slice(job.keep)) {
       await s3.delete(old.object_key).catch(() => {});
       backups.markDeleted(old.id);
@@ -298,10 +353,10 @@ async function executeArchive(job: BackupJob, runId: number, d: DestId) {
 
 // ---- restic ---------------------------------------------------------------------------
 
-async function resticEnv(d: DestId): Promise<Record<string, string>> {
+export async function resticEnv(d: DestId): Promise<Record<string, string>> {
   const c = await creds(d);
   const key = await backupKey();
-  const path = [c.prefix, "restic", hostname()].filter(Boolean).join("/");
+  const path = [c.prefix, "restic", backupHost()].filter(Boolean).join("/");
   return {
     ...ENV,
     RESTIC_REPOSITORY: `s3:${c.url}/${c.bucket}/${path}`,
@@ -317,7 +372,7 @@ async function resticEnv(d: DestId): Promise<Record<string, string>> {
 /** The restic repository password, derived from the backup key (so the key is all that must be kept). */
 export const resticPassword = (key: Buffer) => createHmac("sha256", key).update("pano restic repository").digest("hex");
 
-async function restic(env: Record<string, string>, args: string[], stdin?: ReadableStream<Uint8Array>) {
+export async function restic(env: Record<string, string>, args: string[], stdin?: ReadableStream<Uint8Array>) {
   const proc = Bun.spawn([...LOW, "restic", ...args], { env, stdin: stdin ?? "ignore", stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   return { code, stdout, stderr };
@@ -343,7 +398,7 @@ export function parseSummary(stdout: string): { snapshot: string; added: number 
   return null;
 }
 
-const tagArgs = (job: BackupJob) => ["--tag", `job-${job.id}`, "--host", hostname()];
+const tagArgs = (job: BackupJob) => ["--tag", `job-${job.id}`, "--host", backupHost()];
 
 async function executeRestic(job: BackupJob, runId: number, d: DestId) {
   try {
@@ -382,7 +437,7 @@ async function executeRestic(job: BackupJob, runId: number, d: DestId) {
 
 /** Frees space of forgotten snapshots. Weekly, through the same queue as backups. */
 export function pruneRepos(actor: string) {
-  for (const d of destIds()) {
+  for (const d of destIds().filter((x) => !isProtected(x))) {
     enqueue(async () => {
       const env = await resticEnv(d);
       if ((await restic(env, ["cat", "config"])).code !== 0) return;
@@ -474,9 +529,10 @@ export function due(job: BackupJob, now: Date): boolean {
  * Daily encrypted backup for something pano just created (a database, an app).
  * Added even before a destination is set up; scheduled runs start once it is.
  */
-export function ensureJob(kind: "mysql" | "postgres" | "app", target: string, actor: string) {
+export function ensureJob(kind: "mysql" | "postgres" | "app" | "path" | "panel", target: string, actor: string) {
   if (backups.jobs().some((j) => j.kind === kind && j.target === target)) return;
-  const job = validateJob({ kind, target, schedule: "daily 03:30", keep: 14 });
+  // The panel's own state goes last, after the nightly data backups it lists.
+  const job = validateJob({ kind, target, schedule: kind === "panel" ? "daily 04:30" : "daily 03:30", keep: kind === "panel" ? 30 : 14 });
   backups.addJob(job);
   audit(actor, "backup.job.add", { ...job, automatic: true });
 }

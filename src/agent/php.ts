@@ -8,6 +8,7 @@
 import { readdir, realpath, rename, unlink } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { DEFAULT_PHP, PHP_VERSIONS, v } from "../shared/validate.ts";
+import { ensureJob } from "./backup.ts";
 import { EDGE_USER, applyEdge, ensureUser, phpSocket } from "./edge.ts";
 import { scanHtaccess } from "./htaccess.ts";
 import { audit, sites, type Site } from "./state.ts";
@@ -298,8 +299,21 @@ export async function createPhpSite(input: PhpSiteInput, actor: string) {
   });
   await run(["systemctl", "enable", "--now", unitName(name)]);
   await applyEdge();
+  ensureJob("path", `${home}/public`, actor);
   audit(actor, "php.site.create", { name, version: ver, domains: input.domains });
   return { name, root: `${home}/public`, user: siteUser(name) };
+}
+
+/** Recovery on a new server: PHP, the site's user, pool and unit from the restored state (files come from its backup). */
+export async function reprovisionSite(site: Site, actor: string) {
+  await installPhp(site.php_version, actor);
+  await provision(site.name, site.php_version);
+}
+
+/** After its files are back: owners and ACLs, then the pool if the site is on. */
+export async function startRestoredSite(site: Site) {
+  await fixPermissions(site.name);
+  if (site.enabled) await run(["systemctl", "enable", "--now", unitName(site.name)], { check: false });
 }
 
 export async function setPhpVersion(name: string, version: string, actor: string) {

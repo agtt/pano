@@ -4,7 +4,9 @@
 
 import { cpus, hostname, loadavg, totalmem, uptime } from "node:os";
 import { env } from "../shared/config.ts";
+import { destIds } from "./backup.ts";
 import { edgeActive } from "./edge.ts";
+import { kitState } from "./recovery.ts";
 import { bindAddress } from "./mysql.ts";
 import { PHP_EOL } from "../shared/validate.ts";
 import { backups, settings, sites } from "./state.ts";
@@ -160,8 +162,20 @@ export async function audit(): Promise<Finding[]> {
   if (settings.get("edge.cutover") === "1" && !(await edgeActive()))
     f.push({ id: "edge", level: "fail", title: "Edge is down", detail: "Sites are unreachable.", fix: "systemctl restart pano-edge; journalctl -u pano-edge -n 50" });
 
-  if (await exists(`${paths.secrets}/backup.key`))
-    f.push({ id: "backup-key", level: "ok", title: "Backup encryption key exists", detail: "Keep an offline copy (Backups page → export key)." });
+  if (destIds().length) {
+    const kit = await kitState();
+    f.push(
+      kit === "ok"
+        ? { id: "recovery-kit", level: "ok", title: "Recovery kit saved off the server", detail: "With it this server can be rebuilt elsewhere (pano recover)." }
+        : {
+            id: "recovery-kit",
+            level: "warn",
+            title: kit === "none" ? "No recovery kit saved off the server" : "Recovery kit is out of date (a backup store changed)",
+            detail: "Without the backup key and store credentials no backup can be read if this server is lost.",
+            fix: "Backups → Recovery kit: keep it in a password manager, not on this server.",
+          },
+    );
+  }
 
   // PHP: versions past their security support
   const today = new Date().toISOString().slice(0, 10);

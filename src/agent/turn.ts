@@ -175,8 +175,18 @@ export async function install(actor: string) {
   await write(adopted || confSecret(current) || Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex"));
   await firewall(true);
   await restart();
+  settings.set("turn.installed", "1");
   audit(actor, "turn.install", { adopted: !!adopted });
   return { adopted: !!adopted };
+}
+
+/** Recovery on a new server: installed again with the secret the apps already have. */
+export async function reinstall(secretValue: string, actor: string) {
+  await install(actor);
+  if (secretValue) {
+    await write(secretValue);
+    await restart();
+  }
 }
 
 /** A new secret; every app that has TURN_SECRET gets it and is restarted by the caller. */
@@ -214,6 +224,7 @@ export async function uninstall(actor: string) {
     await run(["dnf", "-y", "remove", "coturn"], { check: false, timeoutMs: 600_000 });
   }
   settings.set("turn.domain", "");
+  settings.set("turn.installed", "0");
   audit(actor, "turn.uninstall", { restored: !!orig });
 }
 

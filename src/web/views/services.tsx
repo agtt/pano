@@ -132,6 +132,8 @@ export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; 
         ) : null}
       </div>
 
+      <h2 class="section">Optional extensions</h2>
+      <p class="muted small">Nothing of these is on disk or running until installed.</p>
       {p.realtime ? <RealtimeCard r={p.realtime} csrf={p.csrf} appNames={p.appNames ?? []} /> : null}
       {p.turn ? <TurnCard v={p.turn} csrf={p.csrf} appNames={p.appNames ?? []} /> : null}
 

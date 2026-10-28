@@ -18,6 +18,8 @@ import * as jobs from "./jobs.ts";
 import * as queues from "./queues.ts";
 import * as realtime from "./realtime.ts";
 import * as turn from "./turn.ts";
+import * as recovery from "./recovery.ts";
+import * as tune from "./tune.ts";
 import * as vulns from "./vulns.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
@@ -39,7 +41,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal",
+  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -465,7 +467,13 @@ export const methods: Record<string, Handler> = {
     dests: { a: await backup.getDest("a"), b: await backup.getDest("b") },
     engine: backup.engine(),
     restic: await backup.resticVersion(),
+    kit: await recovery.kitState(),
   }),
+  "recovery.kit": (_p, actor) => recovery.recoveryKit(actor),
+  "recovery.rebuild": (_p, actor) => recovery.startRebuild(actor),
+  "recovery.status": () => recovery.recoveryStatus(),
+  "tune.status": () => tune.tuningStatus(),
+  "tune.set": (p, actor) => tune.setKernelTuning(!!p.on, actor),
   "backup.dest.set": (p, actor) => backup.setDest(backup.parseDest(p.dest), p, actor),
   "backup.dest.clear": (p, actor) => backup.clearDest(backup.parseDest(p.dest), actor),
   "backup.dest.test": (p) => backup.testDest(backup.parseDest(p.dest)),

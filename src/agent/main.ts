@@ -9,6 +9,7 @@ import { startMonitor } from "./alerts.ts";
 import { startRealtime } from "./realtime.ts";
 import { startVulns } from "./vulns.ts";
 import { applyTuning } from "./tune.ts";
+import { ensureDefaultJobs } from "./recovery.ts";
 import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
@@ -100,6 +101,7 @@ export async function startAgent() {
     },
   });
 
+  ensureDefaultJobs();
   startScheduler();
   startMonitor();
   startShield();

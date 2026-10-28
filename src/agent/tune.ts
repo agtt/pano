@@ -6,7 +6,8 @@
 // serves traffic (sysctl and journald reload in place).
 
 import { totalmem } from "node:os";
-import { readText, run, writeAtomic } from "./sys.ts";
+import { audit, settings } from "./state.ts";
+import { readText, remove, run, writeAtomic } from "./sys.ts";
 
 const SYSCTL = "/etc/sysctl.d/90-pano.conf";
 const MODULES = "/etc/modules-load.d/pano.conf";
@@ -69,10 +70,40 @@ async function writeIfChanged(file: string, content: string): Promise<boolean> {
   return true;
 }
 
+export const kernelTuning = () => settings.get("tune.kernel") !== "0";
+
 export async function applyTuning() {
+  if (await writeIfChanged(JOURNALD, JOURNALD_CONF)) await run(["systemctl", "restart", "systemd-journald"], { check: false });
+  if (!kernelTuning()) {
+    // Off: our files go; the kernel keeps today's values until the next reboot.
+    for (const f of [SYSCTL, MODULES]) if ((await readText(f))?.startsWith("# Written by pano")) await remove(f);
+    return;
+  }
   const bbr = await bbrAvailable();
   if (bbr) await writeIfChanged(MODULES, "# Written by pano\ntcp_bbr\n");
   // Values a container or an old kernel refuses are skipped one by one (-e).
   if (await writeIfChanged(SYSCTL, renderSysctl(bbr))) await run(["sysctl", "-e", "-q", "-p", SYSCTL], { check: false });
-  if (await writeIfChanged(JOURNALD, JOURNALD_CONF)) await run(["systemctl", "restart", "systemd-journald"], { check: false });
+}
+
+export async function setKernelTuning(on: boolean, actor: string) {
+  settings.set("tune.kernel", on ? "1" : "0");
+  await applyTuning();
+  audit(actor, "tune.kernel", { on });
+}
+
+/** What the kernel uses now for the settings pano tunes, to see before and after. */
+export async function tuningStatus() {
+  const keys = renderSysctl(true)
+    .split("\n")
+    .map((l) => l.match(/^([a-z0-9_.]+) = /)?.[1])
+    .filter((k): k is string => !!k);
+  const r = await run(["sysctl", "-e", ...keys], { check: false });
+  const now = Object.fromEntries(r.stdout.split("\n").map((l) => l.split(" = ")).filter((p) => p.length === 2) as [string, string][]);
+  const wanted = Object.fromEntries(
+    renderSysctl(await bbrAvailable())
+      .split("\n")
+      .map((l) => l.split(" = "))
+      .filter((p) => p.length === 2 && !p[0]!.startsWith("#")) as [string, string][],
+  );
+  return { on: kernelTuning(), values: keys.map((k) => ({ key: k, now: now[k] ?? "", pano: wanted[k] ?? "" })) };
 }

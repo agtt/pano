@@ -22,6 +22,7 @@ import { ServicesPage, type PgDb, type ServiceRow } from "./views/services.tsx";
 import type { RealtimeView } from "./views/realtime.tsx";
 import type { TurnView } from "./views/turn.tsx";
 import { VulnsCard, type VulnView } from "./views/vulns.tsx";
+import { TuneCard, type TuneView } from "./views/tune.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
@@ -528,7 +529,7 @@ export function createWebApp() {
     const f = await form(c);
     try {
       needOtp(c, f.otp);
-      return backupsPage(c, await call<string>("backup.key.export", {}, actor(c)));
+      return backupsPage(c, await call<string>("recovery.kit", {}, actor(c)));
     } catch (e) {
       return c.redirect(err("/backups", e));
     }
@@ -676,23 +677,28 @@ export function createWebApp() {
 
   // ---- security, import, activity
   app.get("/security", async (c) => {
-    const [findings, guard, alerts, edge, vulns] = await Promise.all([
+    const [findings, guard, alerts, edge, vulns, tuning] = await Promise.all([
       call("system.audit"),
       call<GuardView>("guard.get"),
       call<AlertsView>("alerts.get"),
       call("edge.status"),
       call<VulnView>("vulns.status"),
+      call<TuneView>("tune.status"),
     ]);
     return page(
       c,
       t("Security"),
       <div class="stack">
         <VulnsCard csrf={c.get("s").csrf} v={vulns} />
+        <TuneCard csrf={c.get("s").csrf} v={tuning} />
         <ProtectCards csrf={c.get("s").csrf} guard={guard} alerts={alerts} behindCloudflare={edge.settings.behindCloudflare} />
         <SecurityPage findings={findings} />
       </div>,
     );
   });
+  app.post("/security/tune", act("/security", async (c, f) => {
+    await call("tune.set", { on: f.on === "1" }, actor(c));
+  }));
   app.post("/security/vulns/scan", act("/security", async (c) => {
     await call("vulns.scan", {}, actor(c));
     return "Checking; reload in a minute";
