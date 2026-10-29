@@ -214,3 +214,29 @@ export function formatEnv(vars: Record<string, string>): string {
     .map(([k, val]) => `${v.envKey(k)}="${v.envValue(val).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")}"`)
     .join("\n") + "\n";
 }
+
+export type FwPort = { from: number; to: number; proto: "tcp" | "udp" };
+
+/**
+ * Extra firewall ports, one per line or comma separated: `8080`, `8080/tcp`, `51820/udp`,
+ * `3000-3010/tcp`. A bare number means tcp. Sorted and de-duplicated; at most 50.
+ */
+export function parsePorts(text: unknown): FwPort[] {
+  const seen = new Map<string, FwPort>();
+  for (const raw of String(text ?? "").split(/[\s,]+/)) {
+    if (!raw) continue;
+    const m = raw.toLowerCase().match(/^(\d{1,5})(?:-(\d{1,5}))?(?:\/(tcp|udp))?$/);
+    check(!!m, `port "${raw.slice(0, 40)}": use 8080, 8080/udp or 3000-3010/tcp`);
+    const from = Number(m[1]);
+    const to = Number(m[2] ?? m[1]);
+    check(from >= 1 && to <= 65535 && from <= to, `port "${raw}": 1-65535, range from low to high`);
+    const proto = (m[3] ?? "tcp") as "tcp" | "udp";
+    seen.set(`${proto}/${from}-${to}`, { from, to, proto });
+  }
+  check(seen.size <= 50, "at most 50 extra ports");
+  return [...seen.values()].sort((a, b) => (a.proto === b.proto ? a.from - b.from || a.to - b.to : a.proto < b.proto ? -1 : 1));
+}
+
+export function formatPorts(list: FwPort[]): string {
+  return list.map((p) => `${p.from === p.to ? p.from : `${p.from}-${p.to}`}/${p.proto}`).join("\n");
+}

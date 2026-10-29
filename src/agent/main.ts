@@ -18,6 +18,7 @@ import { methods, needsOtp } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { type App, appHosts, apps, backups, deploys, procsOf, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
+import { startFirewall } from "./firewall.ts";
 import { recoverPending } from "./vpn.ts";
 
 const sameSecret = (given: string | null, secret: string) =>
@@ -117,6 +118,7 @@ export async function startAgent() {
   applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
+  await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);

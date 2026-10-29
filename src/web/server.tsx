@@ -25,6 +25,7 @@ import type { RealtimeView } from "./views/realtime.tsx";
 import type { TurnView } from "./views/turn.tsx";
 import { VulnsCard, type VulnView } from "./views/vulns.tsx";
 import { TuneCard, type TuneView } from "./views/tune.tsx";
+import { FirewallCard, type FirewallView } from "./views/firewall.tsx";
 import { Card, Layout } from "./views/layout.tsx";
 import {
   ActivityPage,
@@ -740,13 +741,14 @@ export function createWebApp() {
 
   // ---- security, import, activity
   app.get("/security", async (c) => {
-    const [findings, guard, alerts, edge, vulns, tuning] = await Promise.all([
+    const [findings, guard, alerts, edge, vulns, tuning, firewall] = await Promise.all([
       call("system.audit"),
       call<GuardView>("guard.get"),
       call<AlertsView>("alerts.get"),
       call("edge.status"),
       call<VulnView>("vulns.status"),
       call<TuneView>("tune.status"),
+      call<FirewallView>("firewall.status"),
     ]);
     return page(
       c,
@@ -754,6 +756,7 @@ export function createWebApp() {
       <div class="stack">
         <VulnsCard csrf={c.get("s").csrf} v={vulns} />
         <TuneCard csrf={c.get("s").csrf} v={tuning} />
+        <FirewallCard csrf={c.get("s").csrf} v={firewall} />
         <ProtectCards csrf={c.get("s").csrf} guard={guard} alerts={alerts} behindCloudflare={edge.settings.behindCloudflare} />
         <SecurityPage findings={findings} />
       </div>,
@@ -761,6 +764,25 @@ export function createWebApp() {
   });
   app.post("/security/tune", act("/security", async (c, f) => {
     await call("tune.set", { on: f.on === "1" }, actor(c));
+  }));
+  app.post("/security/firewall/enable", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("firewall.enable", {}, actor(c));
+    return "Firewall on; confirm it below within 2 minutes or it switches itself off";
+  }));
+  app.post("/security/firewall/confirm", act("/security", async (c) => {
+    await call("firewall.confirm", {}, actor(c));
+    return "Firewall confirmed";
+  }));
+  app.post("/security/firewall/disable", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("firewall.disable", {}, actor(c));
+    return "Firewall off";
+  }));
+  app.post("/security/firewall/ports", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("firewall.ports", { ports: f.ports }, actor(c));
+    return "Ports saved";
   }));
   app.post("/security/vulns/scan", act("/security", async (c) => {
     await call("vulns.scan", {}, actor(c));

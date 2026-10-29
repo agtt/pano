@@ -17,6 +17,7 @@ import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
 import * as queues from "./queues.ts";
 import * as realtime from "./realtime.ts";
+import * as firewall from "./firewall.ts";
 import * as turn from "./turn.ts";
 import * as recovery from "./recovery.ts";
 import * as tune from "./tune.ts";
@@ -48,6 +49,7 @@ const SENSITIVE = new Set([
   "realtime.install", "turn.install", "import.apply", "import.cpanel.apply", "db.grant",
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
+  "firewall.enable", "firewall.disable", "firewall.ports",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -347,6 +349,12 @@ export const methods: Record<string, Handler> = {
   "vpn.peer.add": (p, actor) => vpn.addPeer({ name: p.name, publicKey: p.publicKey }, actor),
   "vpn.peer.remove": (p, actor) => vpn.removePeer(v.int(p.id, 1, 1e9, "id"), actor),
   "vpn.locks": (p, actor) => vpn.setLocks({ panel: !!p.panel, ssh: !!p.ssh, services: !!p.services, databases: !!p.databases }, Number(p.confirmSeconds ?? 300), actor),
+  // ---- inbound firewall (optional, default-deny; an unconfirmed enable rolls itself back)
+  "firewall.status": () => firewall.status(),
+  "firewall.enable": (p, actor) => firewall.enable({ confirmSeconds: p.confirmSeconds }, actor),
+  "firewall.confirm": (_p, actor) => firewall.confirm(actor),
+  "firewall.disable": (_p, actor) => firewall.disable(actor),
+  "firewall.ports": (p, actor) => firewall.setPorts(p.ports, actor),
   "guard.get": async () => ({ ...guard.guardSettings(), banned: await guard.banned() }),
   "guard.set": (p, actor) => guard.setGuard({ ssh: !!p.ssh, http: !!p.http }, actor),
   // `remote` is the address the web process saw the request come from.
