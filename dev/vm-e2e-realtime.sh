@@ -13,6 +13,7 @@ step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 step "install"
 rpc realtime.uninstall '{"confirm":"realtime"}' >/dev/null 2>&1 || true
 rpc realtime.install
+rpc realtime.app.remove '{"name":"shop","confirm":"shop"}' >/dev/null 2>&1 || true # an earlier run
 rpc realtime.app.add '{"name":"shop","origins":"https://shop.example.com"}'
 rpc realtime.status | grep -E '"(version|active|memory)"'
 R sh -c 'grep -E "NoNewPrivs|Seccomp:" /proc/$(systemctl show -p MainPID --value pano-realtime)/status'

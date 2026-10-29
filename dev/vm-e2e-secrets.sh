@@ -30,6 +30,10 @@ CSRF=$(curl -s -b "$JAR" "$URL/apps/$APP" | grep -o 'name="_csrf" value="[^"]*"'
 post() { curl -s -b "$JAR" -o /dev/null -w '%{http_code} %{redirect_url}\n' -H "Origin: $URL" --data-urlencode "_csrf=$CSRF" "$@"; }
 
 step "+ Database: PostgreSQL for $APP, URL written into its env, app restarted"
+# Leftovers of an earlier run: the URL in the env, the database and its role.
+rpc apps.env.set "{\"name\":\"$APP\",\"vars\":{}}" >/dev/null
+rpc pg.drop "{\"name\":\"hello_bun\",\"confirm\":\"hello_bun\"}" >/dev/null 2>&1 || true
+R sh -c "cd / && runuser -u postgres -- \$(ls /usr/pgsql-*/bin/psql | tail -1) -qc 'DROP ROLE IF EXISTS hello_bun'" || true
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c 'keys'
 post --data-urlencode engine=postgres --data-urlencode "otp=$(otp 1)" "$URL/apps/$APP/database" | sed 's/%20/ /g'
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c .
@@ -66,6 +70,6 @@ printf 'after lockout, right code: '; A auth.otp "{\"params\":{\"username\":\"e2
 step "app sandbox additions and disk"
 R systemctl show "pano-app-$APP@a" -p IPAddressDeny -p ProtectProc
 for a in $(rpc apps.list | jq -r '.[] | select(.kind == "managed") | .name'); do printf '%-12s releases: %s\n' "$a" "$(R ls "/srv/pano/apps/$a/releases" | wc -l)"; done
-R du -sh /srv/pano/apps/*/cache 2>/dev/null | head
+R sh -c 'du -sh /srv/pano/apps/*/cache 2>/dev/null' | head
 R cat /etc/systemd/journald.conf.d/pano.conf
 rm -f "$JAR"

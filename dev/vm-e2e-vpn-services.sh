@@ -45,7 +45,8 @@ SPUB=$(rpc vpn.status | jq -r .publicKey)
 R sh -c "echo $PSK > /root/wgc.psk"
 NS ip link add wg0 type wireguard
 NS wg set wg0 private-key /root/wgc.key peer "$SPUB" preshared-key /root/wgc.psk endpoint 192.168.77.1:51820 allowed-ips 10.77.0.1/32 persistent-keepalive 25
-NS ip addr add 10.77.0.2/32 dev wg0
+CIP=$(echo "$ADD" | jq -r .ip) # the address the server gave this peer
+NS ip addr add "$CIP/32" dev wg0
 NS ip link set wg0 up
 NS ip route add 10.77.0.1/32 dev wg0
 NS ping -c 2 -W 2 10.77.0.1 | tail -2
@@ -74,14 +75,14 @@ rpc vpn.status | jq -c '{locks, pending}'
 
 step "lock again and confirm from inside the tunnel: stays"
 rpc vpn.locks '{"panel":true,"ssh":false,"services":true,"confirmSeconds":30}'
-rpc vpn.confirm '{"remote":"10.77.0.2"}'
+rpc vpn.confirm "{\"remote\":\"$CIP\"}"
 sleep 33
 printf 'internet  8888: %s (still locked: 000)\n' "$(code http://192.168.77.1:8888/)"
 printf 'wireguard 8888: %s\n' "$(code http://10.77.0.1:8888/)"
 R nft list table inet pano_vpn | grep -c drop
 
 step "revoke the laptop"
-ID=$(rpc vpn.status | jq '.peers[] | select(.name == "laptop") | .id')
+ID=$(rpc vpn.status | jq --arg ip "$CIP" '.peers[] | select(.ip == $ip) | .id')
 rpc vpn.peer.remove "{\"id\":$ID}"
 printf 'wireguard after revoke: %s\n' "$(code http://10.77.0.1:8888/)"
 
