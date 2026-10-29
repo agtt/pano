@@ -8,6 +8,8 @@ export type TurnView = {
   memory: number;
   domain: string;
   urls: string[];
+  tls?: boolean;
+  tlsPort?: number;
   allocations: number;
   port: number;
   relay: { min: number; max: number };
@@ -44,6 +46,19 @@ export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; app
         <Field label="Domain (optional)" name="domain" value={v.domain} placeholder="turn.example.com" hint="A DNS-only (grey cloud) record to this server." />
         <button class="btn">{t("Save")}</button>
       </form>
+      {v.domain ? (
+        <form method="post" action="/services/turn/tls" class="row">
+          <Csrf token={csrf} />
+          <input type="hidden" name="on" value={v.tls ? "0" : "1"} />
+          <Otp />
+          <button class="btn small">{v.tls ? "Turn off TLS" : `Turn on TLS (turns: ${v.tlsPort ?? 5349})`}</button>
+          <small class="muted">
+            {v.tls
+              ? "Clients can also reach the relay over an encrypted TCP connection (turns:)."
+              : "Optional. Uses the edge's certificate for the domain above (its DNS record must point here, edge installed)."}
+          </small>
+        </form>
+      ) : null}
       <div class="cols">
         {appNames.length ? (
           <form method="post" action="/services/turn/to-app" class="grid-form">

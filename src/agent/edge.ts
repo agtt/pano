@@ -18,7 +18,8 @@ const CLOUDFLARE_RANGES = [
 
 export const EDGE_USER = "pano-edge";
 
-export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean };
+/** turnDomain: only set while TURN over TLS is on; the edge then holds a certificate for it (see turn.ts). */
+export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean; turnDomain?: string };
 
 export function edgeSettings(): EdgeSettings {
   return {
@@ -26,6 +27,7 @@ export function edgeSettings(): EdgeSettings {
     behindCloudflare: settings.get("edge.behindCloudflare") === "1",
     hooksDomain: settings.get("edge.hooksDomain") ?? "",
     localCerts: settings.get("edge.localCerts") === "1",
+    turnDomain: settings.get("turn.tls") === "1" ? settings.get("turn.domain") ?? "" : "",
   };
 }
 
@@ -166,6 +168,11 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
       "}",
       "",
     );
+  }
+
+  if (s.turnDomain) {
+    // Nothing is served here; the block makes Caddy obtain and renew the certificate that coturn uses for turns:.
+    out.push(`${s.turnDomain} {`, "\timport pano_common", "\trespond 404", "}", "");
   }
 
   for (const a of input.apps) {

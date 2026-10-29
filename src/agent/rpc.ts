@@ -49,7 +49,7 @@ const SENSITIVE = new Set([
   "apps.addDatabase", "apps.addRealtime", "apps.addTurn",
   // These reach root or the network: a container spec can mount the host, a site can take over a domain.
   "containers.install", "containers.save", "sites.save", "backup.job.add", "vpn.enable", "edge.install", "edge.settings",
-  "realtime.install", "turn.install", "import.apply", "import.cpanel.apply", "db.grant",
+  "realtime.install", "turn.install", "turn.tls", "import.apply", "import.cpanel.apply", "db.grant",
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
   "firewall.enable", "firewall.disable", "firewall.ports",
@@ -303,6 +303,7 @@ export const methods: Record<string, Handler> = {
   "turn.status": () => turn.turnStatus(),
   "turn.install": (_p, actor) => turn.install(actor),
   "turn.domain": (p, actor) => turn.setDomain(String(p.domain ?? "").trim(), actor),
+  "turn.tls": (p, actor) => turn.setTls(p.on === true || p.on === "1", actor),
   "turn.uninstall": (p, actor) => {
     if (p.confirm !== "turn") throw new Error("type turn to confirm");
     return turn.uninstall(actor);

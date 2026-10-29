@@ -21,6 +21,7 @@ import { sweepPreviews } from "./previews.ts";
 import { type App, appHosts, apps, backups, deploys, previews, procsOf, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 import { startFirewall } from "./firewall.ts";
+import { renewTlsCert } from "./turn.ts";
 import { recoverPending } from "./vpn.ts";
 
 const sameSecret = (given: string | null, secret: string) =>
@@ -128,5 +129,7 @@ export async function startAgent() {
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
+  // coturn reads its certificate at start: pick up the edge's renewals (only does anything when TURN over TLS is on).
+  setInterval(() => renewTlsCert().catch((e) => console.error(`[agent] turn cert: ${e}`)), 6 * 3600_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);
 }

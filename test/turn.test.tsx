@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { renderCaddyfile } from "../src/agent/edge.ts";
 import { credentials, renderConf, renderDropin, urlsFor } from "../src/agent/turn.ts";
 import { renderSysctl, sizes } from "../src/agent/tune.ts";
 import { TurnCard } from "../src/web/views/turn.tsx";
@@ -12,6 +13,22 @@ test("TURN config refuses private peers and needs the shared secret", () => {
   }
   expect(renderDropin()).toContain("ProtectSystem=strict");
   expect(urlsFor("turn.example.com")[0]).toBe("turn:turn.example.com:3478?transport=udp");
+});
+
+test("TURN over TLS is opt-in and uses the given certificate", () => {
+  const base = { ip: "203.0.113.5", realm: "example.com", secret: "s3cret-0123456789abcdef" };
+  const off = renderConf(base);
+  expect(off).toContain("no-tls");
+  expect(off).not.toContain("tls-listening-port");
+  const on = renderConf({ ...base, tls: { cert: "/etc/coturn/tls/fullchain.pem", pkey: "/etc/coturn/tls/privkey.pem" } });
+  expect(on).toContain("tls-listening-port=5349");
+  expect(on).toContain("cert=/etc/coturn/tls/fullchain.pem");
+  expect(on).not.toContain("no-tls\n");
+  expect(on).toContain("no-dtls");
+  expect(urlsFor("turn.example.com")).not.toContain("turns:turn.example.com:5349?transport=tcp");
+  expect(urlsFor("turn.example.com", true)).toContain("turns:turn.example.com:5349?transport=tcp");
+  const caddy = renderCaddyfile({ apps: [], sites: [], settings: { email: "", behindCloudflare: false, hooksDomain: "", turnDomain: "turn.example.com" }, certs: new Set() });
+  expect(caddy).toContain("turn.example.com {");
 });
 
 test("short-lived TURN credentials", () => {

@@ -548,6 +548,11 @@ export function createWebApp() {
   app.post("/services/turn/domain", act("/services", async (c, f) => {
     await call("turn.domain", { domain: f.domain }, actor(c));
   }));
+  app.post("/services/turn/tls", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("turn.tls", { on: f.on === "1" }, actor(c));
+    return f.on === "1" ? "TURN over TLS is on" : "TURN over TLS is off";
+  }));
   app.post("/services/turn/to-app", act("/services", async (c, f) => {
     needOtp(c, f.otp);
     await call("apps.addTurn", { name: f.app }, actor(c));
