@@ -2,7 +2,7 @@
 // handler validates its own input; there is no generic "run command" method.
 
 import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
-import { checkOtp } from "./otp.ts";
+import { addAdmin, adminNames, checkOtp, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as appsOps from "./apps.ts";
 import * as backup from "./backup.ts";
@@ -46,6 +46,8 @@ const SENSITIVE = new Set([
   // These reach root or the network: a container spec can mount the host, a site can take over a domain.
   "containers.install", "containers.save", "sites.save", "backup.job.add", "vpn.enable", "edge.install", "edge.settings",
   "realtime.install", "turn.install", "import.apply", "import.cpanel.apply", "db.grant",
+  // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
+  "admins.add", "admins.remove", "admins.reset",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -80,6 +82,12 @@ const allDomains = () => ({ apps: apps.list(), sites: sites.list() });
 export const methods: Record<string, Handler> = {
   // ---- login: the web checks the password, the agent checks the code
   "auth.otp": (p) => checkOtp(String(p.username ?? ""), p.code),
+
+  // ---- admins (all equal, no roles); the web keeps the password hashes
+  "admins.list": () => adminNames(),
+  "admins.add": (p, actor) => addAdmin(actor, String(p.username ?? "")),
+  "admins.remove": (p, actor) => removeAdmin(actor, String(p.username ?? "")),
+  "admins.reset": (p, actor) => resetAdmin(actor, String(p.username ?? ""), !!p.twofa),
 
   // ---- overview
   "system.info": () => system.info(),

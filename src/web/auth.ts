@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { checkUsername } from "../shared/admins.ts";
 import { fsPath, paths } from "../shared/config.ts";
 import { call } from "./agent.ts";
 import { newSecret } from "./totp.ts";
@@ -47,6 +48,7 @@ export function webDb(): Database {
       until INTEGER NOT NULL
     );
   `);
+  if (!(db.query("PRAGMA table_info(users)").all() as { name: string }[]).some((c) => c.name === "last_login")) db.exec("ALTER TABLE users ADD COLUMN last_login INTEGER NOT NULL DEFAULT 0");
   return db;
 }
 
@@ -57,7 +59,7 @@ export type User = { id: number; username: string; password_hash: string; totp_s
 export type Session = { user: User; csrf: string };
 
 export async function createUser(username: string, password: string): Promise<{ secret: string }> {
-  if (!/^[a-z][a-z0-9_.-]{2,31}$/.test(username)) throw new Error("username: 3-32 lowercase chars");
+  checkUsername(username);
   if (password.length < 12) throw new Error("password must be at least 12 characters");
   const hash = await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
   // Returned to `pano admin` (root), which hands it to the agent's store; never kept here.
@@ -73,6 +75,56 @@ export async function createUser(username: string, password: string): Promise<{ 
 
 export function userCount(): number {
   return (webDb().query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+
+// ---- admins managed from the panel (the agent holds their 2FA secrets and enforces who may be removed)
+
+export type UserRow = { username: string; created_at: number; last_login: number };
+
+export function listUsers(): UserRow[] {
+  return webDb().query("SELECT username, created_at, last_login FROM users ORDER BY username").all() as UserRow[];
+}
+
+/** Random, shown once to the admin who creates or resets the account. */
+export function generatePassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  let out = "";
+  for (const b of randomBytes(20)) out += alphabet[b % alphabet.length];
+  return out;
+}
+
+export function userExists(username: string): boolean {
+  return !!webDb().query("SELECT 1 FROM users WHERE username = ?").get(username);
+}
+
+export function killSessions(username: string) {
+  webDb().query("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username = ?)").run(username);
+}
+
+const hashPassword = (password: string) => Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
+
+/** Hash first, so a failure here happens before anything is changed elsewhere. */
+export async function prepareHash(password: string): Promise<string> {
+  if (password.length < 12) throw new Error("password must be at least 12 characters");
+  return hashPassword(password);
+}
+
+export function addUser(username: string, hash: string) {
+  checkUsername(username);
+  if (userExists(username)) throw new Error("that admin already exists");
+  webDb().query("INSERT INTO users (username, password_hash, totp_secret, created_at) VALUES (?, ?, '', ?)").run(username, hash, now());
+}
+
+export function removeUser(username: string) {
+  killSessions(username);
+  webDb().query("DELETE FROM users WHERE username = ?").run(username);
+}
+
+/** Sets a new password and signs the user out everywhere. */
+export function setPassword(username: string, hash: string) {
+  if (!userExists(username)) throw new Error("no such admin");
+  webDb().query("UPDATE users SET password_hash = ? WHERE username = ?").run(hash, username);
+  killSessions(username);
 }
 
 function locked(key: string): boolean {
@@ -106,6 +158,7 @@ export async function login(username: string, password: string, otp: string, ip:
   }
   keys.forEach((k) => webDb().query("DELETE FROM login_failures WHERE key = ?").run(k));
   const sid = randomBytes(32).toString("base64url");
+  webDb().query("UPDATE users SET last_login = ? WHERE id = ?").run(now(), user.id);
   webDb()
     .query("INSERT INTO sessions (id_hash, user_id, csrf, created_at, seen_at, ip) VALUES (?, ?, ?, ?, ?, ?)")
     .run(sha(sid), user.id, randomBytes(24).toString("base64url"), now(), now(), ip);

@@ -14,6 +14,7 @@ export const NAV: [string, string][] = [
   ["/edge", "Edge"],
   ["/vpn", "Private access"],
   ["/security", "Security"],
+  ["/admins", "Admins"],
   ["/shield", "Shield"],
   ["/import", "Import"],
   ["/activity", "Activity"],

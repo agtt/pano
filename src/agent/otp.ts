@@ -7,9 +7,10 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { fsPath, paths } from "../shared/config.ts";
-import { verify } from "../web/totp.ts";
-import { state } from "./state.ts";
-import { ensureDir, exists, readText, writeAtomic } from "./sys.ts";
+import { checkRemove, checkUsername } from "../shared/admins.ts";
+import { newSecret, otpauthUri, verify } from "../web/totp.ts";
+import { audit, state } from "./state.ts";
+import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 
 const MAX_FAILS = 5;
 const LOCK_SECONDS = 15 * 60;
@@ -72,6 +73,54 @@ export const grantValid = (grant: unknown, actor: string) => {
   g.uses--;
   return true;
 };
+
+// ---- managing admins from the panel. The web keeps the password hashes; the
+// secrets stay here and leave only once, in the reply to add / reset 2FA.
+
+/** Everyone who can sign in (has a 2FA secret here). Names only. */
+export function adminNames(): string[] {
+  table();
+  return (state().query("SELECT username FROM admins ORDER BY username").all() as { username: string }[]).map((r) => r.username);
+}
+
+export type NewAdmin = { username: string; secret: string; uri: string; qr: string };
+
+/** The secret, its otpauth link and (if qrencode is installed) a QR image, to be shown once. */
+async function enrollment(username: string, secret: string): Promise<NewAdmin> {
+  const uri = otpauthUri(secret, username);
+  let qr = "";
+  try {
+    const r = await run(["qrencode", "-t", "SVG", "-o", "-"], { input: uri, check: false });
+    if (r.code === 0 && r.stdout) qr = `data:image/svg+xml;base64,${Buffer.from(r.stdout).toString("base64")}`;
+  } catch {}
+  return { username, secret, uri, qr };
+}
+
+export async function addAdmin(actor: string, username: string): Promise<NewAdmin> {
+  checkUsername(username);
+  if (adminNames().includes(username)) throw new Error("that admin already exists");
+  const secret = newSecret();
+  setAdminSecret(username, secret);
+  audit(actor, "admins.add", { username });
+  return enrollment(username, secret);
+}
+
+export function removeAdmin(actor: string, username: string) {
+  checkRemove(actor, username, adminNames());
+  state().query("DELETE FROM admins WHERE username = ?").run(username);
+  for (const [k, g] of grants) if (g.actor === username) grants.delete(k);
+  audit(actor, "admins.remove", { username });
+}
+
+/** New secret (old codes stop working), or with `twofa` false only the audit of a password reset the web carries out. */
+export async function resetAdmin(actor: string, username: string, twofa: boolean): Promise<NewAdmin | null> {
+  if (!adminNames().includes(username)) throw new Error("no such admin");
+  audit(actor, "admins.reset", { username, what: twofa ? "2fa" : "password" });
+  if (!twofa) return null;
+  const secret = newSecret();
+  setAdminSecret(username, secret);
+  return enrollment(username, secret);
+}
 
 /** Root's `pano rpc` proves itself with a root-only token instead of a code. */
 export async function cliToken(): Promise<string> {

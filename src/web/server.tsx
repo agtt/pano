@@ -7,7 +7,9 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Child } from "hono/jsx";
 import { env } from "../shared/config.ts";
 import { call, stepUp } from "./agent.ts";
-import { csrfOk, login, logout, pruneSessions, session, type Session } from "./auth.ts";
+import { addUser, csrfOk, generatePassword, killSessions, listUsers, login, logout, prepareHash, pruneSessions, removeUser, session, setPassword, userExists, type Session } from "./auth.ts";
+import { checkUsername } from "../shared/admins.ts";
+import { AdminsPage, type AdminSecret } from "./views/admins.tsx";
 import { t } from "./i18n.ts";
 import css from "./static/app.css" with { type: "text" };
 import js from "./static/app.js" with { type: "text" };
@@ -616,6 +618,58 @@ export function createWebApp() {
     await call("containers.delete", { name: c.req.param("name"), confirm: f.confirm, removeData: f.removeData === "1" }, actor(c));
     return "/containers";
   }));
+
+  // ---- admins: the web owns passwords, the agent owns 2FA secrets and the guard rules; every change needs the acting admin's code
+  const adminsPage = async (c: Context<Env>, created?: AdminSecret) => {
+    const withTwofa = new Set(await call<string[]>("admins.list"));
+    const admins = listUsers().map((u) => ({ ...u, twofa: withTwofa.has(u.username) }));
+    return page(c, t("Admins"), <AdminsPage csrf={c.get("s").csrf} me={actor(c)} admins={admins} created={created} />);
+  };
+  app.get("/admins", async (c) => adminsPage(c));
+  app.post("/admins", async (c) => {
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      const username = String(f.username ?? "").trim();
+      checkUsername(username);
+      if (userExists(username)) throw new Error("that admin already exists");
+      const password = generatePassword();
+      const hash = await prepareHash(password);
+      // The agent checks the code and makes the 2FA secret; only then does the account exist here.
+      const e = await call<{ secret: string; uri: string; qr: string }>("admins.add", { username }, actor(c));
+      addUser(username, hash);
+      return adminsPage(c, { username, password, secret: e.secret, uri: e.uri, qr: e.qr, reason: t("new admin") });
+    } catch (e) {
+      return c.redirect(err("/admins", e));
+    }
+  });
+  app.post("/admins/:name", async (c) => {
+    const f = await form(c);
+    const name = c.req.param("name")!;
+    try {
+      needOtp(c, f.otp);
+      if (f.do === "remove") {
+        await call("admins.remove", { username: name }, actor(c)); // refuses yourself and the last admin
+        removeUser(name);
+        return back(c, "/admins", `Removed ${name}`);
+      }
+      if (f.do === "password") {
+        const password = generatePassword();
+        const hash = await prepareHash(password);
+        await call("admins.reset", { username: name, twofa: false }, actor(c));
+        setPassword(name, hash);
+        return adminsPage(c, { username: name, password, reason: t("password reset") });
+      }
+      if (f.do === "2fa") {
+        const e = await call<{ secret: string; uri: string; qr: string }>("admins.reset", { username: name, twofa: true }, actor(c));
+        killSessions(name);
+        return adminsPage(c, { username: name, secret: e.secret, uri: e.uri, qr: e.qr, reason: t("2FA reset") });
+      }
+      throw new Error("unknown action");
+    } catch (e) {
+      return c.redirect(err("/admins", e));
+    }
+  });
 
   // ---- private access (WireGuard)
   const remoteIp = (c: Context<Env>) => (getConnInfo(c).remote.address ?? "").replace(/^::ffff:/, "");

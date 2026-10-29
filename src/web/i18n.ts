@@ -38,6 +38,7 @@ const tr: Record<string, string> = {
   Shield: "Kalkan",
   Devices: "Cihazlar",
   Security: "Güvenlik",
+  Admins: "Yöneticiler",
   Import: "İçe aktar",
   Edge: "Edge / SSL",
   Activity: "Etkinlik",
