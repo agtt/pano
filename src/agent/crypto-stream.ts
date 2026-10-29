@@ -7,6 +7,9 @@
 // The final flag makes truncation (dropping trailing chunks) detectable.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const MAGIC = new TextEncoder().encode("PANOBK1\n");
 const CHUNK = 4 * 1024 * 1024;
@@ -102,4 +105,16 @@ export function decryptStream(key: Buffer): TransformStream<Uint8Array, Uint8Arr
       if (!sawFinal || buf.length) throw new Error("backup is truncated");
     },
   });
+}
+
+/**
+ * Decrypts and gunzips a backup into a new 0600 file. A truncated or tampered backup
+ * is only detected at its end, so nothing may read the plain data before this resolves:
+ * a database loaded straight from the stream would keep the part before the cut.
+ */
+export async function decryptToFile(src: ReadableStream<Uint8Array>, key: Buffer, file: string) {
+  const plain = src
+    .pipeThrough(decryptStream(key))
+    .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
+  await pipeline(Readable.fromWeb(plain as any), createWriteStream(file, { mode: 0o600, flags: "wx" }));
 }

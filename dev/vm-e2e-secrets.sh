@@ -31,7 +31,7 @@ post() { curl -s -b "$JAR" -o /dev/null -w '%{http_code} %{redirect_url}\n' -H "
 
 step "+ Database: PostgreSQL for $APP, URL written into its env, app restarted"
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c 'keys'
-post --data-urlencode engine=postgres "$URL/apps/$APP/database" | sed 's/%20/ /g'
+post --data-urlencode engine=postgres --data-urlencode "otp=$(otp -1)" "$URL/apps/$APP/database" | sed 's/%20/ /g'
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c .
 sleep 3
 PID=$(R systemctl show -p MainPID --value "pano-app-$APP@$(rpc apps.get "{\"name\":\"$APP\"}" | jq -r .active_slot)")

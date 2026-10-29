@@ -253,6 +253,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "" }: { site?: Site
             </label>
           ) : null}
           <div class="actions">
+            <Otp />
             <button class="btn primary">{t("Save")}</button>
           </div>
         </form>
@@ -575,6 +576,7 @@ export function BackupsPage(p: {
           <Field label="Keep" name="keep" type="number" value={7} />
           <Field label="Name" name="name" placeholder="(auto)" />
           <div class="actions">
+            <Otp />
             <button class="btn primary">{t("Create")}</button>
           </div>
         </form>
@@ -737,6 +739,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
           {!s.installed ? (
             <form method="post" action="/edge/install">
               <Csrf token={p.csrf} />
+              <Otp />
               <button class="btn primary">{t("Install Caddy")}</button>
             </form>
           ) : null}
@@ -772,6 +775,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
             <input type="checkbox" name="localCerts" value="1" checked={s.settings.localCerts} /> Staging: use Caddy's internal CA instead of Let's Encrypt
           </label>
           <div class="actions">
+            <Otp />
             <button class="btn">{t("Save")}</button>
           </div>
         </form>
@@ -951,6 +955,7 @@ function CpanelImport(p: { csrf: string; archives: { file: string; bytes: number
             </ul>
           </Card>
           <div>
+            <Otp />
             <button class="btn primary">{t("Import selected")}</button>
           </div>
         </form>
@@ -1060,6 +1065,7 @@ export function ImportPage(p: {
             </table>
           </Card>
           <div>
+            <Otp />
             <button class="btn primary">{t("Import selected")}</button>
           </div>
         </form>

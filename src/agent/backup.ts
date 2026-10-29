@@ -22,7 +22,7 @@ import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
 import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
-import { decryptStream, encryptStream } from "./crypto-stream.ts";
+import { decryptToFile, encryptStream } from "./crypto-stream.ts";
 import { dumpCommand, restoreCommand } from "./mysql.ts";
 import { apps, audit, backups, settings, state, type BackupJob, type BackupRun } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -89,6 +89,10 @@ export async function setDest(d: DestId, input: Record<string, unknown>, actor: 
   const endpoint = String(input.endpoint ?? "").trim();
   // Plain http only to this machine (a local MinIO).
   if (endpoint && !/^(https:\/\/[A-Za-z0-9.-]+|http:\/\/127\.0\.0\.1)(:\d+)?\/?$/.test(endpoint)) throw new Error("endpoint must be an https URL");
+  // No https to internal addresses (cloud metadata, the LAN): the agent signs requests as root.
+  if (endpoint.startsWith("https://") && /^https:\/\/(localhost|[0-9.]+|[^/:]*\.(local|internal|localdomain))(:\d+)?\/?$/i.test(endpoint)) {
+    throw new Error("endpoint must be a public host name");
+  }
   if (!accountId && !endpoint) throw new Error("R2 account id or an S3 endpoint is required");
   const accessKeyId = String(input.accessKeyId ?? "").trim();
   if (!/^[A-Za-z0-9]{16,128}$/.test(accessKeyId)) throw new Error("invalid access key id");
@@ -159,7 +163,11 @@ export async function testDest(d: DestId): Promise<string> {
 /** 32-byte key, created on first use. Losing it makes every backup unreadable. */
 export async function backupKey(): Promise<Buffer> {
   const existing = await readText(KEY_FILE);
-  if (existing) return Buffer.from(existing.trim(), "base64");
+  if (existing) {
+    const key = Buffer.from(existing.trim(), "base64");
+    if (key.length !== 32) throw new Error(`${KEY_FILE} is not a 32-byte base64 key`);
+    return key;
+  }
   const key = randomBytes(32);
   await ensureDir(paths.secrets, 0o700);
   await writeAtomic(KEY_FILE, key.toString("base64") + "\n", 0o600);
@@ -242,9 +250,11 @@ function archiveCommand(job: BackupJob): { cmd: string[]; ext: string } {
   if (job.kind === "app") {
     if (!apps.get(job.target)) throw new Error(`app ${job.target} no longer exists`);
     const home = fsPath(appHome(job.target));
-    // slot-a/slot-b are symlinks to releases; --dereference stores their contents.
+    // slot-a/slot-b are symlinks to releases and stay symlinks (as with restic): following links
+    // as root over app-writable dirs would let the app read any file (backup.key) back from a restore.
+    // Releases are rebuilt from git on recovery.
     // .ssh: the deploy key, so a recovered server can pull without adding a new key.
-    return { cmd: ["tar", "-cf", "-", "--dereference", "--ignore-failed-read", ...excludes, "-C", home, "shared", "data", ".ssh", "slot-a", "slot-b"], ext: "tar" };
+    return { cmd: ["tar", "-cf", "-", "--ignore-failed-read", ...excludes, "-C", home, "shared", "data", ".ssh", "slot-a", "slot-b"], ext: "tar" };
   }
   return { cmd: ["tar", "-cf", "-", "--exclude=node_modules", "--exclude=.git", "-C", fsPath(job.target), "."], ext: "tar" };
 }
@@ -474,22 +484,29 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
   if (DRY_RUN) return `[dry-run] would restore into ${where}`;
 
   if (r.engine === "restic") await restoreRestic(r, job, d, cmd, where);
-  else await restoreArchive(r, d, cmd ?? ["tar", "-xf", "-", "--no-same-owner", "-C", fsPath(where)]);
+  else await restoreArchive(r, d, cmd ?? ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(where)]);
   audit(actor, "backup.restore", { runId, where });
   return `restored into ${where}`;
 }
 
 async function restoreArchive(r: BackupRun, d: DestId, cmd: string[]) {
   const { s3 } = await client(d);
-  const key = await backupKey();
-  const plain = s3
-    .file(r.object_key)
-    .stream()
-    .pipeThrough(decryptStream(key))
-    .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
-  const proc = Bun.spawn(cmd, { stdin: plain, stdout: "ignore", stderr: "pipe", env: ENV });
-  const code = await proc.exited;
-  if (code !== 0) throw new Error(`restore failed: ${(await new Response(proc.stderr).text()).trim().split("\n").slice(-2).join(" ")}`);
+  const res = await feedVerified(s3.file(r.object_key).stream(), await backupKey(), cmd, ENV);
+  if (res.code !== 0) throw new Error(`restore failed: ${res.stderr.split("\n").slice(-2).join(" ")}`);
+}
+
+/** Runs cmd with the decrypted backup on stdin, from a temporary copy that was fully verified first. */
+export async function feedVerified(src: ReadableStream<Uint8Array>, key: Buffer, cmd: string[], env?: Record<string, string>) {
+  await ensureDir(`${paths.data}/tmp`, 0o700);
+  const tmp = `${paths.data}/tmp/restore-${randomBytes(8).toString("hex")}`;
+  try {
+    await decryptToFile(src, key, fsPath(tmp));
+    const proc = Bun.spawn(cmd, { stdin: Bun.file(fsPath(tmp)), stdout: "ignore", stderr: "pipe", env });
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    return { code, stderr: stderr.trim() };
+  } finally {
+    await remove(tmp);
+  }
 }
 
 async function restoreRestic(r: BackupRun, job: BackupJob, d: DestId, cmd: string[] | null, where: string) {

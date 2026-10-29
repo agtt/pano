@@ -219,7 +219,8 @@ async function syncCerts(): Promise<Set<string>> {
   for (const w of want) {
     const cert = await readText(w.cert);
     const key = await readText(w.key);
-    if (!cert || !key) continue;
+    // Only PEM goes to the edge: a path that now leads to some other file (symlink) is skipped.
+    if (!cert?.includes("-----BEGIN CERTIFICATE-----") || !key || !/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key)) continue;
     await ensureDir(certDir(w.id), 0o750);
     await writeAtomic(`${certDir(w.id)}/cert.pem`, cert, 0o640);
     await writeAtomic(`${certDir(w.id)}/key.pem`, key, 0o640);
@@ -337,6 +338,13 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectHostname=true
 ReadWritePaths=${paths.edgeData} ${paths.accessLogs}
 LimitNOFILE=1048576
 TimeoutStopSec=30s

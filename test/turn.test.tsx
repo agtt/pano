@@ -5,9 +5,9 @@ import { renderSysctl, sizes } from "../src/agent/tune.ts";
 import { TurnCard } from "../src/web/views/turn.tsx";
 
 test("TURN config refuses private peers and needs the shared secret", () => {
-  const c = renderConf({ ip: "203.0.113.5", realm: "example.com", secret: "s3cret" });
+  const c = renderConf({ ip: "203.0.113.5", realm: "example.com", secret: "s3cret-0123456789abcdef" });
   expect(c.startsWith("# Written by pano")).toBe(true);
-  for (const line of ["use-auth-secret", "static-auth-secret=s3cret", "no-cli", "no-multicast-peers", "denied-peer-ip=127.0.0.0-127.255.255.255", "denied-peer-ip=100.64.0.0-100.127.255.255", "external-ip=203.0.113.5"]) {
+  for (const line of ["use-auth-secret", "static-auth-secret=s3cret-0123456789abcdef", "no-cli", "no-multicast-peers", "denied-peer-ip=127.0.0.0-127.255.255.255", "denied-peer-ip=100.64.0.0-100.127.255.255", "external-ip=203.0.113.5"]) {
     expect(c).toContain(line);
   }
   expect(renderDropin()).toContain("ProtectSystem=strict");
@@ -15,9 +15,9 @@ test("TURN config refuses private peers and needs the shared secret", () => {
 });
 
 test("short-lived TURN credentials", () => {
-  const { username, credential } = credentials("s3cret", "alice", 3600, 1_700_000_000_000);
+  const { username, credential } = credentials("s3cret-0123456789abcdef", "alice", 3600, 1_700_000_000_000);
   expect(username).toBe("1700003600:alice");
-  expect(credential).toBe(createHmac("sha1", "s3cret").update(username).digest("base64"));
+  expect(credential).toBe(createHmac("sha1", "s3cret-0123456789abcdef").update(username).digest("base64"));
 });
 
 test("memory for data services grows with the server", () => {

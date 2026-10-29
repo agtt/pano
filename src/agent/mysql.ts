@@ -10,6 +10,8 @@ import { randomPassword, run } from "./sys.ts";
 const SYSTEM_DBS = new Set(["mysql", "information_schema", "performance_schema", "sys"]);
 /** Databases other software depends on: visible, never droppable from the panel. */
 const PROTECTED_DBS = new Set([...SYSTEM_DBS, "cyberpanel"]);
+/** Accounts the server itself relies on: no password change or grant from the panel. */
+const SYSTEM_USERS = new Set(["root", "mysql", "mariadb.sys", "mysql.sys", "mysql.session", "mysql.infoschema", "debian-sys-maint", "cyberpanel", "healthcheck"]);
 
 export const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 export const ident = (s: string) => `\`${s}\``;
@@ -75,7 +77,7 @@ export async function setPassword(user: unknown, host: unknown, password: unknow
   const u = v.dbUser(user);
   const h = String(host ?? "localhost");
   if (!/^[A-Za-z0-9.%:_-]{1,255}$/.test(h)) throw new Error("invalid host");
-  if (u === "root") throw new Error("change the root password from the shell");
+  if (SYSTEM_USERS.has(u)) throw new Error(`change the ${u} password from the shell`);
   const pw = password ? v.password(password) : randomPassword();
   await sql(`ALTER USER ${lit(u)}@${lit(h)} IDENTIFIED BY ${lit(pw)};\nFLUSH PRIVILEGES;`);
   audit(actor, "db.password", { user: u, host: h });
@@ -84,7 +86,9 @@ export async function setPassword(user: unknown, host: unknown, password: unknow
 
 export async function grant(db: unknown, user: unknown, actor: string) {
   const name = v.dbName(db);
+  if (PROTECTED_DBS.has(name)) throw new Error(`${name} is protected`);
   const u = v.dbUser(user);
+  if (SYSTEM_USERS.has(u)) throw new Error(`${u} is a system account`);
   await sql(`GRANT ALL PRIVILEGES ON ${ident(name)}.* TO ${lit(u)}@'localhost';\nFLUSH PRIVILEGES;`);
   audit(actor, "db.grant", { db: name, user: u });
 }

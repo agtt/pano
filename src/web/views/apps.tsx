@@ -380,6 +380,7 @@ export function AppDetail(p: {
                 <option value="mariadb">MariaDB / MySQL → DATABASE_URL</option>
                 <option value="valkey">Valkey / Redis → REDIS_URL</option>
               </select>
+              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
               <button class="btn primary">+ Database</button>
               <span class="muted small">Creates the database and its own user (server installed on first use), writes the URL here and restarts the app.</span>
             </form>

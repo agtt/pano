@@ -15,8 +15,11 @@
 //   Go, crates.io and Packagist advisories. These live in the app's repository,
 //   so they are reported with the fixed version, not changed here.
 // - WordPress core: wordpress.org's own list of insecure versions.
+// - Exploit data: CISA KEV (attacked in the wild) and FIRST EPSS (likely to be)
+//   mark findings urgent; every 6 hours a scan runs and urgent ones that pano
+//   can patch (OS, PHP, edge) are patched right away instead of at night.
 //
-// New high and critical findings go to Telegram once.
+// New high and critical (and urgent) findings go to Telegram once.
 
 import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
@@ -42,6 +45,10 @@ export type Finding = {
   fixed: string;
   /** closed by pano itself (automatic updates) or needs a change in the app */
   autofix: boolean;
+  /** in CISA's Known Exploited Vulnerabilities catalog: attacked in the wild now */
+  exploited?: boolean;
+  /** FIRST EPSS: probability (0-1) of exploitation in the next 30 days */
+  epss?: number;
 };
 type Pkg = { where: string; ecosystem: string; name: string; version: string; autofix: boolean };
 
@@ -258,7 +265,11 @@ export function parseUpdateinfo(text: string): Finding[] {
 async function osAdvisories(): Promise<Finding[]> {
   if ((await run(["which", "dnf"], { check: false })).code !== 0) return [];
   const r = await run(["dnf", "-q", "updateinfo", "list", "--security", "--available"], { check: false, timeoutMs: 300_000 });
-  return parseUpdateinfo(r.stdout);
+  // The same list keyed by CVE: the advisories' CVE ids, for the exploit checks below.
+  const c = await run(["dnf", "-q", "updateinfo", "list", "--security", "--available", "--with-cve"], { check: false, timeoutMs: 300_000 });
+  const cves = new Map<string, string[]>();
+  for (const x of parseUpdateinfo(c.stdout)) if (/^CVE-\d{4}-\d+$/.test(x.id)) cves.set(x.name, [...(cves.get(x.name) ?? []), x.id]);
+  return parseUpdateinfo(r.stdout).map((f) => ({ ...f, aliases: [...new Set(cves.get(f.name) ?? [])] }));
 }
 
 const cmpVer = (a: string, b: string) => {
@@ -379,24 +390,102 @@ async function doScan(): Promise<ScanResult> {
     ...(await safe("node", runtimeFindings)),
     ...(await safe("php", phpFindings)),
     ...(await safe("wordpress", () => wordpressFindings(site.wordpress))),
-  ].sort((a, b) => RANK[b.severity] - RANK[a.severity] || a.where.localeCompare(b.where));
+  ];
+  await safe("exploit data (CISA KEV, EPSS)", async () => (await enrich(findings), []));
+  findings.sort((a, b) => +urgent(b) - +urgent(a) || RANK[b.severity] - RANK[a.severity] || a.where.localeCompare(b.where));
   const result = { at: Math.floor(Date.now() / 1000), findings, errors, packages: pkgs.length };
   await report(findings);
   settings.set("vulns.last", JSON.stringify(result));
   return result;
 }
 
+// ---- exploit intelligence -----------------------------------------------------------------------
+// Severity says how bad a hole is; these say whether anyone is using it. A finding in CISA's
+// Known Exploited Vulnerabilities catalog, or with an EPSS score of 10% or more, is urgent:
+// what pano can patch itself is patched within hours instead of at night.
+
+const KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+const EPSS_URGENT = 0.1;
+const CVE = /^CVE-\d{4}-\d{4,}$/;
+
+export const urgent = (f: Finding) => !!f.exploited || (f.epss ?? 0) >= EPSS_URGENT;
+const cvesOf = (f: Finding) => [f.id, ...f.aliases].filter((x) => CVE.test(x));
+
+/** The KEV catalog's CVE ids, fetched at most twice a day. */
+async function kevIds(): Promise<Set<string>> {
+  const cached = JSON.parse(settings.get("vulns.kev") || "null") as { at: number; ids: string[] } | null;
+  if (cached && Date.now() - cached.at < 12 * 3600_000) return new Set(cached.ids);
+  const res = await fetch(KEV_URL, { headers: UA, signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`CISA KEV: ${res.status}`);
+  const ids = ((await res.json()) as { vulnerabilities: { cveID: string }[] }).vulnerabilities.map((v) => v.cveID).filter((x) => CVE.test(x));
+  settings.set("vulns.kev", JSON.stringify({ at: Date.now(), ids }));
+  return new Set(ids);
+}
+
+async function epssScores(cves: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (let i = 0; i < cves.length; i += 100) {
+    const res = await fetch(`https://api.first.org/data/v1/epss?cve=${cves.slice(i, i + 100).join(",")}`, { headers: UA, signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`EPSS: ${res.status}`);
+    for (const d of ((await res.json()) as { data: { cve: string; epss: string }[] }).data) out.set(d.cve, Number(d.epss) || 0);
+  }
+  return out;
+}
+
+export function markExploits(findings: Finding[], kev: Set<string>, epss: Map<string, number>) {
+  for (const f of findings) {
+    const ids = cvesOf(f);
+    f.exploited = ids.some((x) => kev.has(x));
+    f.epss = Math.max(0, ...ids.map((x) => epss.get(x) ?? 0));
+  }
+}
+
+async function enrich(findings: Finding[]) {
+  const cves = [...new Set(findings.flatMap(cvesOf))];
+  if (!cves.length) return;
+  const [kev, epss] = await Promise.all([kevIds(), epssScores(cves)]);
+  markExploits(findings, kev, epss);
+}
+
+let urgentRun: Promise<void> | null = null;
+
+/** Patches now what pano can patch itself and is being exploited (or likely to be). */
+async function patchUrgent(findings: Finding[]) {
+  const hot = findings.filter((f) => f.autofix && urgent(f));
+  if (!hot.length || urgentRun) return;
+  const p = patchSettings();
+  const why = (w: string) => hot.filter((f) => f.where === w).map((f) => cvesOf(f)[0] ?? f.id);
+  urgentRun = (async () => {
+    if (p.os && why("os").length && (await run(["which", "dnf"], { check: false })).code === 0) {
+      const r = await run(["dnf", "-y", "-q", "upgrade", "--security"], { check: false, timeoutMs: 1_800_000 });
+      await notify(r.code === 0 ? `🚨 exploited OS hole patched now (${why("os").slice(0, 5).join(", ")})` : `🔴 urgent OS update failed: ${r.stderr.trim().split("\n").at(-1)}`);
+      audit("auto-update", "patch.urgent", { where: "os", ids: why("os") });
+    }
+    if (p.php && why("php").length) {
+      await patchPhp();
+      audit("auto-update", "patch.urgent", { where: "php", ids: why("php") });
+    }
+    if (p.edge && why("edge").length && (await exists(paths.caddy))) await patchEdge(findings);
+    if (await rebootNeeded()) await notify("🔁 the urgent security update needs a reboot (kernel or core library)");
+  })()
+    .catch(async (e) => void (await notify(`🔴 urgent patching failed: ${e instanceof Error ? e.message : e}`)))
+    .finally(() => (urgentRun = null));
+  await urgentRun;
+}
+
 /** Telegram, once per new high or critical finding. */
 async function report(findings: Finding[]) {
   const seen = new Set<string>(JSON.parse(settings.get("vulns.notified") || "[]"));
   const key = (f: Finding) => `${f.where}|${f.name}|${f.version}|${f.id}`;
-  const fresh = findings.filter((f) => RANK[f.severity] >= RANK.high && !seen.has(key(f)));
+  const worth = (f: Finding) => RANK[f.severity] >= RANK.high || urgent(f);
+  const fresh = findings.filter((f) => worth(f) && !seen.has(key(f)));
   if (fresh.length) {
-    const lines = fresh.slice(0, 10).map((f) => `• ${f.severity} ${f.where} ${f.name} ${f.version} (${f.aliases[0] ?? f.id})${f.fixed ? ` → ${f.fixed}` : ""}${f.autofix ? " [auto]" : ""}`);
+    const hot = (f: Finding) => (f.exploited ? " 🚨 exploited in the wild" : urgent(f) ? ` 🚨 EPSS ${Math.round((f.epss ?? 0) * 100)}%` : "");
+    const lines = fresh.slice(0, 10).map((f) => `• ${f.severity} ${f.where} ${f.name} ${f.version} (${f.aliases[0] ?? f.id})${f.fixed ? ` → ${f.fixed}` : ""}${f.autofix ? " [auto]" : ""}${hot(f)}`);
     await notify(`🛡 ${fresh.length} new vulnerabilit${fresh.length > 1 ? "ies" : "y"}:\n${lines.join("\n")}${fresh.length > 10 ? "\n…" : ""}`);
   }
   // Remember only what is still open, so a finding that comes back is reported again.
-  settings.set("vulns.notified", JSON.stringify(findings.filter((f) => RANK[f.severity] >= RANK.high).map(key)));
+  settings.set("vulns.notified", JSON.stringify(findings.filter(worth).map(key)));
 }
 
 // ---- automatic fixes ----------------------------------------------------------------------------
@@ -472,8 +561,11 @@ async function patchEdge(findings: Finding[]) {
   if (!cur) return;
   const res = await fetch("https://api.github.com/repos/caddyserver/caddy/releases?per_page=30", { headers: UA, signal: AbortSignal.timeout(20_000) });
   if (!res.ok) return;
-  const stable = ((await res.json()) as { tag_name: string; prerelease: boolean; draft: boolean }[])
-    .filter((r) => !r.prerelease && !r.draft && /^v2\.\d+\.\d+$/.test(r.tag_name))
+  // A release must have been out a while (3 days, 1 if this one is vulnerable): a hijacked release is
+  // usually pulled within hours, and the checksums come from the same place as the binary.
+  const soakMs = (findings.some((f) => f.where === "edge") ? 1 : 3) * 86_400_000;
+  const stable = ((await res.json()) as { tag_name: string; prerelease: boolean; draft: boolean; published_at?: string }[])
+    .filter((r) => !r.prerelease && !r.draft && /^v2\.\d+\.\d+$/.test(r.tag_name) && Date.now() - Date.parse(r.published_at ?? "") >= soakMs)
     .map((r) => r.tag_name.slice(1))
     .sort((a, b) => cmpVer(b, a));
   const vulnerable = findings.some((f) => f.where === "edge");
@@ -509,6 +601,7 @@ async function nightly() {
   if (p.os && !(await run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false })).stdout.includes("enabled")) await applyOsPatching(true);
   if (p.php) await patchPhp();
   const result = await scan();
+  await patchUrgent(result.findings);
   if (p.edge && (await exists(paths.caddy))) await patchEdge(result.findings);
   if (await rebootNeeded()) await notify("🔁 a security update needs a reboot (kernel or core library); restart the server when traffic is low");
 }
@@ -540,8 +633,17 @@ export function startVulns() {
   setInterval(() => {
     const now = new Date();
     const day = now.toISOString().slice(0, 10);
-    if (now.getHours() !== 4 || settings.get("vulns.nightly") === day) return;
-    settings.set("vulns.nightly", day);
-    nightly().catch((e) => console.error(`[agent] nightly patch/scan: ${e}`));
+    if (now.getHours() === 4 && settings.get("vulns.nightly") !== day) {
+      settings.set("vulns.nightly", day);
+      nightly().catch((e) => console.error(`[agent] nightly patch/scan: ${e}`));
+      return;
+    }
+    // Between nights, every 6 hours: a scan, and what is being exploited is patched right away.
+    const slot = `${day}-${Math.floor(now.getHours() / 6)}`;
+    if (settings.get("vulns.urgentCheck") === slot) return;
+    settings.set("vulns.urgentCheck", slot);
+    scan()
+      .then((r) => patchUrgent(r.findings))
+      .catch((e) => console.error(`[agent] urgent check: ${e}`));
   }, 5 * 60_000);
 }

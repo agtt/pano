@@ -1,6 +1,8 @@
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, Field } from "./layout.tsx";
 
+const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+
 type Locks = { panel: boolean; ssh: boolean; services: boolean; databases: boolean };
 export type VpnStatus = {
   installed: boolean;
@@ -36,6 +38,7 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
             <Field label="UDP port" name="port" value={s.port} />
             <Field label="Public address (empty = detect)" name="endpoint" value={s.endpoint} placeholder="203.0.113.10 or vpn.example.com" />
           </div>
+          <Otp />
           <button class="btn primary">Enable private access</button>
         </form>
       </Card>

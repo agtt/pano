@@ -13,7 +13,9 @@ import { ensureDir, exists, readText, writeAtomic } from "./sys.ts";
 
 const MAX_FAILS = 5;
 const LOCK_SECONDS = 15 * 60;
-const GRANT_SECONDS = 120;
+const GRANT_SECONDS = 60;
+/** One form post makes a handful of calls; a grant is not a session. */
+const GRANT_USES = 10;
 const CLI_TOKEN = `${paths.secrets}/cli.token`;
 
 type Admin = { username: string; totp_secret: string; totp_last: number; fails: number; locked_until: number };
@@ -54,18 +56,21 @@ export function checkOtp(username: string, code: unknown): boolean {
 }
 
 // A verified code yields a short grant so one form post can make several calls.
-const grants = new Map<string, { actor: string; until: number }>();
+const grants = new Map<string, { actor: string; until: number; uses: number }>();
 
 export function issueGrant(actor: string): string {
   const g = randomBytes(24).toString("base64url");
-  grants.set(g, { actor, until: Date.now() + GRANT_SECONDS * 1000 });
+  grants.set(g, { actor, until: Date.now() + GRANT_SECONDS * 1000, uses: GRANT_USES });
   for (const [k, v] of grants) if (v.until < Date.now()) grants.delete(k);
   return g;
 }
 
+/** Spends one use of the grant. */
 export const grantValid = (grant: unknown, actor: string) => {
   const g = typeof grant === "string" ? grants.get(grant) : undefined;
-  return !!g && g.actor === actor && g.until > Date.now();
+  if (!g || g.actor !== actor || g.until <= Date.now() || g.uses <= 0) return false;
+  g.uses--;
+  return true;
 };
 
 /** Root's `pano rpc` proves itself with a root-only token instead of a code. */

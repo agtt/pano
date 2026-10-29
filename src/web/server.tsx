@@ -123,7 +123,7 @@ export function createWebApp() {
   const actor = (c: Context<Env>) => c.get("s").user.username;
   const form = async (c: Context<Env>) => (await c.req.parseBody({ all: true })) as Record<string, string | string[]>;
   const back = (c: Context<Env>, to: string, ok?: string) => c.redirect(ok ? `${to}${to.includes("?") ? "&" : "?"}ok=${encodeURIComponent(ok)}` : to);
-  const err = (to: string, e: unknown) => `${to}${to.includes("?") ? "&" : "?"}err=${encodeURIComponent(e instanceof Error ? e.message : String(e))}`;
+  const err = (to: string, e: unknown) => `${to}${to.includes("?") ? "&" : "?"}err=${encodeURIComponent((e instanceof Error ? e.message : String(e)).slice(0, 300))}`;
   const needOtp = (c: Context<Env>, otp: unknown) => {
     // Checked by the agent with the next call, not here: this process holds no TOTP secrets.
     if (!/^\d{6}$/.test(String(otp ?? ""))) throw new Error("Authenticator code required.");
@@ -132,6 +132,8 @@ export function createWebApp() {
   /** Runs an action and redirects back with a message either way. */
   const act = (to: string, fn: (c: Context<Env>, f: Record<string, any>) => Promise<string | void>) => async (c: Context<Env>) => {
     const f = await form(c);
+    // A code typed into any form goes along; the agent decides which calls need it.
+    if (/^\d{6}$/.test(String(f.otp ?? ""))) stepUp.getStore()!.otp = String(f.otp);
     try {
       const msg = await fn(c, f);
       return back(c, typeof msg === "string" && msg.startsWith("/") ? msg : to, typeof msg === "string" && !msg.startsWith("/") ? msg : "OK");
@@ -205,7 +207,7 @@ export function createWebApp() {
     }
   }
   app.get("/apps/:name/deploys/:id/log", async (c) =>
-    c.json(await call("apps.deployLog", { id: Number(c.req.param("id")), offset: Number(c.req.query("offset") ?? 0) })),
+    c.json(await call("apps.deployLog", { name: c.req.param("name"), id: Number(c.req.param("id")), offset: Number(c.req.query("offset") ?? 0) })),
   );
   app.post("/apps/:name/deploy", async (c) => {
     const name = c.req.param("name");
@@ -242,6 +244,7 @@ export function createWebApp() {
     const name = c.req.param("name");
     const f = await form(c);
     try {
+      needOtp(c, f.otp);
       const r = await call("apps.addDatabase", { name, engine: f.engine }, actor(c));
       return back(c, `/apps/${name}`, `${r.key} added (${r.engine} ${r.database})`);
     } catch (e) {
@@ -416,6 +419,7 @@ export function createWebApp() {
     return `${r.name} added (key ${r.key})`;
   }));
   app.post("/services/realtime/to-app", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
     await call("apps.addRealtime", { name: f.app, realtime: f.realtime }, actor(c));
     return `Pusher settings added to ${f.app}`;
   }));
@@ -444,6 +448,7 @@ export function createWebApp() {
     await call("turn.domain", { domain: f.domain }, actor(c));
   }));
   app.post("/services/turn/to-app", act("/services", async (c, f) => {
+    needOtp(c, f.otp);
     await call("apps.addTurn", { name: f.app }, actor(c));
     return `TURN settings added to ${f.app}`;
   }));
@@ -810,6 +815,7 @@ export function createWebApp() {
     const f = await form(c);
     const list = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
     try {
+      needOtp(c, f.otp);
       const report = await call<CpReportView>("import.cpanel.apply", { file: f.file, sites: list(f.sites), databases: list(f.databases) }, actor(c));
       return importPage(c, report);
     } catch (e) {
@@ -825,7 +831,7 @@ export function createWebApp() {
 
   app.onError((e, c) => {
     console.error("[web]", e);
-    return c.text(`Error: ${e.message}`, 500);
+    return c.text("Internal error (details in the pano-web journal)", 500);
   });
 
   setInterval(pruneSessions, 10 * 60_000);

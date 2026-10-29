@@ -26,6 +26,7 @@ export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; app
         </p>
         <form method="post" action="/services/turn/install">
           <Csrf token={csrf} />
+          <Otp />
           <button class="btn primary">{v.installed ? "Take over" : t("Install")}</button>
         </form>
       </Card>
@@ -56,6 +57,7 @@ export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; app
               </select>
             </label>
             <div class="actions">
+              <Otp />
               <button class="btn">Add to app environment</button>
             </div>
             <small class="muted">Sets TURN_URLS and TURN_SECRET (server only) and NEXT_PUBLIC_TURN_URLS; restarts the app.</small>

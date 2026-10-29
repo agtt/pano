@@ -27,6 +27,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
         </p>
         <form method="post" action="/services/realtime/install">
           <Csrf token={csrf} />
+          <Otp />
           <button class="btn primary">{t("Install")}</button>
         </form>
       </Card>
@@ -131,6 +132,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
               </select>
             </label>
             <div class="actions">
+              <Otp />
               <button class="btn">Add to app environment</button>
             </div>
             <small class="muted">

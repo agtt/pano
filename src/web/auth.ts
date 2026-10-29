@@ -77,7 +77,8 @@ export function userCount(): number {
 
 function locked(key: string): boolean {
   const r = webDb().query("SELECT count, until FROM login_failures WHERE key = ?").get(key) as { count: number; until: number } | null;
-  return !!r && r.count >= MAX_FAILS && r.until > now();
+  // A user name alone (anyone can type it) locks only after many more failures than one address.
+  return !!r && r.count >= (key.startsWith("user:") ? MAX_FAILS * 10 : MAX_FAILS) && r.until > now();
 }
 
 function fail(key: string) {

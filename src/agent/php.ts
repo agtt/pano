@@ -231,7 +231,9 @@ async function provision(name: string, ver: string) {
   await ensureUser(EDGE_USER, paths.edgeData);
   await ensureUser(user, home);
   await ensureDir(paths.sites, 0o755);
-  await ensureDir(home, 0o750, user);
+  // root:<user>: PHP can write in public/, tmp/... but cannot swap them for symlinks root would follow.
+  await ensureDir(home, 0o750);
+  await run(["chown", "-h", `root:${user}`, fsPath(home)]);
   await ensureDir(`${home}/public`, 0o750, user);
   for (const d of ["tmp", "sessions", "logs"]) await ensureDir(`${home}/${d}`, 0o700, user);
   await ensureDir(paths.phpEtc, 0o755);
@@ -252,7 +254,7 @@ async function provision(name: string, ver: string) {
 async function edgeAccess(name: string) {
   const home = fsPath(siteHome(name));
   await run(["setfacl", "-m", `u:${EDGE_USER}:x`, home]);
-  await run(["setfacl", "-R", "-m", `u:${EDGE_USER}:rX`, `${home}/public`]);
+  await run(["setfacl", "-P", "-R", "-m", `u:${EDGE_USER}:rX`, `${home}/public`]);
   await run(["find", `${home}/public`, "-type", "d", "-exec", "setfacl", "-d", "-m", `u:${EDGE_USER}:rX`, "{}", "+"]);
 }
 
@@ -275,7 +277,9 @@ export async function fixPermissions(name: string): Promise<string[]> {
   await run(["chown", "-R", "--no-dereference", `${user}:${user}`, fsPath(home)]);
   await run(["find", fsPath(home), "-type", "d", "-exec", "chmod", "0750", "{}", "+"]);
   await run(["find", fsPath(home), "-type", "f", "-exec", "chmod", "0640", "{}", "+"]);
-  for (const d of ["tmp", "sessions", "logs"]) await run(["chmod", "0700", fsPath(`${home}/${d}`)], { check: false });
+  // find never follows a symlinked start point: no chmod of whatever such a link points at.
+  await run(["find", ...["tmp", "sessions", "logs"].map((d) => fsPath(`${home}/${d}`)), "-maxdepth", "0", "-type", "d", "-exec", "chmod", "0700", "{}", "+"], { check: false });
+  await run(["chown", "-h", `root:${user}`, fsPath(home)]);
   await edgeAccess(name);
   return warnings;
 }
@@ -395,7 +399,8 @@ export async function phpLogs(name: string): Promise<string> {
   if (site.kind !== "php") return "";
   const out: string[] = [];
   for (const f of ["fpm.log", "php-error.log"]) {
-    const r = await run(["tail", "-n", "100", fsPath(`${siteHome(site.name)}/logs/${f}`)], { check: false });
+    // As the site user: logs/ is the site's, a symlink there must not read root's files.
+    const r = await run(["tail", "-n", "100", fsPath(`${siteHome(site.name)}/logs/${f}`)], { check: false, user: siteUser(site.name) });
     if (r.stdout.trim()) out.push(`== ${f}\n${r.stdout}`);
   }
   return out.join("\n");

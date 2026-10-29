@@ -71,8 +71,15 @@ async function main() {
       break;
     case "recover": {
       if (!DRY_RUN && process.getuid?.() !== 0) fail("run as root");
-      // Read from the terminal, not the command line: the kit must not land in shell history.
-      const text = args.find((a) => a.startsWith("pano-recovery-")) ?? (await promptHidden("Recovery kit: "));
+      // Never from the command line: the kit would land in shell history and in every process listing.
+      if (args.some((a) => a.startsWith("pano-recovery-"))) fail("do not pass the kit as an argument: type it at the prompt, pipe it in, or use --kit-file <path>");
+      const fileAt = args.indexOf("--kit-file");
+      const text =
+        fileAt >= 0
+          ? (await Bun.file(args[fileAt + 1] ?? fail("usage: pano recover --kit-file <path>")).text()).trim()
+          : process.stdin.isTTY
+            ? await promptHidden("Recovery kit: ")
+            : (await Bun.stdin.text()).trim();
       const hostAt = args.indexOf("--host");
       const host = hostAt >= 0 ? args[hostAt + 1] : undefined;
       const { parseKit, restorePanel } = await import("./agent/recovery.ts");
@@ -91,7 +98,9 @@ async function main() {
     }
     case "update": {
       const { update } = await import("./update.ts");
-      await update(args[0] ?? fail("usage: pano update <path to the new pano binary> [sha256]"), args[1]);
+      const usage = "usage: pano update <path to the new pano binary> <sha256> [--allow-downgrade]";
+      const [file, sha] = args.filter((a) => !a.startsWith("--"));
+      await update(file ?? fail(usage), sha ?? fail(usage), args.includes("--allow-downgrade"));
       break;
     }
     case "update-rollback": {

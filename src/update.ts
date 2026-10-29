@@ -18,16 +18,26 @@ const STATE_PREV = fsPath(`${paths.data}/state.db.prev`);
 const sh = (argv: string[]) => Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
 const exists = (p: string) => Bun.file(p).exists();
 
-export async function update(src: string, sha?: string) {
+/** -1, 0 or 1 comparing the leading x.y.z of two versions. */
+function cmpVersion(a: string, b: string): number {
+  const pa = a.split(/[.-]/).slice(0, 3).map(Number);
+  const pb = b.split(/[.-]/).slice(0, 3).map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
+  return 0;
+}
+
+export async function update(src: string, sha: string, allowDowngrade = false) {
   if (process.getuid?.() !== 0) throw new Error("run as root");
+  if (!/^[a-f0-9]{64}$/i.test(sha)) throw new Error("the sha256 of the new binary is required (from the release page)");
   const bytes = await Bun.file(src).bytes();
-  if (sha && new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== sha.toLowerCase()) throw new Error("checksum does not match");
+  if (new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== sha.toLowerCase()) throw new Error("checksum does not match");
   await Bun.write(STAGED, bytes);
   await chmod(STAGED, 0o755);
   let next = "";
   let why = "";
   try {
-    const probe = sh([STAGED, "version"]);
+    // Not as root: nothing of the new binary runs privileged before it is installed.
+    const probe = sh(["runuser", "-u", "nobody", "--", STAGED, "version"]);
     next = probe.exitCode === 0 ? probe.stdout.toString().trim() : "";
     why = probe.stderr.toString().trim().split("\n").at(-1) ?? "";
   } catch (e) {
@@ -36,6 +46,10 @@ export async function update(src: string, sha?: string) {
   if (!/^\d+\.\d+\.\d+/.test(next)) {
     await rm(STAGED, { force: true });
     throw new Error(`the new binary does not run here${why ? `: ${why}` : ""}`);
+  }
+  if (!allowDowngrade && cmpVersion(next, VERSION) < 0) {
+    await rm(STAGED, { force: true });
+    throw new Error(`${next} is older than the running ${VERSION} (older releases may carry fixed holes); --allow-downgrade to go ahead`);
   }
   console.log(`pano ${VERSION} → ${next}`);
 
@@ -46,6 +60,7 @@ export async function update(src: string, sha?: string) {
   const db = new Database(fsPath(paths.stateDb), { readonly: true });
   db.exec(`VACUUM INTO '${STATE_PREV}'`);
   db.close();
+  await chmod(STATE_PREV, 0o600);
   // rename, not copy: the running binary stays valid until the restart
   await rename(STAGED, BIN);
   sh(["systemctl", "reset-failed", "pano-agent", "pano-web"]);
@@ -71,7 +86,9 @@ export async function rollbackUpdate(withState = false) {
     const stamp = Date.now();
     for (const f of ["", "-wal", "-shm"]) {
       const cur = fsPath(paths.stateDb) + f;
-      if (await exists(cur)) await rename(cur, `${fsPath(paths.stateDb)}.failed-${stamp}${f}`);
+      if (!(await exists(cur))) continue;
+      await rename(cur, `${fsPath(paths.stateDb)}.failed-${stamp}${f}`);
+      await chmod(`${fsPath(paths.stateDb)}.failed-${stamp}${f}`, 0o600);
     }
     await copyFile(STATE_PREV, fsPath(paths.stateDb));
     await chmod(fsPath(paths.stateDb), 0o640);

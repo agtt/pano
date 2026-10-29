@@ -42,11 +42,15 @@ const SENSITIVE = new Set([
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
   "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
+  "apps.addDatabase", "apps.addRealtime", "apps.addTurn",
+  // These reach root or the network: a container spec can mount the host, a site can take over a domain.
+  "containers.install", "containers.save", "sites.save", "backup.job.add", "vpn.enable", "edge.install", "edge.settings",
+  "realtime.install", "turn.install", "import.apply", "import.cpanel.apply", "db.grant",
 ]);
 export const ENV_MASK = "••••••••";
 
-/** App fields that decide what runs as the app (and so can read its secrets). */
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons"] as const;
+/** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -120,7 +124,11 @@ export const methods: Record<string, Handler> = {
     return appsOps.appAction(p.name, p.action, actor);
   },
   "apps.logs": (p) => appsOps.appLogs(p.name, p.lines ?? 300),
-  "apps.deployLog": (p) => appsOps.readDeployLog(v.int(p.id, 1, 1e9, "id"), v.int(p.offset ?? 0, 0, 1e12, "offset")),
+  "apps.deployLog": (p) => {
+    const id = v.int(p.id, 1, 1e9, "id");
+    if (p.name !== undefined && deploys.get(id)?.app !== p.name) throw new Error("no such deploy for this app");
+    return appsOps.readDeployLog(id, v.int(p.offset ?? 0, 0, 1e12, "offset"));
+  },
   // Values never leave the agent without a code; the editor shows masks and keeps masked values unchanged.
   "apps.env.get": async (p) => Object.fromEntries(Object.keys(await appsOps.getEnv(p.name)).map((k) => [k, ENV_MASK])),
   "apps.env.reveal": (p) => appsOps.getEnv(p.name),
@@ -249,11 +257,12 @@ export const methods: Record<string, Handler> = {
   "realtime.domain": (p, actor) => {
     const domain = String(p.domain ?? "").trim().toLowerCase();
     if (domain) {
-      const [d] = parseDomains(domain);
+      const all = parseDomains(domain);
+      const d = all.length === 1 ? all[0] : undefined;
       if (!d || d.includes("*")) throw new Error("one domain, for example ws.example.com");
       appsOps.assertDomainsFree([d], { site: d }, allDomains());
     }
-    return realtime.setDomain(domain, actor);
+    return realtime.setDomain(domain ? parseDomains(domain)[0]! : "", actor);
   },
   "realtime.app.add": (p, actor) => realtime.addApp({ name: p.name, origins: p.origins }, actor),
   "realtime.app.remove": (p, actor) => {
@@ -438,7 +447,8 @@ export const methods: Record<string, Handler> = {
   },
   "edge.settings": async (p, actor) => {
     const email = String(p.email ?? "").trim();
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("invalid email");
+    // Goes into the Caddyfile as is: no braces, quotes or anything Caddy would parse.
+    if (email && !/^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}$/.test(email)) throw new Error("invalid email");
     const hooksDomain = p.hooksDomain ? v.domain(p.hooksDomain) : "";
     settings.set("edge.email", email);
     settings.set("edge.behindCloudflare", p.behindCloudflare ? "1" : "0");

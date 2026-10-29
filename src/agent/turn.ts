@@ -42,6 +42,8 @@ export const DENIED_PEERS = [
 ];
 
 export function renderConf(o: { ip: string; realm: string; secret: string }): string {
+  // From the recovery bundle or an adopted config: one token, nothing that could add a line.
+  if (!/^[A-Za-z0-9+\/=_-]{16,128}$/.test(o.secret)) throw new Error("invalid TURN secret");
   return `${MARK}; changes here are overwritten. The original is in turnserver.conf.pano-orig.
 listening-port=${PORT}
 listening-ip=${o.ip}

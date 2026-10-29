@@ -9,7 +9,8 @@
 //      (works behind Cloudflare too, the edge sees the real visitor address).
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, rename, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, rename, stat } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
 import { applyEdge, edgeSettings } from "./edge.ts";
@@ -178,17 +179,33 @@ const finding = (id: number) => {
   return f;
 };
 
+/**
+ * The file's path with its directory resolved, refused unless that directory really is inside a
+ * scan root: a site user can swap a directory for a symlink to make root move files elsewhere.
+ */
+async function underRoots(p: string): Promise<string> {
+  const dir = await realpath(fsPath(dirname(p))).catch(() => null);
+  if (dir) {
+    for (const r of scanRoots()) {
+      const base = await realpath(fsPath(r)).catch(() => null);
+      if (base && (dir === base || dir.startsWith(`${base}/`))) return `${dir}/${basename(p)}`;
+    }
+  }
+  throw new Error("path is outside the site and app directories");
+}
+
 /** Moves the file out of the site (root-only, original owner and mode remembered); reversible. */
 export async function quarantine(id: number, actor: string) {
   const f = finding(id);
   if (f.status === "quarantined") return;
-  const st = await lstat(fsPath(f.path));
+  const real = await underRoots(f.path);
+  const st = await lstat(real);
   if (!st.isFile()) throw new Error("not a regular file");
   const dir = `${paths.data}/quarantine`;
   await ensureDir(dir, 0o700);
   const target = `${dir}/${f.id}-${f.sha256.slice(0, 16)}`;
-  await rename(fsPath(f.path), fsPath(target)).catch(async () => {
-    await run(["mv", "--", fsPath(f.path), fsPath(target)]);
+  await rename(real, fsPath(target)).catch(async () => {
+    await run(["mv", "--", real, fsPath(target)]);
   });
   await run(["chown", "root:root", fsPath(target)]);
   await run(["chmod", "600", fsPath(target)]);
@@ -202,11 +219,15 @@ export async function quarantine(id: number, actor: string) {
 export async function restore(id: number, actor: string) {
   const f = finding(id);
   if (f.status !== "quarantined" || !f.quarantine) throw new Error("not in quarantine");
-  if (await exists(f.path)) throw new Error("a file with that name exists again; remove it first");
+  const real = await underRoots(f.path);
+  if (await lstat(real).catch(() => null)) throw new Error("a file with that name exists again; remove it first");
   const [uid, gid, mode] = f.owner.split(":");
-  await run(["mv", "--", fsPath(f.quarantine), fsPath(f.path)]);
-  await run(["chown", `${uid}:${gid}`, fsPath(f.path)]);
-  await run(["chmod", mode ?? "644", fsPath(f.path)]);
+  if (!/^\d+$/.test(uid ?? "") || !/^\d+$/.test(gid ?? "")) throw new Error("unknown original owner");
+  // Never give back setuid/setgid/sticky bits, whatever the file had.
+  const perm = (/^[0-7]{1,4}$/.test(mode ?? "") ? Number.parseInt(mode!, 8) : 0o644) & 0o777;
+  await run(["mv", "-n", "--", fsPath(f.quarantine), real]);
+  await run(["chown", "-h", `${uid}:${gid}`, real]);
+  await run(["chmod", perm.toString(8), real]);
   state().query("UPDATE shield_findings SET status = 'ignored', quarantine = '' WHERE path = ?").run(f.path);
   audit(actor, "shield.restore", { path: f.path });
 }

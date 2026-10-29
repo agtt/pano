@@ -2,6 +2,7 @@
 // root and the `pano` group (the web process) can open, plus a localhost-only
 // port that answers Caddy's on-demand TLS questions.
 
+import { timingSafeEqual } from "node:crypto";
 import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
@@ -15,9 +16,12 @@ import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
 import { methods, needsOtp } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
-import { appHosts, apps, backups, deploys, sites, state } from "./state.ts";
+import { type App, appHosts, apps, backups, deploys, procsOf, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 import { recoverPending } from "./vpn.ts";
+
+const sameSecret = (given: string | null, secret: string) =>
+  !!given && given.length === secret.length && timingSafeEqual(Buffer.from(given), Buffer.from(secret));
 
 export async function startAgent() {
   if (!DRY_RUN && process.getuid?.() !== 0) throw new Error("pano agent must run as root");
@@ -34,12 +38,14 @@ export async function startAgent() {
 
   const socket = fsPath(paths.agentSocket);
   await unlink(socket).catch(() => {});
+  const umask = process.umask(0o077); // the socket starts root-only until chmod/chown below
   Bun.serve({
+    maxRequestBodySize: 4 * 1024 * 1024,
     unix: socket,
     async fetch(req) {
       const url = new URL(req.url);
       const method = url.pathname.replace(/^\/rpc\//, "");
-      const handler = methods[method];
+      const handler = Object.hasOwn(methods, method) ? methods[method] : undefined;
       if (req.method !== "POST" || !handler) return Response.json({ ok: false, error: "unknown method" }, { status: 404 });
       let body: { params?: Record<string, unknown>; actor?: string; otp?: string; grant?: string };
       try {
@@ -50,15 +56,13 @@ export async function startAgent() {
       const actor = String(body.actor ?? "unknown").slice(0, 64);
       const params = body.params ?? {};
       // Step-up: a code checked here (not in the web process), or a grant from one checked moments ago.
+      // Only for methods that need it: a code sent anywhere else is ignored, so calls cannot
+      // be used to burn the admin's attempts (lockout) or to mint grants.
       let grant: string | undefined;
-      let stepped = req.headers.get("x-pano-cli") === cli || grantValid(body.grant, actor);
-      if (!stepped && body.otp) {
+      if (needsOtp(method, params) && !sameSecret(req.headers.get("x-pano-cli"), cli) && !grantValid(body.grant, actor)) {
+        if (!body.otp) return Response.json({ ok: false, error: "Authenticator code required for this action." }, { status: 403 });
         if (!checkOtp(actor, body.otp)) return Response.json({ ok: false, error: "Authenticator code wrong or already used (wait for a new code)." }, { status: 403 });
-        stepped = true;
         grant = issueGrant(actor);
-      }
-      if (!stepped && needsOtp(method, params)) {
-        return Response.json({ ok: false, error: "Authenticator code required for this action." }, { status: 403 });
       }
       try {
         const result = await handler(params, actor);
@@ -70,6 +74,7 @@ export async function startAgent() {
       }
     },
   });
+  process.umask(umask);
   await chmod(socket, 0o660);
   if (group && process.getuid?.() === 0) await chown(socket, 0, group.gid);
 
@@ -81,9 +86,11 @@ export async function startAgent() {
     async fetch(req) {
       const domain = new URL(req.url).searchParams.get("domain")?.toLowerCase() ?? "";
       if (!/^[a-z0-9.-]{1,253}$/.test(domain)) return new Response("bad", { status: 400 });
+      // An ask URL may only reach the owner's own upstream ports, never another local service.
+      const appPorts = (a: App) => (a.kind === "external" ? [a.upstream.split(":").at(-1)!] : procsOf(a).flatMap((p) => [String(p.port_a), String(p.port_b)]));
       const owners = [
-        ...apps.list().map((a) => ({ hosts: appHosts(a), ask: a.ask_url })),
-        ...sites.list().filter((s) => s.enabled).map((s) => ({ hosts: s.domains, ask: s.ask_url })),
+        ...apps.list().map((a) => ({ hosts: appHosts(a), ask: a.ask_url, ports: appPorts(a) })),
+        ...sites.list().filter((s) => s.enabled).map((s) => ({ hosts: s.domains, ask: s.ask_url, ports: s.routes.map((r) => r.upstream.split(":").at(-1)!) })),
       ];
       const all = owners.flatMap((o) => o.hosts);
       if (all.includes(domain)) return new Response("ok");
@@ -93,8 +100,8 @@ export async function startAgent() {
         return /^[a-z0-9-]+$/.test(label);
       };
       if (all.some(matchesWildcard)) return new Response("ok");
-      for (const o of owners.filter((x) => x.hosts.includes("*") && x.ask)) {
-        const r = await fetch(`${o.ask}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(3000) }).catch(() => null);
+      for (const o of owners.filter((x) => x.hosts.includes("*") && x.ask && x.ports.includes(new URL(x.ask).port))) {
+        const r = await fetch(`${o.ask}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(3000), redirect: "manual" }).catch(() => null);
         if (r?.ok) return new Response("ok");
       }
       return new Response("no", { status: 403 });

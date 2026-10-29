@@ -2,7 +2,8 @@
 // (never a shell string); the only shell ever used is `sh -c` for an app's own
 // build/start commands, and that runs as the app's unprivileged user.
 
-import { chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lchown, lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DRY_RUN, fsPath } from "../shared/config.ts";
 
@@ -111,19 +112,41 @@ export async function ensureDir(abs: string, mode = 0o755, owner?: string) {
   const real = fsPath(abs);
   // mkdir's mode is filtered by the umask (0027 for the agent); fix every directory it created.
   const first = await mkdir(real, { recursive: true, mode });
+  // chmod/chown follow symlinks: a user who owns the parent could point this at /etc.
+  await notSymlink(real);
   if (first) for (let d = real; d.length >= first.length; d = dirname(d)) await chmod(d, mode);
   await chmod(real, mode);
   if (owner) await chownTo(abs, owner);
 }
 
-/** Atomic write: temp file in the same directory, fsync'd by rename semantics. */
+async function notSymlink(real: string) {
+  if ((await lstat(real)).isSymbolicLink()) throw new Error(`${real} is a symlink, refusing`);
+}
+
+/**
+ * Atomic write: temp file in the same directory, fsync'd by rename semantics. The temp name is
+ * random and opened O_EXCL|O_NOFOLLOW, so nothing planted in the directory can redirect the write.
+ */
 export async function writeAtomic(abs: string, content: string | Uint8Array, mode = 0o644, owner?: string) {
   const real = fsPath(abs);
   await mkdir(dirname(real), { recursive: true });
-  const tmp = `${real}.pano-tmp-${process.pid}`;
-  await writeFile(tmp, content, { mode });
-  await chmod(tmp, mode);
-  if (owner) await chownTo(abs + `.pano-tmp-${process.pid}`, owner);
+  await notSymlink(dirname(real));
+  const tmp = `${real}.pano-tmp-${randomToken(9)}`;
+  const fh = await open(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+  try {
+    await fh.writeFile(content);
+    await fh.chmod(mode);
+    if (owner && !DRY_RUN && process.getuid?.() === 0) {
+      const ids = await lookupUser(owner);
+      if (!ids) throw new Error(`unknown user ${owner}`);
+      await fh.chown(ids.uid, ids.gid);
+    }
+  } catch (e) {
+    await fh.close();
+    await rm(tmp, { force: true });
+    throw e;
+  }
+  await fh.close();
   await rename(tmp, real);
 }
 
@@ -144,7 +167,7 @@ async function chownTo(abs: string, owner: string) {
   if (DRY_RUN || process.getuid?.() !== 0) return;
   const ids = await lookupUser(owner);
   if (!ids) throw new Error(`unknown user ${owner}`);
-  await chown(fsPath(abs), ids.uid, ids.gid);
+  await lchown(fsPath(abs), ids.uid, ids.gid);
 }
 
 export async function chownR(abs: string, owner: string) {

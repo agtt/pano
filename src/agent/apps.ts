@@ -71,7 +71,8 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     processes,
     ask_url: askUrl,
     // The form sends a hidden "0" plus the checkbox's "1"; API callers may leave it out (on).
-    crons: Array.isArray(x.crons) ? (x.crons as Cron[]) : parseCrons(String(x.crons ?? "")),
+    // Arrays (API callers) go through the same checks as the text form.
+    crons: parseCrons(Array.isArray(x.crons) ? x.crons.map((c: any) => `${String(c?.schedule ?? "").replace(/[|\r\n]/g, " ")} | ${String(c?.command ?? "")}`).join("\n") : String(x.crons ?? "")),
     auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
   };
 }
@@ -120,7 +121,10 @@ export async function ensureAppHome(name: string) {
   const user = appUser(name);
   const home = appHome(name);
   await ensureUser(user, home);
-  await ensureDir(home, 0o750, user);
+  // root:<user> 0750: the app can read its home but not rename what is in it (run/, releases/,
+  // slot links), so nothing root later writes or deletes there can be swapped for a symlink.
+  await ensureDir(home, 0o750);
+  await run(["chown", "-h", `root:${user}`, fsPath(home)]);
   await ensureDir(`${home}/releases`, 0o750, user);
   await ensureDir(`${home}/cache`, 0o750, user);
   // Survives deploys (releases do not): SQLite files, uploads. Exposed as DATA_DIR.
@@ -247,7 +251,7 @@ Group=${appUser(app.name)}
 WorkingDirectory=${home}/slot-%i${sub ? `/${sub}` : ""}
 EnvironmentFile=-${home}/shared/.env
 EnvironmentFile=${home}/run/${key}-%i.env
-Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} DATA_DIR=${home}/data NEXT_TELEMETRY_DISABLED=1
+Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data NEXT_TELEMETRY_DISABLED=1
 Environment=PATH=${path}
 ExecStart=${home}/run/${key}-%i.sh
 Restart=always
@@ -388,7 +392,7 @@ User=${appUser(app.name)}
 Group=${appUser(app.name)}
 WorkingDirectory=${dir}
 EnvironmentFile=-${home}/shared/.env
-Environment=NODE_ENV=production HOME=${home} DATA_DIR=${home}/data PANO_CRON=${i}
+Environment=NODE_ENV=production HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data PANO_CRON=${i}
 Environment=PATH=${path}
 ExecStart=${home}/run/cron-${i}.sh
 TimeoutStartSec=1h
@@ -508,6 +512,7 @@ async function deploy(app: App, id: number) {
   let commit = "";
 
   try {
+    await ensureAppHome(app.name); // brings homes made before the root-owned layout up to date
     if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
       throw new Error(`${app.runtime} ${app.runtime_version} is not installed (Runtimes page)`);
     }
@@ -539,7 +544,7 @@ async function deploy(app: App, id: number) {
       const d = p.dir ? `${workdir}/${p.dir}` : workdir;
       if (!(await readText(`${d}/package.json`))?.includes('"next"')) continue;
       await ensureDir(`${home}/cache/next-${p.name || "main"}`, 0o750, user);
-      await ensureDir(`${d}/.next`, 0o750, user);
+      await run(["mkdir", "-p", "-m", "0750", fsPath(`${d}/.next`)], { user }); // inside the repo: as the app, never as root
       await run(["ln", "-sfn", fsPath(`${home}/cache/next-${p.name || "main"}`), fsPath(`${d}/.next/cache`)], { user, check: false });
     }
     if (plan.install) {

@@ -1,6 +1,8 @@
 import { fmtBytes, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
 
+const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+
 export type ContainerRow = {
   name: string;
   image: string;
@@ -29,6 +31,7 @@ export function ContainersPage(p: { csrf: string; installed: boolean; list: Cont
         </p>
         <form method="post" action="/containers/install">
           <Csrf token={p.csrf} />
+          <Otp />
           <button class="btn primary">Enable containers</button>
         </form>
       </Card>
@@ -107,6 +110,7 @@ export function ContainerForm(p: { csrf: string; c?: Draft; note?: string; edit?
         <small class="muted">Empty PASSWORD / KEY / SECRET / TOKEN values are generated. {p.note ?? ""}</small>
       </label>
       <div class="actions">
+        <Otp />
         <button class="btn primary">{t("Save")}</button>
       </div>
     </form>

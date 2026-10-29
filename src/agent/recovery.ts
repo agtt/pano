@@ -3,8 +3,8 @@
 // What it needs: the nightly backup of the panel itself (job "panel": state,
 // configuration, secrets, certificates; see backup.ts) and the recovery kit, the
 // one thing kept off the server (a password manager): the backup key and the
-// store credentials. On a fresh server: `pano install`, then `pano recover
-// <kit>`. The newest panel backup comes back (what was there is moved aside,
+// store credentials. On a fresh server: `pano install`, then `pano recover`
+// (kit typed in, piped on stdin or --kit-file). The newest panel backup comes back (what was there is moved aside,
 // never deleted), the agent starts on it, and rebuild() puts everything else
 // back from the stores: services, database users with the passwords the apps
 // already have, the databases, every app's env, data and deploy key followed by
@@ -23,12 +23,12 @@ import {
   destIds,
   ensureJob,
   ensureRestic,
+  feedVerified,
   regionFor,
   restic,
   resticEnv,
   type DestId,
 } from "./backup.ts";
-import { decryptStream } from "./crypto-stream.ts";
 import { EDGE_USER, applyEdge, edgeInstalled, installCaddy, setupEdgeUnit } from "./edge.ts";
 import { ident, lit, restoreCommand, sql } from "./mysql.ts";
 import { reprovisionSite, startRestoredSite } from "./php.ts";
@@ -131,13 +131,12 @@ export async function restorePanel(kit: Kit, host?: string) {
   const keep = `${paths.data}/before-recover-${stamp}`;
   await ensureDir(stage, 0o700);
   await ensureDir(keep, 0o700);
-  const plain = kitClient(found.dest)
-    .file(found.key)
-    .stream()
-    .pipeThrough(decryptStream(Buffer.from(kit.key, "base64")))
-    .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
-  const tar = Bun.spawn(["tar", "-xf", "-", "-C", fsPath(stage)], { stdin: plain, stdout: "ignore", stderr: "pipe" });
-  if ((await tar.exited) !== 0) throw new Error(`unpacking failed: ${(await new Response(tar.stderr).text()).trim()}`);
+  // Owners are kept (files under /etc/pano belong to the pano user); the stage is new and root-only.
+  const tar = await feedVerified(kitClient(found.dest).file(found.key).stream(), Buffer.from(kit.key, "base64"), ["tar", "-xf", "-", "-C", fsPath(stage)]);
+  if (tar.code !== 0) throw new Error(`unpacking failed: ${tar.stderr}`);
+  // Only the panel's own dirs and databases are taken from the stage, and no symlinks: cp -a and install would follow or keep them as root.
+  const links = await run(["find", fsPath(stage), "-type", "l"], { check: false });
+  if (links.stdout.trim()) throw new Error(`the panel backup contains symlinks, refusing:\n${links.stdout.trim().split("\n").slice(0, 5).join("\n")}`);
 
   await run(["systemctl", "stop", "pano-web", "pano-agent"], { check: false });
   await run(["cp", "-a", fsPath(paths.etc), fsPath(`${keep}/etc-pano`)], { check: false });
@@ -239,26 +238,20 @@ async function unpack(job: BackupJob, b: { d: DestId; key: string; engine: "arch
     return;
   }
   const { s3 } = await client(b.d);
-  const plain = s3
-    .file(b.key)
-    .stream()
-    .pipeThrough(decryptStream(await backupKey()))
-    .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
-  const tar = Bun.spawn(["tar", "-xf", "-", "--no-same-owner", "-C", fsPath(dir)], { stdin: plain, stdout: "ignore", stderr: "pipe" });
-  if ((await tar.exited) !== 0) throw new Error(`tar: ${(await new Response(tar.stderr).text()).trim().split("\n").at(-1)}`);
+  // Site/app files are untrusted: no owners, no setuid bits, nothing outside dir.
+  const tar = await feedVerified(s3.file(b.key).stream(), await backupKey(), ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(dir)]);
+  if (tar.code !== 0) throw new Error(`tar: ${tar.stderr.split("\n").at(-1)}`);
   void job;
 }
 
 /** A database dump straight into the database. */
 async function loadDump(job: BackupJob, b: { d: DestId; key: string; engine: "archive" | "restic" }, cmd: string[]) {
-  const source =
-    b.engine === "restic"
-      ? Bun.spawn(["restic", "dump", b.key, `/${job.target}.sql`], { env: await resticEnv(b.d), stdout: "pipe", stderr: "pipe" }).stdout
-      : (await client(b.d)).s3
-          .file(b.key)
-          .stream()
-          .pipeThrough(decryptStream(await backupKey()))
-          .pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>);
+  if (b.engine !== "restic") {
+    const res = await feedVerified((await client(b.d)).s3.file(b.key).stream(), await backupKey(), cmd);
+    if (res.code !== 0) throw new Error(`load failed: ${res.stderr.split("\n").slice(-2).join(" ")}`);
+    return;
+  }
+  const source = Bun.spawn(["restic", "dump", b.key, `/${job.target}.sql`], { env: await resticEnv(b.d), stdout: "pipe", stderr: "pipe" }).stdout;
   const load = Bun.spawn(cmd, { stdin: source, stdout: "ignore", stderr: "pipe" });
   if ((await load.exited) !== 0) throw new Error(`load failed: ${(await new Response(load.stderr).text()).trim().split("\n").slice(-2).join(" ")}`);
 }

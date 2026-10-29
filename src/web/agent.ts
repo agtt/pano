@@ -11,8 +11,9 @@ import { fsPath, paths } from "../shared/config.ts";
  */
 export const stepUp = new AsyncLocalStorage<{ otp?: string; grant?: string }>();
 
-/** Only root can read it: lets `pano rpc` on the server skip the code. */
+/** Only root can read it: lets `pano rpc` on the server skip the code. Never sent by the web process. */
 const cliToken = (() => {
+  if (process.getuid?.() !== 0) return "";
   try {
     return readFileSync(fsPath(`${paths.secrets}/cli.token`), "utf8").trim();
   } catch {
@@ -31,7 +32,8 @@ export async function call<T = any>(method: string, params: Record<string, unkno
     body: JSON.stringify({ params, actor, ...(s?.grant ? { grant: s.grant } : s?.otp ? { otp: s.otp } : {}) }),
   } as RequestInit);
   const body = (await res.json().catch(() => ({ ok: false, error: `agent returned ${res.status}` }))) as { ok: boolean; result?: T; error?: string; grant?: string };
-  if (s) {
+  // The agent only takes the code on a call that needs it; until then it stays for the next one.
+  if (s && (body.grant || res.status === 403)) {
     if (body.grant) s.grant = body.grant;
     s.otp = undefined;
   }

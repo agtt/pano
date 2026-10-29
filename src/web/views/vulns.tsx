@@ -12,6 +12,8 @@ type Finding = {
   summary: string;
   fixed: string;
   autofix: boolean;
+  exploited?: boolean;
+  epss?: number;
 };
 export type VulnView = {
   patch: { os: boolean; php: boolean; edge: boolean };
@@ -93,6 +95,7 @@ export function VulnsCard({ v, csrf }: { v: VulnView; csrf: string }) {
                   <td>
                     <Badge state={f.severity === "critical" || f.severity === "high" ? "fail" : f.severity} />
                     <div class="muted small">{f.severity}</div>
+                    {f.exploited ? <div class="small"><strong>exploited in the wild</strong></div> : (f.epss ?? 0) >= 0.1 ? <div class="small"><strong>EPSS {Math.round((f.epss ?? 0) * 100)}%</strong></div> : null}
                   </td>
                   <td class="small">{f.where}</td>
                   <td class="small">

@@ -8,7 +8,7 @@
 // MariaDB user that can only reach the one new database, and nothing that
 // already exists on this server (site, database, user) is ever overwritten.
 
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { PHP_VERSIONS, v } from "../shared/validate.ts";
 import { assertDomainsFree } from "./apps.ts";
@@ -75,7 +75,7 @@ async function extract(file: string): Promise<string> {
       user: IMPORT_USER, inputFile: fsPath(src), timeoutMs: 3 * 3600_000,
     });
     const root = await accountRoot(dir);
-    if ((await exists(`${root}/homedir.tar`)) && !(await exists(`${root}/homedir`))) {
+    if ((await insideArchive(root, `${root}/homedir.tar`)) && !(await exists(`${root}/homedir`))) {
       await run(["mkdir", fsPath(`${root}/homedir`)], { user: IMPORT_USER });
       await run(["tar", "-x", "-f", "-", "-C", fsPath(`${root}/homedir`), "--no-same-owner", "--no-same-permissions"], {
         user: IMPORT_USER, inputFile: fsPath(`${root}/homedir.tar`), timeoutMs: 3 * 3600_000,
@@ -95,6 +95,26 @@ async function accountRoot(dir: string): Promise<string> {
 }
 
 const yaml = (text: string | null): any => (text ? Bun.YAML.parse(text) : null);
+
+/** True when p is a regular file (or a directory, with dir) really inside base: the archive may hold symlinks to anywhere. */
+async function insideArchive(base: string, p: string, dir = false): Promise<boolean> {
+  try {
+    if ((await lstat(fsPath(base))).isSymbolicLink()) return false;
+    const st = await lstat(fsPath(p));
+    if (st.isSymbolicLink() || (dir ? !st.isDirectory() : !st.isFile())) return false;
+    const [b, real] = await Promise.all([realpath(fsPath(base)), realpath(fsPath(p))]);
+    return real === b || real.startsWith(`${b}/`);
+  } catch {
+    return false;
+  }
+}
+
+/** Reads a file of the unpacked archive as root, refusing symlinks and anything outside it. */
+async function readArchive(root: string, p: string): Promise<string | null> {
+  return (await insideArchive(root, p)) ? readText(p) : null;
+}
+
+const safeName = (s: unknown): s is string => typeof s === "string" && /^[A-Za-z0-9._-]{1,253}$/.test(s) && !s.includes("..");
 
 function phpFrom(raw: unknown, warnings: string[], domain: string): string {
   const m = String(raw ?? "").match(/php(\d)(\d)$/);
@@ -164,9 +184,9 @@ export async function scanArchive(file: string): Promise<CpPlan> {
   const root = await extract(file);
   const warnings: string[] = [];
   const notMigrated: string[] = [];
-  const main = yaml(await readText(`${root}/userdata/main`));
-  if (!main?.main_domain) throw new Error("userdata/main has no main_domain");
-  const mainUd = yaml(await readText(`${root}/userdata/${main.main_domain}`)) ?? {};
+  const main = yaml(await readArchive(root, `${root}/userdata/main`));
+  if (!safeName(main?.main_domain)) throw new Error("userdata/main has no valid main_domain");
+  const mainUd = yaml(await readArchive(root, `${root}/userdata/${main.main_domain}`)) ?? {};
   const account = String(mainUd.user ?? (await readdir(fsPath(`${root}/cp`)).catch(() => [] as string[]))[0] ?? "");
   const homedir = String(mainUd.homedir ?? `/home/${account}`).replace(/\/+$/, "");
 
@@ -180,18 +200,22 @@ export async function scanArchive(file: string): Promise<CpPlan> {
   ];
   const result: CpSite[] = [];
   for (const e of entries) {
-    const ud = yaml(await readText(`${root}/userdata/${e.userdata}`));
+    if (!safeName(e.domain) || !safeName(e.userdata)) {
+      warnings.push(`${String(e.domain).slice(0, 80)}: invalid domain name, skipped`);
+      continue;
+    }
+    const ud = yaml(await readArchive(root, `${root}/userdata/${e.userdata}`));
     if (!ud?.documentroot) {
       warnings.push(`${e.domain}: no userdata, skipped`);
       continue;
     }
     const docroot = String(ud.documentroot).replace(/\/+$/, "");
-    if (docroot !== homedir && !docroot.startsWith(`${homedir}/`)) {
+    if ((docroot !== homedir && !docroot.startsWith(`${homedir}/`)) || docroot.split("/").includes("..")) {
       warnings.push(`${e.domain}: document root ${docroot} is outside the home directory, skipped`);
       continue;
     }
     const inArchive = `${root}/homedir${docroot.slice(homedir.length)}`;
-    if (!(await exists(inArchive))) {
+    if (!(await insideArchive(`${root}/homedir`, inArchive, true))) {
       warnings.push(`${e.domain}: ${docroot} is not in the archive, skipped`);
       continue;
     }
@@ -215,13 +239,13 @@ export async function scanArchive(file: string): Promise<CpPlan> {
   for (const f of (await readdir(fsPath(`${root}/mysql`)).catch(() => [] as string[])).sort()) {
     if (!f.endsWith(".sql")) continue;
     const name = f.slice(0, -4);
-    if (!/^[A-Za-z0-9_]{1,64}$/.test(name)) {
-      warnings.push(`database ${name}: unusual name, skipped`);
+    if (!/^[A-Za-z0-9_]{1,64}$/.test(name) || !(await insideArchive(root, `${root}/mysql/${f}`))) {
+      warnings.push(`database ${name.slice(0, 80)}: unusual name or not a regular file, skipped`);
       continue;
     }
     databases.push({ name, bytes: (await stat(fsPath(`${root}/mysql/${f}`))).size, exists: existingDbs.has(name) });
   }
-  const { users: userMap, grants } = parseGrants((await readText(`${root}/mysql.sql`)) ?? "");
+  const { users: userMap, grants } = parseGrants((await readArchive(root, `${root}/mysql.sql`)) ?? "");
   const users: CpUser[] = [];
   for (const [user, { hash }] of userMap) {
     if (!/^[A-Za-z0-9_]{1,32}$/.test(user) || user === account) continue; // the cPanel login itself has no use here
@@ -328,6 +352,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
     }
     await sql(`GRANT ALL PRIVILEGES ON ${ident(db.name)}.* TO ${lit(user)}@'localhost';`);
     try {
+      if (!(await insideArchive(root, `${root}/mysql/${db.name}.sql`))) throw new Error(`${db.name}: dump is not a regular file in the archive`);
       await loadDump(`${root}/mysql/${db.name}.sql`, db.name, user, created.get(user)!);
       report.databases.push(db.name);
     } catch (e) {
@@ -348,7 +373,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
       created.set(u.user, pw);
     }
     for (const [d, privs] of dbs) await sql(`GRANT ${privs.join(", ")} ON ${ident(d)}.* TO ${lit(u.user)}@'localhost';`);
-    const hash = u.hashOk ? parseGrants((await readText(`${root}/mysql.sql`)) ?? "").users.get(u.user)?.hash : "";
+    const hash = u.hashOk ? parseGrants((await readArchive(root, `${root}/mysql.sql`)) ?? "").users.get(u.user)?.hash : "";
     if (hash) {
       await sql(`ALTER USER ${lit(u.user)}@'localhost' IDENTIFIED BY PASSWORD ${lit(hash)};`);
       report.users.push({ user: u.user });
@@ -363,6 +388,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
   for (const s of plan.sites.filter((x) => select.sites.includes(x.name) && !x.exists)) {
     try {
       assertDomainsFree(s.domains, {}, all);
+      if (!(await insideArchive(`${root}/homedir`, s.docroot, true))) throw new Error("document root leaves the archive");
       await createPhpSite({ name: s.name, domains: s.domains, version: s.php, source: "cpanel", placeholder: false }, actor);
       const home = siteHome(s.name);
       await run(["cp", "-a", "--", `${fsPath(s.docroot)}/.`, fsPath(`${home}/public/`)], { timeoutMs: 3_600_000 });

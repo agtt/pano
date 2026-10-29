@@ -26,7 +26,15 @@ test("grants are bound to the admin and expire", () => {
 });
 
 test("secrets, destruction and network access need a code", () => {
-  for (const m of ["apps.env.reveal", "apps.env.set", "db.drop", "pg.drop", "vpn.peer.add", "backup.key.export", "services.valkeyUrl"]) expect(needsOtp(m, {})).toBe(true);
-  for (const m of ["apps.list", "apps.env.get", "apps.deploy", "apps.addDatabase", "pg.create"]) expect(needsOtp(m, {})).toBe(false);
+  for (const m of ["apps.env.reveal", "apps.env.set", "db.drop", "pg.drop", "vpn.peer.add", "backup.key.export", "services.valkeyUrl", "apps.addDatabase", "containers.save", "sites.save", "vpn.enable", "import.cpanel.apply"]) expect(needsOtp(m, {})).toBe(true);
+  for (const m of ["apps.list", "apps.env.get", "apps.deploy", "pg.create", "containers.action"]) expect(needsOtp(m, {})).toBe(false);
   expect(ENV_MASK).toBe("••••••••");
+});
+
+test("a grant is short and only good for a few calls", () => {
+  const g = issueGrant("alice");
+  expect(grantValid(g, "bob")).toBe(false);
+  let ok = 0;
+  for (let i = 0; i < 20; i++) if (grantValid(g, "alice")) ok++;
+  expect(ok).toBe(10);
 });

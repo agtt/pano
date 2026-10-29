@@ -16,7 +16,7 @@ serving() { R curl -sk --resolve bun.test:443:127.0.0.1 https://bun.test/ -o /de
 step "refused: wrong checksum, a file that does not run"
 R /opt/pano/bin/pano update /var/tmp/pano-next 0000 || true
 R sh -c 'echo "not a binary" > /var/tmp/pano-bad; chmod 755 /var/tmp/pano-bad'
-R /opt/pano/bin/pano update /var/tmp/pano-bad || true
+R sh -c '/opt/pano/bin/pano update /var/tmp/pano-bad $(sha256sum /var/tmp/pano-bad | cut -d" " -f1)' || true
 
 step "a good update"
 R /opt/pano/bin/pano update /var/tmp/pano-next "$SHA"
@@ -27,7 +27,7 @@ step "a release that runs 'version' but does not start"
 R sh -c 'printf "#!/bin/sh\n[ \"\$1\" = version ] && echo 9.9.9 && exit 0\nexit 1\n" > /var/tmp/pano-broken; chmod 755 /var/tmp/pano-broken'
 R /opt/pano/bin/pano rpc backup.jobs >/dev/null
 START=$(date +%s)
-R /opt/pano/bin/pano update /var/tmp/pano-broken || true
+R sh -c '/opt/pano/bin/pano update /var/tmp/pano-broken $(sha256sum /var/tmp/pano-broken | cut -d" " -f1)' || true
 echo "back after $(($(date +%s) - START))s"
 R /opt/pano/bin/pano version
 R systemctl is-active pano-agent pano-web

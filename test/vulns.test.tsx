@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cvss3, fixedIn, nodeSecurity, parseComposerLock, parseNpmLock, parseUpdateinfo, renderDnfAutomatic, severityOf } from "../src/agent/vulns.ts";
+import { type Finding, cvss3, fixedIn, markExploits, nodeSecurity, parseComposerLock, parseNpmLock, parseUpdateinfo, renderDnfAutomatic, severityOf, urgent } from "../src/agent/vulns.ts";
 import { VulnsCard } from "../src/web/views/vulns.tsx";
 
 test("CVSS 3 scores and severities", () => {
@@ -80,4 +80,13 @@ test("vulnerabilities card renders", () => {
   expect(html).toContain("CVE-2025-29927");
   expect(html).toContain("needs a reboot");
   expect(html).toContain("update it in the app");
+});
+
+test("KEV and EPSS mark findings urgent", () => {
+  const f = (id: string, aliases: string[] = []): Finding => ({ where: "os", ecosystem: "os", name: "x", version: "", id, aliases, severity: "medium", summary: "", fixed: "", autofix: true });
+  const list = [f("RLSA-2026:1", ["CVE-2026-1111"]), f("GHSA-x", ["CVE-2026-2222"]), f("CVE-2026-3333")];
+  markExploits(list, new Set(["CVE-2026-1111"]), new Map([["CVE-2026-2222", 0.42], ["CVE-2026-3333", 0.01]]));
+  expect(list.map(urgent)).toEqual([true, true, false]);
+  expect(list[0]!.exploited).toBe(true);
+  expect(list[1]!.epss).toBe(0.42);
 });

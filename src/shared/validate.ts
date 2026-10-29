@@ -108,6 +108,7 @@ export const v = {
   /** Absolute path that must stay inside one of the allowed roots. */
   pathUnder(s: unknown, roots: string[]): string {
     check(typeof s === "string" && s.startsWith("/"), "absolute path required");
+    check(/^[A-Za-z0-9._\/-]+$/.test(s as string), "path: letters, digits and . _ - / only");
     const norm = normalize(s);
     check(roots.some((r) => norm === r || norm.startsWith(r.endsWith("/") ? r : r + "/")), `path must be under ${roots.join(", ")}`);
     return norm;

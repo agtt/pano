@@ -1,6 +1,6 @@
 # pano (working name) — feature overview
 
-Open-source (planned: AGPL-3.0), self-hosted server panel for one or a few Linux servers (AlmaLinux/Rocky 9, Debian/Ubuntu).
+Open-source (MIT), self-hosted server panel for one or a few Linux servers (AlmaLinux/Rocky 9, Debian/Ubuntu).
 Built for modern apps (Next.js, Node.js, Bun, monorepos) and simple PHP/WordPress sites, with security first and a small
 footprint. One self-contained binary written in TypeScript on Bun; no Docker, no Python, no license server. Everything
 optional is installed only when asked for, so nothing unused sits on disk or in memory.
@@ -21,7 +21,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 | Twilio TURN / Xirsys | TURN relay (coturn) for WebRTC calls and P2P games on demand |
 | Tailscale (for admin access) | Built-in WireGuard private network with SSH/panel locks |
 | Cronitor / Bull Board / Horizon (basic) | Jobs page: crons of apps and sites, queue monitor (BullMQ, Laravel) with alerts |
-| Snyk / Dependabot alerts (basic), unattended-upgrades | Nightly CVE scan + automatic OS/PHP/edge security patching |
+| Snyk / Dependabot alerts (basic), unattended-upgrades | Nightly CVE scan + automatic OS/PHP/edge security patching; actively exploited holes (CISA KEV, EPSS) patched within hours |
 | Docker for a few services | Optional Podman containers (daemonless), off by default |
 
 ## Features
@@ -68,7 +68,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - `pano install` + `pano recover` on a new server: panel, admins, services (MariaDB/PostgreSQL/Valkey as the data needs), runtimes, app env/data/deploy keys, databases with the same users and passwords, PHP sites with their files, realtime/TURN, then every app deploys from git.
 
 **Updating pano itself**
-- `pano update <binary> [sha256]`: the new binary must run first; the old one and a copy of the state are kept; if the agent or UI does not answer within a minute it rolls back by itself; `pano update-rollback` by hand. Apps and sites keep serving throughout.
+- `pano update <binary> <sha256>`: checksum required, the new binary must run first (as nobody), no silent downgrade; the old one and a copy of the state are kept; if the agent or UI does not answer within a minute it rolls back by itself; `pano update-rollback` by hand. Apps and sites keep serving throughout.
 
 **Security**
 - Privilege separation: unprivileged web UI talks to a root agent over a unix socket with a fixed list of typed operations.
@@ -76,7 +76,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - 2FA enforced by the agent for every sensitive action (reveal secrets, change env/code source, drop/restore data, VPN, cutover): a compromised UI process still cannot read secrets or plant code.
 - Apps and sites sandboxed (own user, read-only system, no new privileges, syscall filter, memory cap, no cloud metadata access).
 - Shield: malware scanner with quarantine/restore, login brute-force bans, reputation blocklists. Guard: nftables SSH/HTTP flood protection.
-- Vulnerabilities: nightly scan of OS advisories, app/site lockfiles (OSV.dev), Node.js, PHP, WordPress core; Telegram alerts; automatic OS security updates (no surprise reboots), PHP patch releases, edge updates with rollback.
+- Vulnerabilities: nightly scan of OS advisories, app/site lockfiles (OSV.dev), Node.js, PHP, WordPress core; Telegram alerts; automatic OS security updates (no surprise reboots), PHP patch releases, edge updates with rollback (only releases out for a few days); findings in CISA KEV or with EPSS ≥ 10% are marked urgent and patched within 6 hours.
 - Security audit page (public ports, firewall, SSH, DB bind, leftovers) with exact fix commands; full audit log.
 
 **Private access**
