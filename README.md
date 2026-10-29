@@ -17,7 +17,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 | Runtimes | Any Node.js / Bun version side by side under `/opt/pano/runtimes`, checksum-verified. Apps pin their own version; OS updates never change them. |
 | Edge | Caddy (pinned, checksum-verified) on :80/:443: automatic HTTPS, HTTP/3, on-demand TLS for customer domains, Cloudflare real-IP. Config is rendered from state and validated before every reload. |
 | Monorepos | One build, several processes: `name \| dir \| routes \| memory \| start` per line. Routes are hosts, `host/path`, `*.host` or `*` (any host, on-demand TLS with an ask URL). Web processes get blue/green slots and health checks; workers have no port and never run twice (old one stops before the new one starts). |
-| PHP sites | PHP 7.4–8.5 (Remi packages, signed) installed on first use. Each site: its own system user, its own PHP-FPM pool running as that user (never root, `pm=ondemand`, hardened unit with `MemoryDenyWriteExecute`), socket only the edge can open (ACL), `open_basedir`, dangerous functions off, secure session cookies. The edge never serves dotfiles, dumps/backups, composer files or PHP inside uploads. Patch releases arrive with OS updates; pools reload onto the new binary. |
+| PHP sites | PHP 7.4–8.5 (Remi on AlmaLinux/Rocky, Ondřej Surý's on Debian/Ubuntu; signed) installed on first use; WordPress tools (one-click install, updates, maintenance mode, password reset) with a verified wp-cli run as the site user. Each site: its own system user, its own PHP-FPM pool running as that user (never root, `pm=ondemand`, hardened unit with `MemoryDenyWriteExecute`), socket only the edge can open (ACL), `open_basedir`, dangerous functions off, secure session cookies. The edge never serves dotfiles, dumps/backups, composer files or PHP inside uploads. Patch releases arrive with OS updates; pools reload onto the new binary. |
 | Sites | Proxy (path → port routes), static, PHP, and legacy sites still served by the old OpenLiteSpeed on localhost. |
 | Containers (optional) | Off until enabled; then Podman comes from the distribution (no daemon, nothing runs without a container). Each container is a Quadlet systemd unit in its own user namespace (root inside = unprivileged uid outside), memory/pids capped, published on 127.0.0.1 only, HTTPS through the edge when given a domain. Templates: Redis, PostgreSQL, Meilisearch, Uptime Kuma, n8n; empty passwords/keys are generated. |
 | Databases | MariaDB/MySQL: list with sizes and grants, create db + user, reset passwords, drop (with 2FA). |
@@ -67,6 +67,13 @@ bun install && bun run build          # → dist/pano (linux-x64); build:arm for
 scp dist/pano root@server:/tmp/pano
 ssh root@server '/tmp/pano install && /opt/pano/bin/pano admin you'
 ssh -L 7800:127.0.0.1:7800 root@server   # then open http://127.0.0.1:7800
+```
+
+From a release (tagged builds for x64/arm64, checked against `SHA256SUMS` before anything runs; while the repo is private set `GITHUB_TOKEN`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sudo sh   # PANO_VERSION=x.y.z pins one
+sudo pano update --latest                                                          # later: download, verify, update with rollback
 ```
 
 `install` creates the `pano` user, directories and the `pano-agent` / `pano-web` units. Nothing public changes.
@@ -122,8 +129,8 @@ Layout: `src/agent` (root: state, apps, php, edge, backups, importer, cpanel, cu
 
 ## Roadmap
 
-WordPress one-click install · CyberPanel backup files from another server · Debian/Ubuntu PHP (sury) · preview deployments per branch / PR · Android build runner ·
-DNS-01 / Cloudflare Origin CA certificates · metrics history · multiple admins with roles · mail (deliberately out of scope).
+CyberPanel backup files from another server · Android build runner · staging copies of PHP sites ·
+DNS-01 / Cloudflare Origin CA certificates · admin roles · mail (deliberately out of scope).
 
 ## License
 

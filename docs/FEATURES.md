@@ -32,6 +32,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Monorepos: one build, several processes (web + workers), per-process routes, memory limits.
 - Per-app env (masked in the UI), logs, cron jobs, persistent `DATA_DIR` (SQLite, uploads) included in backups.
 - Push-to-deploy from GitHub, GitLab, Gitea, Forgejo; optional GitHub connection with repo picker, deploy keys and commit status.
+- Preview deploys: pushes to other branches build `<branch>.<preview domain>` as an isolated app (own user, ports, `DATA_DIR`, env minus prod-only vars), TLS only for existing previews; removed on branch delete, after a TTL (7 days) or past the limit (3).
 
 **Edge**
 - Caddy: automatic HTTPS (Let's Encrypt), HTTP/3, zstd/gzip, on-demand TLS for customer domains, Cloudflare real IP, security headers.
@@ -40,6 +41,8 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - PHP 7.4–8.5 installed on first use; versions past end of life are flagged in the UI and the security audit (meant only for migrated legacy sites); each site its own system user, own PHP-FPM pool and an OS-level sandbox (read-only system, no new privileges, syscall filter); `open_basedir` and disabled functions are an extra layer, not the boundary.
 - Per-site PHP version switch with revert, site cron jobs, blocked paths, legacy sites can stay on OpenLiteSpeed during migration.
 - Existing PHP apps (POS, small CMS, Laravel) and WordPress supported.
+- AlmaLinux/Rocky/RHEL (Remi) and Debian 11–13 / Ubuntu 22.04–24.04 (Ondřej Surý's packages, signed keyring); the distro's own php-fpm service is masked, one pool per site.
+- WordPress tools: one-click install on an empty site, core/plugin/theme updates (all or selected), maintenance mode, admin password reset (shown once), optional nightly minor-core + plugin updates. wp-cli is verified against its published sha512 and always runs as the site's own user.
 
 **Databases and services (on demand)**
 - MariaDB: databases, users, grants, sizes, password reset; PostgreSQL (latest major); Valkey (Redis-compatible); SQLite per app.
@@ -48,7 +51,9 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 **Realtime and games (optional extensions, nothing on disk until installed)**
 - Pusher-compatible WebSocket server (Sockudo): pusher-js, Laravel Echo and Pusher SDKs work unchanged; apps, keys, allowed origins, public wss domain, auto-update with rollback.
+- Realtime apps: Pusher-style signed webhooks (occupancy, presence), optional per-app connection limit, env written under both Laravel and Pusher SDK names.
 - TURN relay for WebRTC: short-lived per-user credentials, private networks refused, quotas, secret rotation; takes over an existing coturn.
+- TURN over TLS (optional): `turns:` on 5349 with the edge's certificate for the TURN domain.
 - WebSocket game servers (Colyseus, Socket.IO, uWS) run as normal apps.
 
 **Jobs and queues**
@@ -58,6 +63,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 **Backups**
 - Full archives (AES-256-GCM, encrypted on the server) or incremental (restic: deduplicated, encrypted with restic's own AES-256-CTR + Poly1305-AES).
+- Each backup carries an authenticated header (kind, job, location, time): a restore refuses an object swapped in from another job or run.
 - One or two destinations at once: Cloudflare R2, Backblaze B2, Hetzner Object Storage, Wasabi, AWS S3, MinIO.
 - Hourly/daily/weekly schedules, retention, restore; the storage provider only sees ciphertext.
 - Protected stores: pano never deletes from them (retention is left to the store's own lifecycle rule / object lock), so a stolen server key cannot wipe the backups; the store test shows whether the key could still delete.
@@ -69,21 +75,28 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 **Updating pano itself**
 - `pano update <binary> <sha256>`: checksum required, the new binary must run first (as nobody), no silent downgrade; the old one and a copy of the state are kept; if the agent or UI does not answer within a minute it rolls back by itself; `pano update-rollback` by hand. Apps and sites keep serving throughout.
+- Releases: tagged builds for x64/arm64 with `SHA256SUMS`; `install.sh` verifies before installing; `pano update --latest` downloads, verifies and updates with the same rollback.
 
 **Security**
 - Privilege separation: unprivileged web UI talks to a root agent over a unix socket with a fixed list of typed operations.
+- Several admins (all equal, no roles): add, remove, reset password or 2FA from the panel, each change with your own code; a new admin's password and authenticator QR are shown once; you cannot remove yourself or the last admin.
 - Panel never public (localhost via SSH tunnel, Tailscale or built-in WireGuard). Login: argon2id + mandatory TOTP, lockout, strict CSP/CSRF.
 - 2FA enforced by the agent for every sensitive action (reveal secrets, change env/code source, drop/restore data, VPN, cutover): a compromised UI process still cannot read secrets or plant code.
 - Apps and sites sandboxed (own user, read-only system, no new privileges, syscall filter, memory cap, no cloud metadata access).
 - Shield: malware scanner with quarantine/restore, login brute-force bans, reputation blocklists. Guard: nftables SSH/HTTP flood protection.
+- Optional default-deny inbound firewall (own nftables table, off by default since providers like Hetzner have one): SSH, 80/443, panel only if public, WireGuard, TURN and your extra ports; rolls itself back after 2 minutes unless confirmed from the panel.
+- The panel answers only to its own address, localhost, the VPN address and names in `PANO_WEB_HOSTS` (DNS-rebinding guard).
+- Containers run their image by digest (resolved on save, re-resolved only by "Update image"); optional read-only root filesystem.
 - Vulnerabilities: nightly scan of OS advisories, app/site lockfiles (OSV.dev), Node.js, PHP, WordPress core; Telegram alerts; automatic OS security updates (no surprise reboots), PHP patch releases, edge updates with rollback (only releases out for a few days); findings in CISA KEV or with EPSS ≥ 10% are marked urgent and patched within 6 hours.
 - Security audit page (public ports, firewall, SSH, DB bind, leftovers) with exact fix commands; full audit log.
 
 **Private access**
 - Built-in WireGuard (no account, no coordination server): devices by key, QR codes, locks that close SSH/panel to everything but the VPN, with automatic undo if you lock yourself out.
+- VPN devices get their own firewalld zone: SSH, the panel and the ports you unlock, not the whole server.
 
 **Monitoring and alerts**
 - Telegram alerts: failed deploys/crons/backups, app or service down, disk/memory pressure, new high/critical vulnerabilities.
+- Metrics history: every minute CPU, memory, swap, load, network, disks and per-app memory/CPU (read from /proc and cgroups); minute points kept 48 h, 15-minute averages 30 days; inline SVG charts (1h/24h/7d/30d) on Home and each app page.
 
 **Performance defaults**
 - BBR, larger network queues and UDP buffers for HTTP/3 (one switch on the Security page, current vs pano values shown), journal size cap, opcache/realpath cache for PHP, browser caching of static files.
@@ -95,7 +108,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 ## Not there yet (honest gaps)
 - Email hosting (mail server, webmail) and DNS server — intended to stay external (Cloudflare, a mail provider).
-- Multiple servers from one panel, resellers, client accounts/roles, billing (WHMCS-style).
-- File manager and per-site SFTP users; WordPress toolkit (one-click install, staging, plugin updates); full-page cache (Varnish-style).
-- Preview/staging environments for apps; iOS/Android build runners.
+- Multiple servers from one panel, resellers, client accounts and admin roles (all admins are equal), billing (WHMCS-style).
+- File manager and per-site SFTP users; full-page cache (Varnish-style).
+- iOS/Android build runners; staging copies of PHP sites.
 - Long field history: young project, tested end to end in VMs; the first real server migration is next.
