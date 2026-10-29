@@ -6,7 +6,7 @@
 // the tunnel; a lock must be confirmed from inside the tunnel within a few
 // minutes or it is undone automatically, so a mistake cannot lock you out.
 
-import { paths } from "../shared/config.ts";
+import { env, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
 import { audit, settings, state } from "./state.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
@@ -18,6 +18,8 @@ const UNIT = "pano-vpn.service";
 const CONF = `${paths.vpn}/${IFACE}.conf`;
 const RULES = `${paths.vpn}/rules.nft`;
 const KEY = `${paths.secrets}/wg.key`;
+/** firewalld zone of the tunnel interface: default-reject, opened port by port (it used to be "trusted": everything). */
+export const ZONE = "pano-vpn";
 /** Admin services that should never face the internet: MariaDB, Postgres, Redis, OLS admin, CyberPanel, its SSH web shell, memcached. */
 export const SERVICE_PORTS = [3306, 5432, 6379, 7080, 8090, 8888, 11211];
 
@@ -134,6 +136,27 @@ async function defaultEndpoint(): Promise<string> {
   return r.stdout.match(/\bsrc (\S+)/)?.[1] ?? "";
 }
 
+/** What a VPN device may reach on the server: SSH and the panel always (the lock confirmation comes through the tunnel), admin services and database forwarders as the locks say. */
+export function zonePorts(l: Locks, sshPort: number, panelPort: number): string[] {
+  const ports = new Set([sshPort, panelPort, ...(l.services ? SERVICE_PORTS : []), ...(l.databases ? DB_PORTS : [])]);
+  return [...ports].sort((a, b) => a - b).map((p) => `${p}/tcp`);
+}
+
+export type ZoneState = { zones: string[]; inTrusted: boolean; inZone: boolean; ports: string[] };
+
+/** The firewall-cmd --permanent arguments that bring the zone to `want`, and nothing when it already is (no reload then). */
+export function zoneCommands(s: ZoneState, want: string[]): string[][] {
+  const z = `--zone=${ZONE}`;
+  const out: string[][] = [];
+  if (!s.zones.includes(ZONE)) out.push([`--new-zone=${ZONE}`]);
+  // Migration: pano0 sat in "trusted"; one interface cannot be in two zones.
+  if (s.inTrusted) out.push(["--zone=trusted", `--remove-interface=${IFACE}`]);
+  if (!s.inZone || s.inTrusted) out.push([z, `--add-interface=${IFACE}`]);
+  for (const p of s.ports) if (!want.includes(p)) out.push([z, `--remove-port=${p}`]);
+  for (const p of want) if (!s.ports.includes(p)) out.push([z, `--add-port=${p}`]);
+  return out;
+}
+
 const firewalld = async () => (await run(["firewall-cmd", "--state"], { check: false })).stdout.trim() === "running";
 const active = async () => (await run(["systemctl", "is-active", UNIT], { check: false })).stdout.trim() === "active";
 
@@ -145,7 +168,30 @@ async function sync() {
   await writeAtomic(CONF, renderConf(privateKey, port, peers()), 0o600);
   await writeAtomic(RULES, renderRules(locks(), await sshPort()), 0o600);
   if (await active()) await run(["systemctl", "reload", UNIT]);
-  await syncDbForward(settings.get("vpn.enabled") === "1" && locks().databases);
+  const on = settings.get("vpn.enabled") === "1";
+  await syncDbForward(on && locks().databases);
+  if (on) await syncZone();
+}
+
+/** Brings the tunnel's firewalld zone in line with the locks; leaves "trusted" if the interface is still there. */
+export async function syncZone() {
+  if (!(await firewalld())) return;
+  const fw = (args: string[]) => run(["firewall-cmd", "--permanent", ...args], { check: false });
+  const query = async (args: string[]) => (await fw(args)).stdout.trim() === "yes";
+  const zones = (await fw(["--get-zones"])).stdout.trim().split(/\s+/);
+  const has = zones.includes(ZONE);
+  const cmds = zoneCommands(
+    {
+      zones,
+      inTrusted: await query(["--zone=trusted", `--query-interface=${IFACE}`]),
+      inZone: has && (await query([`--zone=${ZONE}`, `--query-interface=${IFACE}`])),
+      ports: has ? (await fw([`--zone=${ZONE}`, "--list-ports"])).stdout.trim().split(/\s+/).filter(Boolean) : [],
+    },
+    zonePorts(locks(), await sshPort(), env.webPort),
+  );
+  if (!cmds.length) return;
+  for (const c of cmds) await fw(c);
+  await run(["firewall-cmd", "--reload"], { check: false });
 }
 
 export const DB_PORTS = [3306, 5432, 6379];
@@ -233,8 +279,8 @@ export async function enable(input: { port?: unknown; endpoint?: unknown }, acto
   await run(["systemctl", "daemon-reload"]);
   if (await firewalld()) {
     await run(["firewall-cmd", "--permanent", `--add-port=${port}/udp`], { check: false });
-    await run(["firewall-cmd", "--permanent", "--zone=trusted", `--add-interface=${IFACE}`], { check: false });
     await run(["firewall-cmd", "--reload"], { check: false });
+    await syncZone();
   }
   await run(["systemctl", "enable", UNIT]);
   await run(["systemctl", "restart", UNIT]);
@@ -250,6 +296,7 @@ export async function disable(actor: string) {
   await run(["systemctl", "disable", "--now", UNIT], { check: false });
   if (await firewalld()) {
     await run(["firewall-cmd", "--permanent", `--remove-port=${settings.get("vpn.port") ?? 51820}/udp`], { check: false });
+    await run(["firewall-cmd", "--permanent", `--delete-zone=${ZONE}`], { check: false });
     await run(["firewall-cmd", "--reload"], { check: false });
   }
   settings.set("vpn.enabled", "0");
@@ -353,6 +400,8 @@ export function confirm(remote: string, actor: string) {
 
 /** At agent start: an expired, unconfirmed lock is undone; one still in its window is re-armed. */
 export async function recoverPending() {
+  // Old installs still have pano0 in the trusted zone: moved at the first start after the update.
+  if (settings.get("vpn.enabled") === "1") await syncZone().catch((e) => console.error(`[agent] vpn firewall zone: ${e}`));
   const p = pending();
   if (!p) return;
   if (p.deadline <= Date.now()) await revertUnconfirmed();

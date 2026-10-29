@@ -4,7 +4,7 @@ import { renderGuard } from "../src/agent/guard.ts";
 import { countLogins, matchRules, parseLists, renderBans, renderReputation } from "../src/agent/shield.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { formatCrons, parseCrons } from "../src/agent/apps.ts";
-import { clientConfig, renderConf, renderRules, renderUnit } from "../src/agent/vpn.ts";
+import { clientConfig, renderConf, renderRules, renderUnit, zoneCommands, zonePorts } from "../src/agent/vpn.ts";
 
 describe("vpn", () => {
   test("server config lists each device with its preshared key and a /32", () => {
@@ -29,6 +29,32 @@ describe("vpn", () => {
     expect(c).toContain("AllowedIPs = 10.77.0.1/32");
     expect(c).toContain("Endpoint = [2001:db8::1]:51820");
     expect(renderUnit()).toContain("wg setconf pano0");
+  });
+});
+
+describe("vpn firewall zone", () => {
+  const L = { panel: false, ssh: false, services: false, databases: false };
+  test("peers get SSH and the panel, services and database ports only as the locks say", () => {
+    expect(zonePorts(L, 2222, 7800)).toEqual(["2222/tcp", "7800/tcp"]);
+    expect(zonePorts({ ...L, databases: true }, 22, 7800)).toEqual(["22/tcp", "3306/tcp", "5432/tcp", "6379/tcp", "7800/tcp"]);
+    expect(zonePorts({ ...L, services: true }, 22, 7800)).toContain("7080/tcp");
+    expect(zonePorts({ ...L, services: true }, 22, 7800)).not.toContain("80/tcp");
+  });
+  test("moves pano0 out of trusted into its own zone, then is idempotent", () => {
+    const want = ["22/tcp", "7800/tcp"];
+    const first = zoneCommands({ zones: ["public", "trusted"], inTrusted: true, inZone: false, ports: [] }, want);
+    expect(first).toEqual([
+      ["--new-zone=pano-vpn"],
+      ["--zone=trusted", "--remove-interface=pano0"],
+      ["--zone=pano-vpn", "--add-interface=pano0"],
+      ["--zone=pano-vpn", "--add-port=22/tcp"],
+      ["--zone=pano-vpn", "--add-port=7800/tcp"],
+    ]);
+    expect(zoneCommands({ zones: ["pano-vpn"], inTrusted: false, inZone: true, ports: ["7800/tcp", "22/tcp"] }, want)).toEqual([]);
+    expect(zoneCommands({ zones: ["pano-vpn"], inTrusted: false, inZone: true, ports: ["22/tcp", "3306/tcp"] }, want)).toEqual([
+      ["--zone=pano-vpn", "--remove-port=3306/tcp"],
+      ["--zone=pano-vpn", "--add-port=7800/tcp"],
+    ]);
   });
 });
 
