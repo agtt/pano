@@ -7,12 +7,12 @@
 
 import { fsPath } from "../shared/config.ts";
 import {
-  branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, previewEnv, previewHost, previewProcesses, previewSlug, pvName,
+  branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, previewComment, previewEnv, previewHost, previewProcesses, previewSlug, pvName,
 } from "../shared/preview.ts";
 import { formatEnv, v } from "../shared/validate.ts";
-import { appHome, appUser, assertDomainsFree, enqueueDeploy, getEnv, mustGet, teardownUnits, type DeployTarget } from "./apps.ts";
+import { appHome, appUser, assertDomainsFree, effectiveEnv, enqueueDeploy, getEnv, mustGet, teardownUnits, type DeployTarget } from "./apps.ts";
 import { applyEdge } from "./edge.ts";
-import { reportStatus } from "./github.ts";
+import { commentPreview, reportStatus } from "./github.ts";
 import { apps, audit, deploys, previewApp, previews, procsOf, sites, type App, type Preview, type Process } from "./state.ts";
 import { remove, run, writeAtomic } from "./sys.ts";
 
@@ -31,7 +31,7 @@ const busy = (id: number) => !!deploys.running(pvName(id));
 /** The copy of the app's env a preview runs with. */
 async function writePreviewEnv(parent: App, pv: Preview) {
   const name = pvName(pv.id);
-  const env = previewEnv(await getEnv(parent.name), parent.preview_env_exclude, {
+  const env = previewEnv(await effectiveEnv(parent), parent.preview_env_exclude, await getEnv(parent.name, "preview"), {
     PANO_PREVIEW: "1",
     PANO_PREVIEW_BRANCH: pv.branch,
     PANO_PREVIEW_URL: `https://${pv.host}`,
@@ -63,7 +63,11 @@ function target(id: number): DeployTarget {
       if (!x) throw new Error("removed while it was building");
       await writePreviewEnv(x.parent, x.pv);
     },
-    report: (app, sha, state, description) => void reportStatus(app, sha, state, description, { context: "pano/preview" }),
+    report: (app, sha, state, description) => {
+      void reportStatus(app, sha, state, description, { context: "pano/preview" });
+      const x = live();
+      if (x && state !== "pending") void commentPreview(x.parent, x.pv.branch, previewComment(x.pv.branch, x.pv.host, sha, state === "success", x.pv.last_deploy)).catch(() => {});
+    },
   };
 }
 
@@ -203,6 +207,24 @@ export async function onPush(appName: string, ref: string, body: string, source:
   } catch (e) {
     return { deploy: false, reason: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** A pull request opened after its branch's preview went live: the link goes on it now. Signature already verified. */
+export async function onPullRequest(appName: string, body: string): Promise<{ reason: string }> {
+  let p: { action?: unknown; pull_request?: { head?: { ref?: unknown } } };
+  try {
+    p = JSON.parse(body);
+  } catch {
+    return { reason: "bad json" };
+  }
+  if (!["opened", "reopened", "ready_for_review"].includes(String(p.action))) return { reason: "ignored" };
+  const app = apps.get(appName);
+  const branch = String(p.pull_request?.head?.ref ?? "");
+  const pv = app && branch ? previews.find(appName, previewSlug(branch)) : null;
+  if (!app || !pv || pv.branch !== branch || !pv.active_slot) return { reason: "no live preview" };
+  const sha = (pv.last_deploy ? deploys.get(pv.last_deploy)?.commit_sha : "") ?? "";
+  await commentPreview(app, branch, previewComment(branch, pv.host, sha, true, pv.last_deploy)).catch(() => {});
+  return { reason: "commented" };
 }
 
 // ---- view ------------------------------------------------------------------

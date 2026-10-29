@@ -32,6 +32,9 @@ export type AppRow = {
   preview_max?: number;
   preview_ttl_days?: number;
   preview_env_exclude?: string;
+  env_groups?: string;
+  /** names of variables a restart (or, built into the code, a redeploy) would apply */
+  env_pending?: { restart: string[]; redeploy: string[] };
   previews?: PreviewRow[];
   status: { active: string; memory: number; since: string; procs?: { name: string; active: string; memory: number }[] };
   deploys?: { id: number; status: string; trigger: string; commit_sha: string; release: string; error: string; started_at: number; finished_at: number | null }[];
@@ -169,6 +172,13 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         placeholder="DATABASE_URL, STRIPE_*"
         hint="Left out of a preview's copy of the environment (comma separated; a trailing * matches a prefix)"
       />
+      <Field
+        label="Shared variables"
+        name="env_groups"
+        value={a.env_groups ?? ""}
+        placeholder="stripe, sentry"
+        hint="Groups from the Shared variables page, comma separated; a later group and the app's own variables win"
+      />
       <label class="field wide">
         <span>Cron</span>
         <textarea name="crons" rows={3} class="mono" spellcheck={false} placeholder={"*:0/15 | bun run scripts/sync.ts\ndaily | node scripts/cleanup.js"}>
@@ -184,7 +194,7 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           label="Authenticator code"
           name="otp"
           autocomplete="one-time-code"
-          hint="Only when changing the repository, branch, directory, commands, preview domain or prod-only variables: they decide what runs with the app's secrets."
+          hint="Only when changing the repository, branch, directory, commands, preview domain, prod-only or shared variables: they decide what runs with which secrets."
         />
       ) : null}
       <div class="actions">
@@ -203,7 +213,12 @@ export function AppDetail(p: {
   deployId?: number;
   hookUrl: string;
   github: { connected: boolean; repo: string };
-  revealed?: boolean;
+  /** which environment's values are shown (the other stays masked) */
+  revealed?: "production" | "preview";
+  /** preview-only values (masked unless revealed) */
+  previewEnv?: Record<string, string>;
+  /** existing databases an app can be connected to */
+  databases?: { engine: "mariadb" | "postgres"; name: string }[];
   crons?: { jobs: JobRow[]; logs: string };
   history?: History | null;
 }) {
@@ -211,6 +226,7 @@ export function AppDetail(p: {
   const managed = a.kind === "managed";
   return (
     <div class="stack">
+      <EnvPending app={a} csrf={p.csrf} />
       <Card
         title={a.name}
         actions={
@@ -391,13 +407,14 @@ export function AppDetail(p: {
                   .join("\n")}
               </textarea>
               <p class="muted small">
-                KEY=value, one per line. {p.revealed ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."} Saving
-                needs a code. Applied on the next deploy or restart.
+                KEY=value, one per line. {p.revealed === "production" ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}{" "}
+                Saving needs a code. A restart applies them; variables built into the code (NEXT_PUBLIC_*, VITE_*, …) need a redeploy.
+                {a.env_groups ? ` Also gets the shared variables of ${a.env_groups.split(",").join(", ")} (its own values win).` : ""}
               </p>
               <div class="row">
                 <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
                 <button class="btn">{t("Save")}</button>
-                {p.revealed ? null : (
+                {p.revealed === "production" ? null : (
                   <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
                     Show values
                   </button>
@@ -415,7 +432,50 @@ export function AppDetail(p: {
               <button class="btn primary">+ Database</button>
               <span class="muted small">Creates the database and its own user (server installed on first use), writes the URL here and restarts the app.</span>
             </form>
+            {p.databases?.length ? (
+              <form method="post" action={`/apps/${a.name}/database/attach`} class="row">
+                <Csrf token={p.csrf} />
+                <select name="database">
+                  {p.databases.map((d) => (
+                    <option value={`${d.engine}:${d.name}`}>
+                      {d.engine === "postgres" ? "PostgreSQL" : "MariaDB"}: {d.name}
+                    </option>
+                  ))}
+                </select>
+                <input name="key" value="DATABASE_URL" class="short mono" pattern="[A-Za-z_][A-Za-z0-9_]*" required />
+                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+                <button class="btn">Connect existing</button>
+                <span class="muted small">An existing database (imported, or another app's): the app gets its own user for it, other users keep theirs.</span>
+              </form>
+            ) : null}
           </Card>
+
+          {a.preview_domain ? (
+            <Card title="Preview environment">
+              <form method="post" action={`/apps/${a.name}/env`}>
+                <Csrf token={p.csrf} />
+                <input type="hidden" name="scope" value="preview" />
+                <textarea name="env" rows={4} spellcheck={false} class="mono" placeholder="STRIPE_SECRET_KEY=sk_test_...">
+                  {Object.entries(p.previewEnv ?? {})
+                    .map(([k, val]) => `${k}=${val}`)
+                    .join("\n")}
+                </textarea>
+                <p class="muted small">
+                  Values only previews get, over the app's own (a test payment key, a staging database). Never excluded by the prod-only list; the live app never
+                  sees them. Used from the next preview build.
+                </p>
+                <div class="row">
+                  <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+                  <button class="btn">{t("Save")}</button>
+                  {p.revealed === "preview" ? null : (
+                    <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
+                      Show values
+                    </button>
+                  )}
+                </div>
+              </form>
+            </Card>
+          ) : null}
 
           <Card title="Previews">
             {a.preview_domain ? (
@@ -538,6 +598,35 @@ export function AppDetail(p: {
   );
 }
 
+/** Env changed since the processes started (restart) or since the live build (redeploy, for variables built into the code). */
+function EnvPending({ app, csrf }: { app: AppRow; csrf: string }) {
+  const p = app.env_pending;
+  if (!p || (!p.restart.length && !p.redeploy.length)) return null;
+  const names = (l: string[]) => (l.length > 6 ? `${l.slice(0, 6).join(", ")} +${l.length - 6}` : l.join(", "));
+  return p.redeploy.length ? (
+    <div class="flash warn">
+      <span>
+        Built into the code, so only a redeploy applies them: <code>{names(p.redeploy)}</code>
+      </span>
+      <form method="post" action={`/apps/${app.name}/deploy`}>
+        <Csrf token={csrf} />
+        <button class="btn primary">{t("Deploy")}</button>
+      </form>
+    </div>
+  ) : (
+    <div class="flash warn">
+      <span>
+        Changed since the app started; a restart applies them: <code>{names(p.restart)}</code>
+      </span>
+      <form method="post" action={`/apps/${app.name}/action`}>
+        <Csrf token={csrf} />
+        <input type="hidden" name="action" value="restart" />
+        <button class="btn">{t("Restart")}</button>
+      </form>
+    </div>
+  );
+}
+
 export function GitPage(p: { csrf: string; github: { connected: boolean; login: string }; hooksDomain: string }) {
   return (
     <div class="stack">
@@ -559,8 +648,8 @@ export function GitPage(p: { csrf: string; github: { connected: boolean; login: 
             <Csrf token={p.csrf} />
             <p class="muted small">
               Create a fine-grained token on GitHub (Settings → Developer settings → Fine-grained tokens), limited to the repositories you deploy, with
-              repository permissions: Contents read, Metadata read, Administration read and write (deploy keys), Webhooks read and write, Commit statuses read
-              and write. It is stored root-only on this server and never shown again.
+              repository permissions: Contents read, Metadata read, Administration read and write (deploy keys), Webhooks read and write, Commit statuses read and write, Pull requests read
+              and write (preview links on pull requests). It is stored root-only on this server and never shown again.
             </p>
             <Field label="Token" name="token" type="password" autocomplete="off" required placeholder="github_pat_…" />
             <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />

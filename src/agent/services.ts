@@ -6,10 +6,12 @@
 // A server that was already there (CyberPanel's MariaDB) is used as is: pano
 // never rewrites the configuration of something it did not install.
 
+import { createHash } from "node:crypto";
 import { paths } from "../shared/config.ts";
+import { v } from "../shared/validate.ts";
 import { ensureJob } from "./backup.ts";
 import { sizes } from "./tune.ts";
-import { createDatabase } from "./mysql.ts";
+import { attachUser as attachMysqlUser, createDatabase } from "./mysql.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, run, writeAtomic } from "./sys.ts";
 
@@ -260,17 +262,17 @@ export async function existingRedisUrl(): Promise<string | null> {
 
 // ---- PostgreSQL databases --------------------------------------------------------
 
-async function psql(query: string): Promise<string[][]> {
+async function psql(query: string, db = "postgres"): Promise<string[][]> {
   const r = rec("postgres");
   if (!r?.psql) throw new Error("PostgreSQL is not installed");
-  const out = await run([r.psql, "-X", "-q", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-d", "postgres"], { user: "postgres", cwd: "/", input: query, timeoutMs: 120_000 });
+  const out = await run([r.psql, "-X", "-q", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-d", db], { user: "postgres", cwd: "/", input: query, timeoutMs: 120_000 });
   return out.stdout
     .split("\n")
     .filter(Boolean)
     .map((l) => l.split("\t"));
 }
 
-const pgIdent = (s: string) => `"${s}"`;
+const pgIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
 const pgLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 export async function pgList() {
@@ -328,9 +330,50 @@ export function pgDumpCommand(db: string): string[] {
   return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("pg_dump"), "--no-owner", "--no-privileges", "--", pgName(db)];
 }
 
-/** Restores into an existing database; stops at the first error. */
-export function pgRestoreCommand(db: string): string[] {
-  return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", pgName(db)];
+/**
+ * Restores into an existing database; stops at the first error. The dump carries no owners, so
+ * it loads as the database's owner: the tables belong to the app's role, not to postgres.
+ */
+export async function pgRestoreCommand(db: string): Promise<string[]> {
+  const owner = await pgOwner(pgName(db)).catch(() => null);
+  const asOwner = owner && !owner.superuser ? ["-c", `SET ROLE ${pgIdent(owner.name)}`, "-f", "-"] : [];
+  return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", pgName(db), ...asOwner];
+}
+
+async function pgOwner(db: string): Promise<{ name: string; superuser: boolean } | null> {
+  const row = (await psql(`SELECT r.rolname, r.rolsuper FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = ${pgLit(db)};`))[0];
+  return row ? { name: row[0]!, superuser: row[1] === "t" } : null;
+}
+
+/**
+ * Full use of an existing database for a role that does not own it. When the owner is an
+ * ordinary role with only this database, the role joins it (tables, migrations, everything the
+ * owner may do). Otherwise (postgres, or an owner of several databases) it gets every privilege
+ * on the public schema and on what the owner creates there later.
+ */
+export async function pgGrantAccess(db: string, user: string): Promise<"owner" | "member" | "grants"> {
+  const owner = await pgOwner(pgName(db));
+  if (!owner) throw new Error(`no PostgreSQL database ${db}`);
+  const u = pgIdent(pgName(user));
+  if (owner.name === user) return "owner";
+  await psql(`GRANT CONNECT, TEMPORARY ON DATABASE ${pgIdent(db)} TO ${u};`);
+  const owned = Number((await psql(`SELECT count(*) FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = ${pgLit(owner.name)});`))[0]?.[0] ?? 0);
+  if (!owner.superuser && owned === 1 && PG_NAME.test(owner.name)) {
+    await psql(`GRANT ${pgIdent(owner.name)} TO ${u};`);
+    return "member";
+  }
+  const o = pgIdent(owner.name);
+  await psql(
+    [
+      `GRANT USAGE, CREATE ON SCHEMA public TO ${u};`,
+      `GRANT ALL ON ALL TABLES IN SCHEMA public TO ${u};`,
+      `GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${u};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${o} IN SCHEMA public GRANT ALL ON TABLES TO ${u};`,
+      `ALTER DEFAULT PRIVILEGES FOR ROLE ${o} IN SCHEMA public GRANT ALL ON SEQUENCES TO ${u};`,
+    ].join("\n"),
+    db,
+  );
+  return "grants";
 }
 
 /**
@@ -402,4 +445,50 @@ export async function databaseForApp(
   if (engine !== "valkey") ensureJob(engine === "postgres" ? "postgres" : "mysql", name, actor);
   audit(actor, "app.database", { app, engine, key });
   return { key, engine, database: engine === "valkey" ? url.split("/").pop()! : name };
+}
+
+/** The app's own user on an existing database: "<app>_<hash of the database>", unique per pair, at most 27 characters. */
+export const attachUserName = (app: string, db: string) =>
+  `${app.replace(/-/g, "_").slice(0, 20)}_${createHash("sha1").update(db).digest("hex").slice(0, 6)}`;
+
+/**
+ * Connects an app to a database that already exists (imported from cPanel/CyberPanel, or used by
+ * another app): a user of its own that can reach only that database, a fresh password, the URL
+ * written under `key`. Other users of the database keep theirs. An existing variable is never overwritten.
+ */
+export async function attachDatabaseToApp(
+  app: string,
+  engine: "postgres" | "mariadb",
+  database: unknown,
+  keyInput: unknown,
+  env: { get: () => Promise<Record<string, string>>; set: (vars: Record<string, string>) => Promise<void> },
+  actor: string,
+) {
+  const key = keyInput ? v.envKey(keyInput) : "DATABASE_URL";
+  const current = await env.get();
+  if (current[key]) throw new Error(`${key} is already set for ${app}; remove it from the environment first or pick another name`);
+  const password = randomPassword();
+  let db: string;
+  let user: string;
+  let url: string;
+  let access: string;
+  if (engine === "mariadb") {
+    db = v.dbName(database);
+    user = attachUserName(app, db);
+    await attachMysqlUser(db, user, password);
+    url = `mysql://${user}:${password}@127.0.0.1:3306/${db}`;
+    access = "own user";
+  } else {
+    db = pgName(database);
+    if (RESERVED_PG.has(db)) throw new Error("reserved database");
+    user = attachUserName(app, db);
+    const exists = (await psql(`SELECT 1 FROM pg_roles WHERE rolname = ${pgLit(user)};`)).length > 0;
+    await psql(`${exists ? "ALTER" : "CREATE"} ROLE ${pgIdent(user)} LOGIN PASSWORD ${pgLit(password)};`);
+    access = await pgGrantAccess(db, user);
+    url = `postgres://${user}:${password}@127.0.0.1:5432/${db}`;
+  }
+  await env.set({ ...current, [key]: url });
+  ensureJob(engine === "postgres" ? "postgres" : "mysql", db, actor);
+  audit(actor, "app.database.attach", { app, engine, database: db, user, key, access });
+  return { key, engine, database: db, user, access };
 }

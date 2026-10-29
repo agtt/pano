@@ -43,6 +43,11 @@ export type App = {
   preview_max: number;
   preview_ttl_days: number;
   preview_env_exclude: string;
+  /** shared variable groups the app gets, in order ("stripe,sentry"); its own variables win */
+  env_groups: string;
+  /** env fingerprints (envSnapshot) the processes started with and the live build used; never sent to the UI */
+  env_running: string;
+  env_built: string;
   created_at: number;
   updated_at: number;
 };
@@ -291,6 +296,9 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "preview_max", "INTEGER NOT NULL DEFAULT 3"],
   ["apps", "preview_ttl_days", "INTEGER NOT NULL DEFAULT 7"],
   ["apps", "preview_env_exclude", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "env_groups", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "env_running", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "env_built", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
@@ -395,6 +403,8 @@ export function previewApp(parent: App, pv: Preview): App {
     auto_deploy: 0,
     crons: [],
     preview_domain: "",
+    // A preview's env is one file with the groups already merged in (prod-only variables left out).
+    env_groups: "",
   };
 }
 

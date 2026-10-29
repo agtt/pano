@@ -77,9 +77,12 @@ describe("preview limits and lifetime", () => {
 describe("preview env and processes", () => {
   test("prod-only variables are left out, exact or by prefix", () => {
     const env = { DATABASE_URL: "x", STRIPE_KEY: "k", STRIPE_WEBHOOK: "w", SECRET: "s", KEEP: "1" };
-    const out = previewEnv(env, normalizeEnvExclude("DATABASE_URL, STRIPE_* SECRET"), { PANO_PREVIEW: "1" });
+    const out = previewEnv(env, normalizeEnvExclude("DATABASE_URL, STRIPE_* SECRET"), {}, { PANO_PREVIEW: "1" });
     expect(out).toEqual({ KEEP: "1", PANO_PREVIEW: "1" });
     expect(previewEnv(env, "")).toEqual(env);
+    // Preview values win and are never excluded; pano's own come last.
+    const scoped = previewEnv(env, "STRIPE_*", { STRIPE_KEY: "test", KEEP: "2", PANO_PREVIEW: "x" }, { PANO_PREVIEW: "1" });
+    expect(scoped).toEqual({ DATABASE_URL: "x", SECRET: "s", KEEP: "2", STRIPE_KEY: "test", PANO_PREVIEW: "1" });
     expect(normalizeEnvExclude("A, B,A")).toBe("A,B");
     expect(() => normalizeEnvExclude("bad key")).not.toThrow(); // split on spaces
     expect(() => normalizeEnvExclude("1BAD")).toThrow();
@@ -114,7 +117,7 @@ describe("preview state and edge", () => {
     name: "web", kind: "managed", domains: ["example.com"], runtime: "node", runtime_version: "22.0.0", repo: "https://github.com/a/b.git", branch: "main", root_dir: "",
     install_cmd: "", build_cmd: "", start_cmd: "node server.js", health_path: "/", port_a: 4100, port_b: 4101, active_slot: "a", memory_mb: 512, current_release: "r1",
     webhook_secret: "s", upstream: "", external_unit: "", processes: [], ask_url: "", auto_deploy: 1, crons: [], preview_domain: "*.pv.example.com", preview_max: 3,
-    preview_ttl_days: 7, preview_env_exclude: "", created_at: 0, updated_at: 0,
+    preview_ttl_days: 7, preview_env_exclude: "", env_groups: "", env_running: "", env_built: "", created_at: 0, updated_at: 0,
   } as App;
 
   test("settings validate; defaults apply", () => {

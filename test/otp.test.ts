@@ -26,8 +26,8 @@ test("grants are bound to the admin and expire", () => {
 });
 
 test("secrets, destruction and network access need a code", () => {
-  for (const m of ["apps.env.reveal", "apps.env.set", "db.drop", "pg.drop", "vpn.peer.add", "backup.key.export", "services.valkeyUrl", "apps.addDatabase", "containers.save", "sites.save", "vpn.enable", "import.cpanel.apply"]) expect(needsOtp(m, {})).toBe(true);
-  for (const m of ["apps.list", "apps.env.get", "apps.deploy", "pg.create", "containers.action"]) expect(needsOtp(m, {})).toBe(false);
+  for (const m of ["apps.env.reveal", "apps.env.set", "db.drop", "pg.drop", "vpn.peer.add", "backup.key.export", "services.valkeyUrl", "apps.addDatabase", "containers.save", "sites.save", "vpn.enable", "import.cpanel.apply", "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove"]) expect(needsOtp(m, {})).toBe(true);
+  for (const m of ["apps.list", "apps.env.get", "apps.deploy", "pg.create", "containers.action", "envGroups.list", "envGroups.get", "apps.prWebhook"]) expect(needsOtp(m, {})).toBe(false);
   expect(ENV_MASK).toBe("••••••••");
 });
 

@@ -5,6 +5,8 @@ import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../share
 import { addAdmin, adminNames, checkOtp, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as appsOps from "./apps.ts";
+import * as envGroups from "./envgroups.ts";
+import { envPending } from "../shared/env.ts";
 import * as previewsOps from "./previews.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
@@ -54,12 +56,14 @@ const SENSITIVE = new Set([
   "admins.add", "admins.remove", "admins.reset",
   "firewall.enable", "firewall.disable", "firewall.ports",
   "wp.install", "wp.resetPassword",
+  "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
 ]);
 export const ENV_MASK = "••••••••";
 
 /** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
-// preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives.
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude"] as const;
+// preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives;
+// env_groups hands shared secrets to the app's code.
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -111,11 +115,14 @@ export const methods: Record<string, Handler> = {
   "apps.get": async (p) => {
     const a = apps.get(v.appName(p.name));
     if (!a) throw new Error("not found");
-    return { ...hideSecret(a), status: await appsOps.appStatus(a), deploys: deploys.list(a.name), previews: previewsOps.previewList(a.name) };
+    // Names of variables a restart or a redeploy would apply; never values or fingerprints.
+    const env_pending = a.kind === "managed" && a.active_slot ? envPending(await appsOps.effectiveEnv(a), a.env_running, a.env_built) : { restart: [], redeploy: [] };
+    return { ...hideSecret(a), status: await appsOps.appStatus(a), deploys: deploys.list(a.name), previews: previewsOps.previewList(a.name), env_pending };
   },
   "apps.create": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
     await appsOps.checkSchedules(input.crons);
+    await envGroups.assertGroupsExist(input.env_groups);
     appsOps.assertDomainsFree(appsOps.inputHosts(input), {}, allDomains());
     const created = await appsOps.createApp(input, actor);
     // env, DATA_DIR (SQLite, uploads) and the live release, daily
@@ -125,6 +132,7 @@ export const methods: Record<string, Handler> = {
   "apps.update": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
     await appsOps.checkSchedules(input.crons);
+    await envGroups.assertGroupsExist(input.env_groups);
     appsOps.assertDomainsFree(appsOps.inputHosts(input), { app: input.name }, allDomains());
     await appsOps.updateApp(input.name, input, actor);
     await previewsOps.reconcilePreviews(input.name, actor);
@@ -152,20 +160,31 @@ export const methods: Record<string, Handler> = {
     return appsOps.readDeployLog(id, v.int(p.offset ?? 0, 0, 1e12, "offset"));
   },
   // Values never leave the agent without a code; the editor shows masks and keeps masked values unchanged.
-  "apps.env.get": async (p) => Object.fromEntries(Object.keys(await appsOps.getEnv(p.name)).map((k) => [k, ENV_MASK])),
-  "apps.env.reveal": (p) => appsOps.getEnv(p.name),
+  "apps.env.get": async (p) => masked(await appsOps.getEnv(p.name, envScope(p.scope))),
+  "apps.env.reveal": (p) => appsOps.getEnv(p.name, envScope(p.scope)),
   "apps.env.set": async (p, actor) => {
-    const current = await appsOps.getEnv(p.name);
-    const vars: Record<string, string> = {};
-    for (const [k, val] of Object.entries((p.vars ?? {}) as Record<string, unknown>)) {
-      const key = v.envKey(k);
-      if (val === ENV_MASK) {
-        if (!(key in current)) throw new Error(`${key}: enter a value`);
-        vars[key] = current[key]!;
-      } else vars[key] = v.envValue(val);
-    }
-    return appsOps.setEnv(p.name, vars, actor);
+    const scope = envScope(p.scope);
+    return appsOps.setEnv(p.name, unmask(p.vars, await appsOps.getEnv(p.name, scope)), actor, scope);
   },
+  "apps.attachDatabase": async (p, actor) => {
+    const app = apps.get(v.appName(p.name));
+    if (!app) throw new Error("no such app");
+    if (!["postgres", "mariadb"].includes(p.engine)) throw new Error("engine: postgres or mariadb");
+    const env = { get: () => appsOps.getEnv(app.name), set: (vars: Record<string, string>) => appsOps.setEnv(app.name, vars, actor) };
+    const r = await services.attachDatabaseToApp(app.name, p.engine, p.database, p.key, env, actor);
+    if (app.active_slot) await appsOps.appAction(app.name, "restart", actor).catch(() => {});
+    return r;
+  },
+
+  // ---- shared variables (groups given to several apps)
+  "envGroups.list": () => envGroups.listGroups(),
+  "envGroups.get": async (p) => masked(await envGroups.readGroup(p.name)),
+  "envGroups.reveal": (p) => envGroups.readGroup(p.name),
+  "envGroups.save": async (p, actor) => {
+    const current = await envGroups.readGroup(p.name).catch(() => ({}));
+    return envGroups.saveGroup(p.name, unmask(p.vars, current), actor);
+  },
+  "envGroups.remove": (p, actor) => envGroups.removeGroup(p.name, actor),
   "apps.addDatabase": async (p, actor) => {
     const app = apps.get(v.appName(p.name));
     if (!app) throw new Error("no such app");
@@ -196,6 +215,10 @@ export const methods: Record<string, Handler> = {
     if (!r.deploy) return (await previewsOps.onPush(String(p.name), String(p.ref ?? ""), String(p.body ?? ""), source)) ?? r;
     if (apps.get(p.name)?.auto_deploy === 0) return { deploy: false, reason: "auto deploy is off" };
     return { ...r, id: appsOps.startDeploy(p.name, "push", source) };
+  },
+  "apps.prWebhook": async (p) => {
+    appsOps.verifyWebhook(p.name, String(p.body ?? ""), String(p.signature ?? ""), ""); // throws on a bad signature
+    return previewsOps.onPullRequest(String(p.name), String(p.body ?? ""));
   },
 
   // ---- previews (branch deploys under a wildcard domain)
@@ -564,6 +587,26 @@ function parseDomains(x: unknown): string[] {
   return [...new Set(list.map((d) => (d === "*" ? "*" : v.domain(d))))];
 }
 
-function hideSecret<T extends { webhook_secret?: string }>(a: T): T {
-  return { ...a, webhook_secret: a.webhook_secret ? "set" : "" };
+function hideSecret<T extends { webhook_secret?: string; env_running?: string; env_built?: string }>(a: T): T {
+  return { ...a, webhook_secret: a.webhook_secret ? "set" : "", env_running: undefined, env_built: undefined };
+}
+
+function envScope(s: unknown): appsOps.EnvScope {
+  if (s === undefined || s === "" || s === "production") return "production";
+  if (s === "preview") return "preview";
+  throw new Error("scope: production or preview");
+}
+const masked = (env: Record<string, string>) => Object.fromEntries(Object.keys(env).map((k) => [k, ENV_MASK]));
+
+/** Editor input to variables: a masked value keeps what is stored. */
+function unmask(input: unknown, current: Record<string, string>): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const [k, val] of Object.entries((input ?? {}) as Record<string, unknown>)) {
+    const key = v.envKey(k);
+    if (val === ENV_MASK) {
+      if (!(key in current)) throw new Error(`${key}: enter a value`);
+      vars[key] = current[key]!;
+    } else vars[key] = v.envValue(val);
+  }
+  return vars;
 }

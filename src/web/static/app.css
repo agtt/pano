@@ -168,6 +168,8 @@ form.danger { max-width: 420px; }
 .flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; overflow-wrap: anywhere; }
 .flash.ok { background: var(--good-bg); color: var(--good); }
 .flash.err { background: var(--bad-bg); color: var(--bad); }
+.flash.warn { background: var(--warn-bg); color: var(--warn); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.flash.warn form { margin: 0; }
 .secret { user-select: all; }
 
 pre.log, pre.fix {

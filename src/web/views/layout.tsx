@@ -4,6 +4,7 @@ import { t } from "../i18n.ts";
 export const NAV: [string, string][] = [
   ["/", "Home"],
   ["/apps", "Apps"],
+  ["/env-groups", "Shared variables"],
   ["/sites", "Sites"],
   ["/databases", "Databases"],
   ["/services", "Services"],

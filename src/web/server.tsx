@@ -28,6 +28,7 @@ import { VulnsCard, type VulnView } from "./views/vulns.tsx";
 import { TuneCard, type TuneView } from "./views/tune.tsx";
 import { FirewallCard, type FirewallView } from "./views/firewall.tsx";
 import { Card, Layout } from "./views/layout.tsx";
+import { EnvGroupsPage, type EnvGroupRow } from "./views/envgroups.tsx";
 import { WordPressCard, WordPressPage, WpSecretPage, type WpDetectView, type WpStatusView } from "./views/wordpress.tsx";
 import {
   ActivityPage,
@@ -199,26 +200,35 @@ export function createWebApp() {
     return `/apps/${a.name}`;
   }));
   app.get("/apps/:name", (c) => appPage(c, c.req.param("name")));
-  async function appPage(c: Context<Env>, name: string, revealed?: Record<string, string>) {
+  async function appPage(c: Context<Env>, name: string, revealed?: { scope: "production" | "preview"; vars: Record<string, string> }) {
     const deploy = Number(c.req.query("deploy")) || undefined;
+    const envOf = (scope: "production" | "preview") =>
+      revealed?.scope === scope ? Promise.resolve(revealed.vars) : call<Record<string, string>>("apps.env.get", { name, scope }).catch(() => ({}));
     try {
-      const [a, envVars, logs, runtimes] = await Promise.all([
+      const [a, envVars, previewEnv, logs, runtimes] = await Promise.all([
         call<AppRow>("apps.get", { name }),
-        revealed ?? call("apps.env.get", { name }).catch(() => ({})),
+        envOf("production"),
+        envOf("preview"),
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
       ]);
-      const [edge, gh, crons, history] = await Promise.all([
+      const [edge, gh, crons, history, mariadb, pg] = await Promise.all([
         call("edge.status"),
         call("github.status"),
         call("apps.crons", { name }).catch(() => undefined),
         call("metrics.history", { range: parseRange(c.req.query("range")), app: name }).catch(() => null),
+        call<{ databases: { name: string; system: boolean }[] }>("db.list").catch(() => ({ databases: [] })),
+        call<{ name: string; system: boolean }[]>("pg.list").catch(() => []),
       ]);
+      const databases = [
+        ...mariadb.databases.filter((d) => !d.system).map((d) => ({ engine: "mariadb" as const, name: d.name })),
+        ...pg.filter((d) => !d.system).map((d) => ({ engine: "postgres" as const, name: d.name })),
+      ];
       const hooks = edge.settings.hooksDomain;
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
       const github = { connected: gh.connected, repo: m?.[1] ?? "" };
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} crons={crons} history={history} />);
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={revealed?.scope} previewEnv={previewEnv} databases={databases} crons={crons} history={history} />);
     } catch (e) {
       return c.redirect(err("/apps", e));
     }
@@ -255,18 +265,36 @@ export function createWebApp() {
     await call("apps.action", { name, action: f.action }, actor(c));
     return `/apps/${name}`;
   }));
-  app.post("/apps/:name/env", act("/apps", async (c, f) => {
-    const name = c.req.param("name")!;
+  /** The KEY=value editor's text; # comments and blank lines are skipped. */
+  const parseEnvText = (text: unknown) => {
     const vars: Record<string, string> = {};
-    for (const line of String(f.env ?? "").split(/\r?\n/)) {
+    for (const line of String(text ?? "").split(/\r?\n/)) {
       const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
       if (m) vars[m[1]!] = m[2]!.trim().replace(/^(['"])(.*)\1$/, "$2");
       else if (line.trim() && !line.trim().startsWith("#")) throw new Error(`cannot parse line: ${line.slice(0, 40)}`);
     }
+    return vars;
+  };
+  const envScope = (f: Record<string, any>) => (f.scope === "preview" ? "preview" : "production");
+  app.post("/apps/:name/env", act("/apps", async (c, f) => {
+    const name = c.req.param("name")!;
+    const vars = parseEnvText(f.env);
     needOtp(c, f.otp);
-    await call("apps.env.set", { name, vars }, actor(c));
+    await call("apps.env.set", { name, vars, scope: envScope(f) }, actor(c));
     return `/apps/${name}`;
   }));
+  app.post("/apps/:name/database/attach", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      const [engine, database] = String(f.database ?? "").split(/:(.*)/s);
+      needOtp(c, f.otp);
+      const r = await call("apps.attachDatabase", { name, engine, database, key: f.key }, actor(c));
+      return back(c, `/apps/${name}`, `${r.key} connected to ${r.database} (own user ${r.user})`);
+    } catch (e) {
+      return c.redirect(err(`/apps/${name}`, e));
+    }
+  });
   app.post("/apps/:name/rollback", act("/apps", async (c) => {
     const name = c.req.param("name")!;
     const r = await call("apps.rollback", { name }, actor(c));
@@ -289,7 +317,8 @@ export function createWebApp() {
     try {
       needOtp(c, f.otp);
       // Rendered into this response only; the redirect-free page keeps values out of URLs and history.
-      return appPage(c, name, await call("apps.env.reveal", { name }, actor(c)));
+      const scope = envScope(f);
+      return appPage(c, name, { scope, vars: await call("apps.env.reveal", { name, scope }, actor(c)) });
     } catch (e) {
       return c.redirect(err(`/apps/${name}`, e));
     }
@@ -450,6 +479,34 @@ export function createWebApp() {
     needOtp(c, f.otp);
     await call("sites.delete", { name: c.req.param("name"), confirm: f.confirm, removeFiles: f.removeFiles === "1" }, actor(c));
     return "/sites";
+  }));
+
+  // ---- shared variables
+  async function envGroupsPage(c: Context<Env>, edit?: { name: string; vars: Record<string, string>; revealed: boolean }) {
+    const groups = await call<EnvGroupRow[]>("envGroups.list");
+    const name = c.req.query("edit");
+    if (!edit && name && groups.some((g) => g.name === name)) edit = { name, vars: await call("envGroups.get", { name }), revealed: false };
+    return page(c, t("Shared variables"), <EnvGroupsPage csrf={c.get("s").csrf} groups={groups} edit={edit} />);
+  }
+  app.get("/env-groups", (c) => envGroupsPage(c));
+  app.post("/env-groups", act("/env-groups", async (c, f) => {
+    needOtp(c, f.otp);
+    const r = await call("envGroups.save", { name: f.name, vars: parseEnvText(f.env) }, actor(c));
+    return r.apps.length ? `Saved; restart ${r.apps.join(", ")} to apply` : "Saved";
+  }));
+  app.post("/env-groups/:name/reveal", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      return envGroupsPage(c, { name, vars: await call("envGroups.reveal", { name }, actor(c)), revealed: true });
+    } catch (e) {
+      return c.redirect(err("/env-groups", e));
+    }
+  });
+  app.post("/env-groups/:name/delete", act("/env-groups", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("envGroups.remove", { name: c.req.param("name") }, actor(c));
   }));
 
   // ---- databases
@@ -1038,6 +1095,13 @@ export function createHookApp() {
     if (body.length > 1_000_000) return c.text("too large", 413);
     const event = c.req.header("x-github-event");
     if (event === "ping") return c.text("pong");
+    if (event === "pull_request") {
+      try {
+        return c.json(await call("apps.prWebhook", { name: c.req.param("name"), body, signature: c.req.header("x-hub-signature-256") ?? "" }, "github"), 202);
+      } catch {
+        return c.text("rejected", 403);
+      }
+    }
     if (event !== "push") return c.text("ignored", 202);
     let ref = "";
     try {

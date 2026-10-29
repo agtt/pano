@@ -52,10 +52,14 @@ export function normalizeEnvExclude(s: unknown): string {
   return items.join(",");
 }
 
-export function previewEnv(env: Record<string, string>, exclude: string, extra: Record<string, string> = {}): Record<string, string> {
+/**
+ * The app's env minus the prod-only variables, then the preview values (Vercel's "Preview"
+ * scope: a test Stripe key, a staging database), which are never excluded, then pano's own.
+ */
+export function previewEnv(env: Record<string, string>, exclude: string, overrides: Record<string, string> = {}, extra: Record<string, string> = {}): Record<string, string> {
   const rules = exclude.split(",").filter(Boolean);
   const dropped = (k: string) => rules.some((r) => (r.endsWith("*") ? k.startsWith(r.slice(0, -1)) : k === r));
-  return { ...Object.fromEntries(Object.entries(env).filter(([k]) => !dropped(k))), ...extra };
+  return { ...Object.fromEntries(Object.entries(env).filter(([k]) => !dropped(k))), ...overrides, ...extra };
 }
 
 // ---- which processes a preview runs ----
@@ -106,6 +110,15 @@ export const expiryFrom = (now: number, ttlDays: number) => now + ttlDays * DAY;
 
 export function expiredIds(previews: { id: number; expires_at: number }[], now: number): number[] {
   return previews.filter((p) => p.expires_at <= now).map((p) => p.id);
+}
+
+/** The pull request comment of a preview build (Markdown; the branch is shown as code). */
+export function previewComment(branch: string, host: string, sha: string, ok: boolean, deploy: number): string {
+  const b = "`" + branch.replace(/`/g, "") + "`";
+  const commit = sha ? ` (commit ${sha.slice(0, 7)})` : "";
+  return ok
+    ? `**Preview ready:** https://${host}\n\nBranch ${b}${commit}, deployed by pano.`
+    : `**Preview build failed** for branch ${b}${commit}: see deploy ${deploy} on the app's page in pano.`;
 }
 
 // ---- webhooks ----

@@ -31,8 +31,9 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - bun as package manager for every app (reads npm/yarn/pnpm lockfiles); any Node.js/Bun version side by side, pinned per app, checksum-verified.
 - Monorepos: one build, several processes (web + workers), per-process routes, memory limits.
 - Per-app env (masked in the UI), logs, cron jobs, persistent `DATA_DIR` (SQLite, uploads) included in backups.
+- Env like Vercel's: production values, preview-only values (never seen by the live app), shared variable groups for several apps (root-only files, the app's own value wins); the app page names the variables a restart would apply, and those built into the code (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, …) that need a redeploy.
 - Push-to-deploy from GitHub, GitLab, Gitea, Forgejo; optional GitHub connection with repo picker, deploy keys and commit status.
-- Preview deploys: pushes to other branches build `<branch>.<preview domain>` as an isolated app (own user, ports, `DATA_DIR`, env minus prod-only vars), TLS only for existing previews; removed on branch delete, after a TTL (7 days) or past the limit (3).
+- Preview deploys: pushes to other branches build `<branch>.<preview domain>` as an isolated app (own user, ports, `DATA_DIR`, env minus prod-only vars plus preview-only values), TLS only for existing previews; removed on branch delete, after a TTL (7 days) or past the limit (3). With GitHub connected, the link is commented on the branch's open pull requests and updated on every build.
 
 **Edge**
 - Caddy: automatic HTTPS (Let's Encrypt), HTTP/3, zstd/gzip, on-demand TLS for customer domains, Cloudflare real IP, security headers.
@@ -47,6 +48,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 **Databases and services (on demand)**
 - MariaDB: databases, users, grants, sizes, password reset; PostgreSQL (latest major); Valkey (Redis-compatible); SQLite per app.
 - "+ Database" creates DB + user and writes `DATABASE_URL`/`REDIS_URL` into the app env; the password never reaches the browser.
+- "Connect existing" gives an app its own user on a database that already exists (imported from cPanel/CyberPanel, or another app's), under any variable name; PostgreSQL roles join the database's owner so migrations work. Recovery brings these users back.
 - Memory of each service sized to the server's RAM.
 
 **Realtime and games (optional extensions, nothing on disk until installed)**

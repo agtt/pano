@@ -10,9 +10,11 @@
 import { appendFile, readdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
+import { envSnapshot, groupList, mergeEnv, normalizeGroups } from "../shared/env.ts";
 import { normalizeEnvExclude, PREVIEW_MAX_DEFAULT, PREVIEW_TTL_DEFAULT, validatePreviewDomain } from "../shared/preview.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
+import { groupFile, readGroup } from "./envgroups.ts";
 import { reportStatus } from "./github.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
@@ -53,6 +55,7 @@ export type AppInput = {
   preview_max: number;
   preview_ttl_days: number;
   preview_env_exclude: string;
+  env_groups: string;
 };
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
@@ -83,6 +86,7 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     preview_max: v.int(x.preview_max || PREVIEW_MAX_DEFAULT, 1, 20, "max previews"),
     preview_ttl_days: v.int(x.preview_ttl_days || PREVIEW_TTL_DEFAULT, 1, 90, "preview lifetime (days)"),
     preview_env_exclude: normalizeEnvExclude(x.preview_env_exclude),
+    env_groups: normalizeGroups(x.env_groups),
   };
 }
 
@@ -250,6 +254,9 @@ SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=ENOSYS
 `;
 
+/** Shared variable groups, read by systemd (as root) before the app's own .env, which wins. */
+const groupEnvLines = (app: App) => groupList(app.env_groups ?? "").map((g) => `EnvironmentFile=-${groupFile(g)}\n`).join("");
+
 export function renderUnit(app: App, p: Process, path: string): string {
   const home = appHome(app.name);
   const sub = [app.root_dir, p.dir].filter(Boolean).join("/");
@@ -265,7 +272,7 @@ Type=simple
 User=${appUser(app.name)}
 Group=${appUser(app.name)}
 WorkingDirectory=${home}/slot-%i${sub ? `/${sub}` : ""}
-EnvironmentFile=-${home}/shared/.env
+${groupEnvLines(app)}EnvironmentFile=-${home}/shared/.env
 EnvironmentFile=${home}/run/${key}-%i.env
 Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data NEXT_TELEMETRY_DISABLED=1
 Environment=PATH=${path}
@@ -345,7 +352,8 @@ export async function rollback(name: string, actor: string) {
   const log = (l: string) => console.log(`[rollback ${name}] ${l}`);
   for (const p of procs.filter(isWeb)) await run(["systemctl", "restart", unitName(name, p, to)]);
   for (const p of procs.filter(isWeb)) await healthCheck(app, p, to, log);
-  apps.update(name, { active_slot: to, current_release: release });
+  // The older build's env is not known: no redeploy hint until the next deploy.
+  apps.update(name, { active_slot: to, current_release: release, env_running: envSnapshot(await effectiveEnv(app)), env_built: "" });
   await run(["ln", "-sfn", fsPath(`${home}/slot-${to}`), fsPath(`${home}/current`)]);
   for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(name, p, to)], { check: false });
   await applyEdge();
@@ -407,7 +415,7 @@ Type=oneshot
 User=${appUser(app.name)}
 Group=${appUser(app.name)}
 WorkingDirectory=${dir}
-EnvironmentFile=-${home}/shared/.env
+${groupEnvLines(app)}EnvironmentFile=-${home}/shared/.env
 Environment=NODE_ENV=production HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data PANO_CRON=${i}
 Environment=PATH=${path}
 ExecStart=${home}/run/cron-${i}.sh
@@ -443,6 +451,8 @@ export async function appAction(name: string, action: "start" | "stop" | "restar
   const units = activeUnits(app);
   if (!units.length) throw new Error(app.kind === "external" ? "this app has no service unit to control" : "deploy the app first");
   await run(["systemctl", action, ...units]);
+  // The processes now run with the current env: nothing left to restart for.
+  if (app.kind === "managed" && action !== "stop") apps.update(name, { env_running: envSnapshot(await effectiveEnv(app)) });
   audit(actor, `app.${action}`, { name });
 }
 
@@ -475,16 +485,32 @@ export async function appLogs(name: string, lines = 200): Promise<string> {
 
 // ---- env and deploy key ----------------------------------------------------
 
-export async function getEnv(name: string): Promise<Record<string, string>> {
+/**
+ * production: the app's own variables (read by the app, group-readable).
+ * preview: values only previews get (a test Stripe key, a staging database); root-only, the app never reads them.
+ */
+export type EnvScope = "production" | "preview";
+const envFile = (name: string, scope: EnvScope) => `${appHome(name)}/shared/${scope === "preview" ? ".env.preview" : ".env"}`;
+
+export async function getEnv(name: string, scope: EnvScope = "production"): Promise<Record<string, string>> {
   mustGet(name);
-  return parseEnv((await readText(`${appHome(name)}/shared/.env`)) ?? "");
+  return parseEnv((await readText(envFile(name, scope))) ?? "");
 }
 
-export async function setEnv(name: string, vars: Record<string, string>, actor: string) {
+export async function setEnv(name: string, vars: Record<string, string>, actor: string, scope: EnvScope = "production") {
   mustGet(name);
-  await writeAtomic(`${appHome(name)}/shared/.env`, formatEnv(vars), 0o640);
-  await run(["chgrp", appUser(name), fsPath(`${appHome(name)}/shared/.env`)], { check: false });
-  audit(actor, "app.env", { name, keys: Object.keys(vars) });
+  if (scope === "preview") await writeAtomic(envFile(name, scope), formatEnv(vars), 0o600);
+  else {
+    await writeAtomic(envFile(name, scope), formatEnv(vars), 0o640);
+    await run(["chgrp", appUser(name), fsPath(envFile(name, scope))], { check: false });
+  }
+  audit(actor, "app.env", { name, scope, keys: Object.keys(vars) });
+}
+
+/** What the app's processes get: its shared variable groups in order, then its own variables. */
+export async function effectiveEnv(app: App): Promise<Record<string, string>> {
+  const groups = await Promise.all(groupList(app.env_groups ?? "").map((g) => readGroup(g).catch(() => ({}))));
+  return mergeEnv(groups, parseEnv((await readText(envFile(app.name, "production"))) ?? ""));
 }
 
 /** Read-only deploy key for private repositories (add it to the repo, not to an account). */
@@ -557,6 +583,7 @@ async function deploy(app: App, id: number, target: DeployTarget) {
   const procs = procsOf(app);
   let binPath = await toolPath(app);
   let commit = "";
+  let builtEnv = "";
 
   try {
     await ensureAppHome(app.name); // brings homes made before the root-owned layout up to date
@@ -599,6 +626,8 @@ async function deploy(app: App, id: number, target: DeployTarget) {
       await step(plan.install);
       await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false });
     }
+    // What this build and the new processes read; compared later to tell what a restart or redeploy would change.
+    builtEnv = envSnapshot(await effectiveEnv(app));
     if (plan.build) {
       await step(plan.build);
       await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true });
@@ -625,7 +654,7 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     await step("switch traffic");
     const previous = app.active_slot as "a" | "b" | "";
     if (!target.get()) throw new Error("removed while it was building");
-    target.update({ active_slot: slot, current_release: release });
+    target.update({ active_slot: slot, current_release: release, env_running: builtEnv, env_built: builtEnv });
     await run(["ln", "-sfn", fsPath(`${home}/slot-${slot}`), fsPath(`${home}/current`)]);
     await writeCrons(target.get()!);
     for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(app.name, p, slot)], { check: false });
@@ -701,7 +730,9 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     // The install step runs third-party scripts (postinstall); it never sees the
     // app's secrets or data: both directories are empty there (a linked .env just
     // goes missing). Only the build gets the env (frameworks inline it).
-    ...(o.envFile ? [`EnvironmentFile=-${home}/shared/.env`] : [`TemporaryFileSystem=${home}/shared:ro ${home}/data:ro`]),
+    ...(o.envFile
+      ? [...groupEnvLines(app).split("\n").filter(Boolean), `EnvironmentFile=-${home}/shared/.env`]
+      : [`TemporaryFileSystem=${home}/shared:ro ${home}/data:ro`]),
   ];
   const env = {
     HOME: home,

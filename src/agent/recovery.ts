@@ -15,7 +15,7 @@ import { fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { objectOf } from "./crypto-stream.ts";
-import { appHome, appUser, ensureAppHome, getEnv, startDeploy, writeUnits } from "./apps.ts";
+import { appHome, appUser, effectiveEnv, ensureAppHome, getEnv, startDeploy, writeUnits } from "./apps.ts";
 import {
   backupHost,
   backupKey,
@@ -35,7 +35,7 @@ import { ident, lit, restoreCommand, sql } from "./mysql.ts";
 import { reprovisionSite, startRestoredSite } from "./php.ts";
 import * as realtime from "./realtime.ts";
 import { install as installRuntime, runtimeBin } from "./runtimes.ts";
-import { ensureService, pgEnsure, pgEnsureDb, pgName, pgRestoreCommand, recordedServices, reinstall, type ServiceKey } from "./services.ts";
+import { ensureService, pgEnsure, pgEnsureDb, pgGrantAccess, pgName, pgRestoreCommand, recordedServices, reinstall, type ServiceKey } from "./services.ts";
 import { apps, audit, backups, settings, sites, type BackupJob } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 import * as turn from "./turn.ts";
@@ -268,7 +268,7 @@ async function restoreJob(job: BackupJob) {
   }
   if (job.kind === "postgres") {
     await pgEnsureDb(pgName(job.target));
-    return loadDump(job, b, pgRestoreCommand(job.target));
+    return loadDump(job, b, await pgRestoreCommand(job.target));
   }
   const tmp = `${paths.data}/tmp/recover-${job.id}-${Date.now()}`;
   await ensureDir(tmp, 0o700);
@@ -321,6 +321,7 @@ export async function ensureDbUser(url: string) {
 }
 
 const redact = (url: string) => url.replace(/\/\/([^:/@]+):[^@]*@/, "//$1:•••@");
+const DB_URL = /^(postgres(ql)?|mysql|mariadb|rediss?):\/\//;
 
 async function rebuild(actor: string) {
   log(`recovery of ${backupHost()} started`);
@@ -346,8 +347,8 @@ async function rebuild(actor: string) {
       const job = jobs.find((j) => j.kind === "app" && j.target === app.name);
       if (job) await restoreJob(job);
       else log(`  ${app.name} has no backup job: only its settings come back`);
-      const env = await getEnv(app.name);
-      for (const k of ["DATABASE_URL", "REDIS_URL"]) if (env[k]) urls.push(env[k]);
+      // Any variable may hold a local database (an attached one under its own name, one from a shared group).
+      for (const val of Object.values(await effectiveEnv(app))) if (DB_URL.test(val) && !urls.includes(val)) urls.push(val);
     });
   }
   // A server where MariaDB was there before pano has no record of it: what the data needs decides.
@@ -362,6 +363,12 @@ async function rebuild(actor: string) {
   for (const [k, password] of needed) await step(`service ${k} for the restored data`, () => ensureService(k, actor, password));
   for (const url of urls) if (!url.startsWith("redis")) await step(`database user ${redact(url)}`, () => ensureDbUser(url));
   for (const job of jobs.filter((j) => j.kind === "mysql" || j.kind === "postgres")) await step(`database ${job.target}`, () => restoreJob(job));
+  // Roles of apps attached to a PostgreSQL database another role owns get their access back.
+  for (const url of urls.filter((u) => /^postgres(ql)?:/.test(u))) {
+    const u = new URL(url);
+    if (!["127.0.0.1", "localhost"].includes(u.hostname) || !u.username) continue;
+    await step(`access of ${decodeURIComponent(u.username)} to ${u.pathname.slice(1)}`, async () => void (await pgGrantAccess(u.pathname.slice(1), decodeURIComponent(u.username))));
+  }
 
   const phpSites = sites.list().filter((s) => s.kind === "php");
   for (const site of phpSites) await step(`site ${site.name}: PHP ${site.php_version}`, () => reprovisionSite(site, actor));

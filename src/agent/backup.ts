@@ -504,7 +504,7 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
     where = `database ${db}`;
   } else if (job.kind === "postgres") {
     const db = pgName(target || job.target);
-    cmd = pgRestoreCommand(db);
+    cmd = await pgRestoreCommand(db);
     where = `PostgreSQL database ${db}`;
   } else {
     where = `${paths.data}/restore/${job.name}-${runId}-${Date.now()}`;

@@ -99,13 +99,36 @@ export async function link(app: App, deployKey: string, actor: string) {
   const config = { url, content_type: "json", secret: app.webhook_secret, insecure_ssl: "0" };
   const existing = list.data.find((h) => h.config.url === url);
   const hook = existing
-    ? await gh(`${base}/hooks/${existing.id}`, { method: "PATCH", body: { config, events: ["push"], active: true } })
-    : await gh(`${base}/hooks`, { method: "POST", body: { name: "web", config, events: ["push"], active: true } });
+    ? await gh(`${base}/hooks/${existing.id}`, { method: "PATCH", body: { config, events: ["push", "pull_request"], active: true } })
+    : await gh(`${base}/hooks`, { method: "POST", body: { name: "web", config, events: ["push", "pull_request"], active: true } });
   if (hook.status !== 200 && hook.status !== 201) throw fail("webhook", hook);
 
   audit(actor, "github.link", { app: app.name, repo: `${r.owner}/${r.repo}` });
   // Private repositories are cloned over SSH with the deploy key.
   return { repo: `${r.owner}/${r.repo}`, sshUrl: `git@github.com:${r.owner}/${r.repo}.git`, webhook: url };
+}
+
+const marker = (app: string) => `<!-- pano-preview:${app} -->`;
+
+/**
+ * The preview's comment on the open pull requests of a branch: one per pull request and app,
+ * edited in place on every build (link once live, or that the build failed). Needs the token's
+ * "Pull requests: read and write"; without it nothing happens. Never fails a deploy.
+ */
+export async function commentPreview(app: App, branch: string, text: string) {
+  const r = parseRepo(app.repo);
+  if (!r || !(await status()).connected) return;
+  const base = `/repos/${r.owner}/${r.repo}`;
+  const pulls = await gh<{ number: number }[]>(`${base}/pulls?state=open&per_page=10&head=${encodeURIComponent(`${r.owner}:${branch}`)}`);
+  if (pulls.status !== 200) return;
+  const body = `${marker(app.name)}\n${text}`;
+  for (const pr of pulls.data) {
+    const list = await gh<{ id: number; body?: string }[]>(`${base}/issues/${pr.number}/comments?per_page=100`);
+    if (list.status !== 200) continue;
+    const mine = list.data.find((c) => c.body?.startsWith(marker(app.name)));
+    if (mine) await gh(`${base}/issues/comments/${mine.id}`, { method: "PATCH", body: { body } });
+    else await gh(`${base}/issues/${pr.number}/comments`, { method: "POST", body: { body } });
+  }
 }
 
 /** Commit status shown next to the commit and in pull requests. Never fails a deploy. */

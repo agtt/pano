@@ -93,6 +93,24 @@ export async function grant(db: unknown, user: unknown, actor: string) {
   audit(actor, "db.grant", { db: name, user: u });
 }
 
+/** A user (new, or its password reset) with every privilege on one existing database and nothing else. */
+export async function attachUser(db: string, user: string, password: string) {
+  const name = v.dbName(db);
+  if (PROTECTED_DBS.has(name)) throw new Error(`${name} is protected`);
+  const u = v.dbUser(user);
+  if (SYSTEM_USERS.has(u)) throw new Error(`${u} is a system account`);
+  if (!(await sql(`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${lit(name)};`)).length) throw new Error(`no database ${name}`);
+  await sql(
+    [
+      `CREATE USER IF NOT EXISTS ${lit(u)}@'localhost' IDENTIFIED BY ${lit(password)};`,
+      `ALTER USER ${lit(u)}@'localhost' IDENTIFIED BY ${lit(password)};`,
+      // "_" is a wildcard in a database-level grant: escaped, a_b cannot also match axb.
+      `GRANT ALL PRIVILEGES ON ${ident(name.replace(/_/g, "\\_"))}.* TO ${lit(u)}@'localhost';`,
+      "FLUSH PRIVILEGES;",
+    ].join("\n"),
+  );
+}
+
 /** mysqldump argv for a consistent, non-locking dump of one database. */
 export function dumpCommand(db: string): string[] {
   return ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--events", "--hex-blob", "--", v.dbName(db)];
