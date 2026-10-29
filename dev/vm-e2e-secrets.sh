@@ -31,7 +31,7 @@ post() { curl -s -b "$JAR" -o /dev/null -w '%{http_code} %{redirect_url}\n' -H "
 
 step "+ Database: PostgreSQL for $APP, URL written into its env, app restarted"
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c 'keys'
-post --data-urlencode engine=postgres --data-urlencode "otp=$(otp -1)" "$URL/apps/$APP/database" | sed 's/%20/ /g'
+post --data-urlencode engine=postgres --data-urlencode "otp=$(otp 1)" "$URL/apps/$APP/database" | sed 's/%20/ /g'
 rpc apps.env.get "{\"name\":\"$APP\"}" | jq -c .
 sleep 3
 PID=$(R systemctl show -p MainPID --value "pano-app-$APP@$(rpc apps.get "{\"name\":\"$APP\"}" | jq -r .active_slot)")
@@ -45,6 +45,7 @@ step "masked env: reveal needs a code"
 printf 'reveal, no code   : '; post "$URL/apps/$APP/env/reveal" | sed 's/%20/ /g; s/.*err=//'
 printf 'reveal, wrong code: '; post --data-urlencode otp=123456 "$URL/apps/$APP/env/reveal" | sed 's/%20/ /g; s/.*err=//'
 printf 'reveal, code      : '
+sleep 31 # the next code: each one is good once
 curl -s -b "$JAR" -H "Origin: $URL" --data-urlencode "_csrf=$CSRF" --data-urlencode "otp=$(otp 1)" "$URL/apps/$APP/env/reveal" | grep -c 'DATABASE_URL=postgres://' || true
 printf 'save masked lines keeps values: '
 R /opt/pano/bin/pano rpc apps.env.set "{\"name\":\"$APP\",\"vars\":{\"DATABASE_URL\":\"••••••••\",\"EXTRA\":\"1\"}}" >/dev/null
