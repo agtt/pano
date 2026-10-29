@@ -247,6 +247,8 @@ CREATE TABLE IF NOT EXISTS containers (
   volumes TEXT NOT NULL DEFAULT '[]',
   command TEXT NOT NULL DEFAULT '',
   memory_mb INTEGER NOT NULL DEFAULT 512,
+  digest TEXT NOT NULL DEFAULT '',
+  read_only INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS vpn_peers (
@@ -292,6 +294,8 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
+  ["containers", "digest", "TEXT NOT NULL DEFAULT ''"],
+  ["containers", "read_only", "INTEGER NOT NULL DEFAULT 0"],
   ["backup_runs", "dest", "TEXT NOT NULL DEFAULT 'a'"],
   ["backup_runs", "engine", "TEXT NOT NULL DEFAULT 'archive'"],
 ];
@@ -555,6 +559,10 @@ export type Container = {
   volumes: string[];
   command: string;
   memory_mb: number;
+  /** sha256:... the tag resolved to when it was saved or last updated; this is what runs ("" on old rows: tag) */
+  digest: string;
+  /** 1: root filesystem read-only (volumes stay writable) */
+  read_only: number;
   created_at: number;
 };
 
@@ -571,9 +579,9 @@ export const containers = {
   upsert(c: Omit<Container, "created_at">) {
     state()
       .query(
-        `INSERT INTO containers (name, image, port, host_port, domains, volumes, command, memory_mb, created_at)
-         VALUES ($name, $image, $port, $host_port, $domains, $volumes, $command, $memory_mb, $created_at)
-         ON CONFLICT(name) DO UPDATE SET image=$image, port=$port, host_port=$host_port, domains=$domains, volumes=$volumes, command=$command, memory_mb=$memory_mb`,
+        `INSERT INTO containers (name, image, port, host_port, domains, volumes, command, memory_mb, digest, read_only, created_at)
+         VALUES ($name, $image, $port, $host_port, $domains, $volumes, $command, $memory_mb, $digest, $read_only, $created_at)
+         ON CONFLICT(name) DO UPDATE SET image=$image, port=$port, host_port=$host_port, domains=$domains, volumes=$volumes, command=$command, memory_mb=$memory_mb, digest=$digest, read_only=$read_only`,
       )
       .run({ ...c, domains: JSON.stringify(c.domains), volumes: JSON.stringify(c.volumes), created_at: now() } as any);
   },

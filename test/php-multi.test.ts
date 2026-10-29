@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderQuadlet, validateContainer } from "../src/agent/containers.ts";
+import { renderQuadlet, repoOf, runRef, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
@@ -124,11 +124,25 @@ describe("containers", () => {
     expect(() => validateContainer({ ...base, image: "redis", port: "", domains: "a.example.com" })).toThrow();
   });
   test("quadlet publishes on localhost only, in its own user namespace", () => {
-    const q = renderQuadlet({ name: "cache", image: "docker.io/library/redis:7-alpine", port: 6379, host_port: 5100, domains: [], volumes: ["/data"], command: "", memory_mb: 256, created_at: 0 });
+    const q = renderQuadlet({ name: "cache", image: "docker.io/library/redis:7-alpine", port: 6379, host_port: 5100, domains: [], volumes: ["/data"], command: "", memory_mb: 256, digest: "", read_only: 0, created_at: 0 });
     expect(q).toContain("PublishPort=127.0.0.1:5100:6379");
     expect(q).toContain("UserNS=auto");
     expect(q).toContain("Volume=/srv/pano/containers/cache/v0:/data:U,Z");
     expect(q).toContain("--memory=256m");
+    expect(q).toContain("Image=docker.io/library/redis:7-alpine");
+    expect(q).not.toContain("ReadOnly");
+  });
+  test("a resolved digest is what runs, the tag stays for display; read-only is opt-in", () => {
+    const d = "sha256:" + "ab".repeat(32);
+    const c = { name: "cache", image: "docker.io/library/redis:7-alpine", port: 0, host_port: 5100, domains: [], volumes: [], command: "", memory_mb: 256, digest: d, read_only: 1, created_at: 0 };
+    const q = renderQuadlet(c);
+    expect(q).toContain(`Image=docker.io/library/redis@${d}`);
+    expect(q).toContain("ReadOnly=true");
+    expect(repoOf("localhost:5000/x/y:1")).toBe("localhost:5000/x/y");
+    expect(repoOf("ghcr.io/x/y")).toBe("ghcr.io/x/y");
+    expect(runRef({ image: "a/b:1", digest: "junk" })).toBe("a/b:1");
+    expect(validateContainer({ name: "cache", image: "redis", read_only: "1" }).read_only).toBe(1);
+    expect(validateContainer({ name: "cache", image: "redis" }).read_only).toBe(0);
   });
 });
 

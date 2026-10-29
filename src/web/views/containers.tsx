@@ -12,6 +12,8 @@ export type ContainerRow = {
   volumes: string[];
   command: string;
   memory_mb: number;
+  digest?: string;
+  read_only?: number;
   status: { active: string; memory: number };
 };
 export type Template = { image: string; port: number; volumes: string[]; env: Record<string, string>; memory_mb: number; note: string };
@@ -99,6 +101,9 @@ export function ContainerForm(p: { csrf: string; c?: Draft; note?: string; edit?
       <Field label="Domains" name="domains" value={(c.domains ?? []).join(", ")} placeholder="optional: status.example.com (HTTPS via the edge)" />
       <Field label="Volumes" name="volumes" value={(c.volumes ?? []).join(", ")} placeholder="/data" hint="paths inside the container that keep data" />
       <Field label="Memory limit (MB)" name="memory_mb" type="number" value={c.memory_mb ?? 512} />
+      <label class="check">
+        <input type="checkbox" name="read_only" value="1" checked={!!c.read_only} /> Read-only root filesystem <span class="muted small">(volumes stay writable; some images need to write elsewhere)</span>
+      </label>
       <Field label="Command" name="command" value={c.command} placeholder="optional, overrides the image's command" />
       <label class="field wide">
         <span>{t("Environment variables")}</span>
@@ -147,6 +152,11 @@ export function ContainerDetail(p: { csrf: string; c: ContainerRow & { logs: str
           <dt>Image</dt>
           <dd>
             <code>{c.image}</code>
+          </dd>
+          <dt>Digest</dt>
+          <dd>
+            {c.digest ? <code class="small">{c.digest}</code> : <span class="muted">not pinned yet: runs the tag. "Update image" pins it.</span>}
+            {c.digest ? <span class="muted small"> (runs this build; "Update image" re-resolves the tag)</span> : null}
           </dd>
           <dt>Port</dt>
           <dd>{c.port ? `127.0.0.1:${c.host_port} → ${c.port}` : "—"}</dd>

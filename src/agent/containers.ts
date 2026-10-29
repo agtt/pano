@@ -52,7 +52,7 @@ export async function installPodman(actor: string) {
   audit(actor, "containers.install", {});
 }
 
-export type ContainerInput = Omit<Container, "host_port" | "created_at"> & { env: Record<string, string> };
+export type ContainerInput = Omit<Container, "host_port" | "created_at" | "digest"> & { env: Record<string, string> };
 
 const IMAGE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]{0,254}$/;
 const VOLUME = /^\/[A-Za-z0-9._\/-]{1,200}$/;
@@ -81,6 +81,7 @@ export function validateContainer(x: Record<string, unknown>): ContainerInput {
     volumes: [...new Set(volumes)].slice(0, 10),
     command: v.command(x.command, "command"),
     memory_mb: v.int(x.memory_mb ?? 512, 64, 65536, "memory limit"),
+    read_only: x.read_only === "1" || x.read_only === 1 || x.read_only === true ? 1 : 0,
     env,
   };
 }
@@ -97,17 +98,49 @@ function nextPort(): number {
   return p;
 }
 
+const DIGEST = /^sha256:[a-f0-9]{64}$/;
+
+/** registry/name without tag or digest ("host:5000/x/y:1@sha256:.." -> "host:5000/x/y"). */
+export function repoOf(image: string): string {
+  const noDigest = image.split("@")[0]!;
+  const slash = noDigest.lastIndexOf("/");
+  const colon = noDigest.indexOf(":", slash + 1);
+  return colon === -1 ? noDigest : noDigest.slice(0, colon);
+}
+
+/** What actually runs: the image by digest, so a moved tag (or a hijacked registry account) changes nothing until "update". */
+export function runRef(c: Pick<Container, "image" | "digest">): string {
+  return DIGEST.test(c.digest) ? `${repoOf(c.image)}@${c.digest}` : c.image;
+}
+
+/** Pulls the tag and returns the digest it points to now. skopeo, when installed, is asked first (no pull needed to see it). */
+export async function resolveDigest(image: string): Promise<string> {
+  const given = image.match(/@(sha256:[a-f0-9]{64})$/)?.[1];
+  if (given) return given;
+  await run([PODMAN, "pull", "--quiet", image], { timeoutMs: 900_000 });
+  for (const cmd of [
+    [PODMAN, "image", "inspect", "--format", "{{.Digest}}", image],
+    ["skopeo", "inspect", "--format", "{{.Digest}}", `docker://${image}`],
+  ]) {
+    const r = await run(cmd, { check: false, timeoutMs: 120_000 });
+    const d = r.stdout.trim();
+    if (r.code === 0 && DIGEST.test(d)) return d;
+  }
+  // Dry-run and registries that give no digest (local images): run the tag as before.
+  return "";
+}
+
 export function renderQuadlet(c: Container): string {
   const lines = [
     "# Managed by pano.",
     "[Unit]",
-    `Description=pano container ${c.name} (${c.image})`,
+    `Description=pano container ${c.name} (${c.image}${c.digest ? ` ${c.digest.slice(0, 19)}` : ""})`,
     "After=network-online.target",
     "Wants=network-online.target",
     "",
     "[Container]",
     `ContainerName=pano-${c.name}`,
-    `Image=${c.image}`,
+    `Image=${runRef(c)}`,
     `EnvironmentFile=${envFile(c.name)}`,
     // Only reachable from this host; the edge or local apps connect to it.
     ...(c.port ? [`PublishPort=127.0.0.1:${c.host_port}:${c.port}`] : []),
@@ -115,6 +148,7 @@ export function renderQuadlet(c: Container): string {
     ...c.volumes.map((p, i) => `Volume=${dataDir(c.name)}/v${i}:${p}:U,Z`),
     "UserNS=auto",
     "NoNewPrivileges=true",
+    ...(c.read_only ? ["ReadOnly=true"] : []),
     "DropCapability=NET_RAW MKNOD AUDIT_WRITE",
     `PodmanArgs=--memory=${c.memory_mb}m --pids-limit=2048`,
     ...(c.command ? [`Exec=${c.command}`] : []),
@@ -151,7 +185,9 @@ export async function saveContainer(input: ContainerInput, actor: string): Promi
   // Empty secrets in templates (passwords, master keys) are generated here, once.
   const old = parseEnv((await readText(envFile(input.name))) ?? "");
   for (const [k, val] of Object.entries(env)) if (!val && /PASSWORD|KEY|SECRET|TOKEN/.test(k)) env[k] = old[k] || randomPassword(32);
-  const c: Container = { ...rest, host_port: prev?.host_port || nextPort(), created_at: prev?.created_at ?? 0 };
+  // Pinned once per image: saving other settings does not move a running container to a newer build.
+  const digest = prev && prev.image === input.image && prev.digest ? prev.digest : await resolveDigest(input.image);
+  const c: Container = { ...rest, digest, host_port: prev?.host_port || nextPort(), created_at: prev?.created_at ?? 0 };
   await ensureDir(paths.containerEnv, 0o700);
   await writeAtomic(envFile(c.name), formatEnv(env), 0o600);
   await ensureDir(paths.containers, 0o755);
@@ -177,9 +213,14 @@ function mustGet(name: string): Container {
 export async function containerAction(name: string, action: "start" | "stop" | "restart" | "pull", actor: string) {
   const c = mustGet(name);
   if (action === "pull") {
-    // New image of the same tag (security fixes), then a restart onto it.
-    await run([PODMAN, "pull", c.image], { timeoutMs: 900_000 });
+    // Re-resolves the tag (security fixes) and moves the container onto that digest, the one place it changes.
+    const next = { ...c, digest: await resolveDigest(c.image) };
+    await writeAtomic(quadlet(c.name), renderQuadlet(next), 0o644);
+    containers.upsert(next);
+    await run(["systemctl", "daemon-reload"]);
     await run(["systemctl", "restart", unitName(c.name)], { timeoutMs: 900_000 });
+    audit(actor, "container.pull", { name: c.name, from: c.digest, to: next.digest });
+    return;
   } else {
     await run(["systemctl", action, unitName(c.name)], { timeoutMs: 300_000 });
   }
