@@ -46,6 +46,8 @@ import {
   type CpReportView,
 } from "./views/pages.tsx";
 
+import { hostAllowed } from "./hosts.ts";
+
 type Env = { Variables: { s: Session } };
 
 /**
@@ -74,6 +76,8 @@ const SECURITY_HEADERS: Record<string, string> = {
 export function createWebApp() {
   const app = new Hono<Env>();
 
+  // Before anything else, login page included. The hook app is separate and has its own public Host.
+  app.use("*", async (c, next) => (hostAllowed(c.req.header("host"), env) ? next() : c.text("bad host", 421)));
   app.use("*", (c, next) => stepUp.run({}, next));
   app.use("*", async (c, next) => {
     await next();

@@ -52,6 +52,8 @@ export const env = {
   webPort: Number(process.env.PANO_WEB_PORT ?? 7800),
   /** Set by the panel when "panel over WireGuard" is on: the UI also listens on this VPN address. */
   webVpnHost: process.env.PANO_WEB_VPN_HOST ?? "",
+  /** Extra names the panel may be reached by (comma separated, e.g. a Tailscale MagicDNS name); other Host headers are refused. */
+  webHosts: process.env.PANO_WEB_HOSTS ?? "",
   /** Caddy's on-demand TLS "ask" endpoint, served by the agent on localhost only. */
   askPort: Number(process.env.PANO_ASK_PORT ?? 7801),
   /** Localhost-only listener for GitHub webhooks; the edge exposes just /hooks/* on the hooks domain. */
