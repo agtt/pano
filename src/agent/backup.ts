@@ -15,7 +15,9 @@
 import { S3Client } from "bun";
 import { Database } from "bun:sqlite";
 import { createHmac, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { realpath } from "node:fs/promises";
+import { isIP, isIPv4 } from "node:net";
 import { hostname } from "node:os";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
@@ -89,10 +91,7 @@ export async function setDest(d: DestId, input: Record<string, unknown>, actor: 
   const endpoint = String(input.endpoint ?? "").trim();
   // Plain http only to this machine (a local MinIO).
   if (endpoint && !/^(https:\/\/[A-Za-z0-9.-]+|http:\/\/127\.0\.0\.1)(:\d+)?\/?$/.test(endpoint)) throw new Error("endpoint must be an https URL");
-  // No https to internal addresses (cloud metadata, the LAN): the agent signs requests as root.
-  if (endpoint.startsWith("https://") && /^https:\/\/(localhost|[0-9.]+|[^/:]*\.(local|internal|localdomain))(:\d+)?\/?$/i.test(endpoint)) {
-    throw new Error("endpoint must be a public host name");
-  }
+  if (endpoint.startsWith("https://")) await assertPublicEndpoint(endpoint);
   if (!accountId && !endpoint) throw new Error("R2 account id or an S3 endpoint is required");
   const accessKeyId = String(input.accessKeyId ?? "").trim();
   if (!/^[A-Za-z0-9]{16,128}$/.test(accessKeyId)) throw new Error("invalid access key id");
@@ -124,10 +123,40 @@ export async function clearDest(d: DestId, actor: string) {
   audit(actor, "backup.dest.clear", { dest: d });
 }
 
+/** Loopback, private, link-local (cloud metadata), CGNAT, multicast and reserved addresses. */
+export function internalIp(ip: string): boolean {
+  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (isIPv4(v4)) {
+    const [a, b] = v4.split(".").map(Number) as [number, number];
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  const x = ip.toLowerCase();
+  return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || x.startsWith("ff");
+}
+
+/**
+ * No https to internal addresses (cloud metadata, the LAN): the agent signs requests as root.
+ * The host is taken from the parsed URL (hex/short IPv4 forms and trailing dots normalised)
+ * and every address it resolves to is checked.
+ */
+export async function assertPublicEndpoint(endpoint: string) {
+  let host: string;
+  try {
+    host = new URL(endpoint).hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  } catch {
+    throw new Error("endpoint must be an https URL");
+  }
+  const addrs = isIP(host) ? [host] : (await lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
+  if (!addrs.length) throw new Error(`endpoint ${host} does not resolve`);
+  if (addrs.some(internalIp)) throw new Error("endpoint must be a public host (not a local or private address)");
+}
+
 export async function creds(d: DestId) {
   const cfg = await getDest(d);
   const secret = (await readText(secretFile(d)))?.trim();
   if (!cfg.bucket || !cfg.accessKeyId || !secret || (!cfg.accountId && !cfg.endpoint)) throw new Error(`destination ${d} is not configured`);
+  // Again at every use: the name may resolve elsewhere than when it was saved.
+  if (cfg.endpoint.startsWith("https://")) await assertPublicEndpoint(cfg.endpoint);
   return { ...cfg, secret, url: (cfg.endpoint || `https://${cfg.accountId}.r2.cloudflarestorage.com`).replace(/\/$/, "") };
 }
 

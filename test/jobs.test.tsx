@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { due, parseSummary, regionFor } from "../src/agent/backup.ts";
+import { assertPublicEndpoint, due, internalIp, parseSummary, regionFor } from "../src/agent/backup.ts";
 import { maskSecrets, renderSiteCron } from "../src/agent/jobs.ts";
 import { judge, type Queue } from "../src/agent/queues.ts";
 import type { BackupJob, Site } from "../src/agent/state.ts";
@@ -93,4 +93,12 @@ test("daily and weekly backup schedules", () => {
   expect(due(job("weekly Sun 03:30", new Date(2026, 9, 24, 3, 31)), wed)).toBe(true);
   expect(due(job("weekly Wed 11:00", new Date(2026, 9, 21, 11, 1)), wed)).toBe(false);
   expect(due(job("weekly Wed 09:00", new Date(2026, 9, 21, 9, 1)), wed)).toBe(true);
+});
+
+test("backup endpoints never point at internal addresses", async () => {
+  for (const ip of ["127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"]) expect(internalIp(ip)).toBe(true);
+  for (const ip of ["1.1.1.1", "172.32.0.1", "2606:4700::1111"]) expect(internalIp(ip)).toBe(false);
+  // Hex, short and trailing-dot forms are normalised by the URL parser before the check.
+  for (const e of ["https://0x7f000001", "https://127.1", "https://169.254.169.254.", "https://[::1]:9000"]) await expect(assertPublicEndpoint(e)).rejects.toThrow();
+  await assertPublicEndpoint("https://1.1.1.1");
 });
