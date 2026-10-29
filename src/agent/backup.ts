@@ -24,7 +24,7 @@ import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
 import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
-import { decryptToFile, encryptStream } from "./crypto-stream.ts";
+import { decryptToFile, encryptStream, objectOf, type BackupContext } from "./crypto-stream.ts";
 import { dumpCommand, restoreCommand } from "./mysql.ts";
 import { apps, audit, backups, settings, state, type BackupJob, type BackupRun } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -362,7 +362,7 @@ async function executeArchive(job: BackupJob, runId: number, d: DestId) {
       return;
     }
     const proc = Bun.spawn([...LOW, ...cmd], { stdout: "pipe", stderr: "pipe", env: ENV });
-    const stream = proc.stdout.pipeThrough(new CompressionStream("gzip")).pipeThrough(encryptStream(key));
+    const stream = proc.stdout.pipeThrough(new CompressionStream("gzip")).pipeThrough(encryptStream(key, { kind: job.kind, job: job.name, object: objectOf(objectKey) }));
     const writer = s3.file(objectKey).writer({ partSize: 8 * 1024 * 1024, retry: 3, type: "application/octet-stream" });
     let bytes = 0;
     for await (const chunk of stream) {
@@ -513,23 +513,23 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
   if (DRY_RUN) return `[dry-run] would restore into ${where}`;
 
   if (r.engine === "restic") await restoreRestic(r, job, d, cmd, where);
-  else await restoreArchive(r, d, cmd ?? ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(where)]);
+  else await restoreArchive(r, job, d, cmd ?? ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(where)]);
   audit(actor, "backup.restore", { runId, where });
   return `restored into ${where}`;
 }
 
-async function restoreArchive(r: BackupRun, d: DestId, cmd: string[]) {
+async function restoreArchive(r: BackupRun, job: BackupJob, d: DestId, cmd: string[]) {
   const { s3 } = await client(d);
-  const res = await feedVerified(s3.file(r.object_key).stream(), await backupKey(), cmd, ENV);
+  const res = await feedVerified(s3.file(r.object_key).stream(), await backupKey(), { kind: job.kind, job: job.name, object: objectOf(r.object_key) }, cmd, ENV);
   if (res.code !== 0) throw new Error(`restore failed: ${res.stderr.split("\n").slice(-2).join(" ")}`);
 }
 
 /** Runs cmd with the decrypted backup on stdin, from a temporary copy that was fully verified first. */
-export async function feedVerified(src: ReadableStream<Uint8Array>, key: Buffer, cmd: string[], env?: Record<string, string>) {
+export async function feedVerified(src: ReadableStream<Uint8Array>, key: Buffer, expect: BackupContext, cmd: string[], env?: Record<string, string>) {
   await ensureDir(`${paths.data}/tmp`, 0o700);
   const tmp = `${paths.data}/tmp/restore-${randomBytes(8).toString("hex")}`;
   try {
-    await decryptToFile(src, key, fsPath(tmp));
+    await decryptToFile(src, key, expect, fsPath(tmp));
     const proc = Bun.spawn(cmd, { stdin: Bun.file(fsPath(tmp)), stdout: "ignore", stderr: "pipe", env });
     const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
     return { code, stderr: stderr.trim() };

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { createCipheriv } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { decryptStream, encryptStream } from "../src/agent/crypto-stream.ts";
+import { decryptStream, encryptStream, objectOf } from "../src/agent/crypto-stream.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { moveListenersToLocalhost } from "../src/agent/cutover.ts";
 import { parseOls, readServerConfig, readVhost, serializeOls } from "../src/agent/ols.ts";
@@ -73,11 +74,18 @@ describe("edge", () => {
 
 describe("backup encryption", () => {
   const key = Buffer.alloc(32, 7);
+  const ctx = { kind: "mysql", job: "shop", object: "host1/shop/20261027-031500.sql.gz.enc" };
+  const encrypt = async (data: Uint8Array, c = ctx) =>
+    Buffer.from(await new Response(new Blob([data as Uint8Array<ArrayBuffer>]).stream().pipeThrough(encryptStream(key, c))).arrayBuffer());
+  const decrypt = async (enc: Buffer, k = key, expect = ctx) =>
+    Buffer.from(await new Response(new Blob([enc]).stream().pipeThrough(decryptStream(k, expect))).arrayBuffer());
   const roundtrip = async (data: Uint8Array, k = key, mutate?: (b: Buffer) => Buffer) => {
-    let enc: Buffer = Buffer.from(await new Response(new Blob([data as Uint8Array<ArrayBuffer>]).stream().pipeThrough(encryptStream(key))).arrayBuffer());
+    let enc: Buffer = await encrypt(data);
     if (mutate) enc = mutate(enc);
-    return Buffer.from(await new Response(new Blob([enc]).stream().pipeThrough(decryptStream(k))).arrayBuffer());
+    return decrypt(enc, k);
   };
+  // 8 magic + 4 length + header + 8 nonce prefix
+  const headLen = (b: Buffer) => 8 + 4 + b.readUInt32BE(8) + 8;
 
   test("round-trips small and multi-chunk data", async () => {
     expect((await roundtrip(new Uint8Array(0))).length).toBe(0);
@@ -87,9 +95,40 @@ describe("backup encryption", () => {
   test("rejects a wrong key, tampering and truncation", async () => {
     const data = Buffer.alloc(5 * 1024 * 1024, 3);
     await expect(roundtrip(data, Buffer.alloc(32, 8))).rejects.toThrow();
-    await expect(roundtrip(data, key, (b) => ((b[100] = b[100]! ^ 1), b))).rejects.toThrow();
-    // drop the final chunk: 16-byte header + first chunk (4 + 4 MiB + 16)
-    await expect(roundtrip(data, key, (b) => b.subarray(0, 16 + 4 + 4 * 1024 * 1024 + 16))).rejects.toThrow("truncated");
+    await expect(roundtrip(data, key, (b) => ((b[headLen(b) + 100] = b[headLen(b) + 100]! ^ 1), b))).rejects.toThrow();
+    // drop the final chunk: header + first chunk (4 + 4 MiB + 16)
+    await expect(roundtrip(data, key, (b) => b.subarray(0, headLen(b) + 4 + 4 * 1024 * 1024 + 16))).rejects.toThrow("truncated");
+  });
+  test("a changed header fails (same length, so only the AAD catches it)", async () => {
+    const enc = await encrypt(Buffer.from("data"));
+    const at = enc.indexOf("shop", 12);
+    enc.write("shoq", at); // header says another job: caller expects "shop" -> mismatch
+    await expect(decrypt(enc)).rejects.toThrow("does not belong");
+    // the header is forged to match what the caller expects: chunk tags no longer verify
+    const other = await encrypt(Buffer.from("data"), { ...ctx, job: "shoq" });
+    await expect(decrypt(other, key, { ...ctx, job: "shoq" })).resolves.toBeDefined();
+    const forged = Buffer.from(other);
+    forged.write("shop", forged.indexOf("shoq", 12));
+    await expect(decrypt(forged)).rejects.toThrow("authentication failed");
+  });
+  test("an object of another job, kind or place is refused", async () => {
+    const enc = await encrypt(Buffer.from("data"));
+    await expect(decrypt(enc, key, { ...ctx, job: "blog" })).rejects.toThrow("does not belong");
+    await expect(decrypt(enc, key, { ...ctx, kind: "postgres" })).rejects.toThrow("does not belong");
+    await expect(decrypt(enc, key, { ...ctx, object: "host1/shop/20260101-000000.sql.gz.enc" })).rejects.toThrow("does not belong");
+    expect(objectOf("pano-backups/host1/shop/x.sql.gz.enc")).toBe("host1/shop/x.sql.gz.enc");
+  });
+  test("old (v1) backups still read", async () => {
+    const prefix = Buffer.alloc(8, 5);
+    const n = Buffer.alloc(12);
+    prefix.copy(n);
+    const c = createCipheriv("aes-256-gcm", key, n);
+    c.setAAD(Buffer.from([0, 0, 0, 0, 1]));
+    const body = Buffer.concat([c.update("legacy"), c.final(), c.getAuthTag()]);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(body.length);
+    const v1 = Buffer.concat([Buffer.from("PANOBK1\n"), prefix, len, body]);
+    expect((await decrypt(v1)).toString()).toBe("legacy");
   });
 });
 

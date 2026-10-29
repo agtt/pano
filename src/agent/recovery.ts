@@ -14,6 +14,7 @@ import { S3Client } from "bun";
 import { fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
+import { objectOf } from "./crypto-stream.ts";
 import { appHome, appUser, ensureAppHome, getEnv, startDeploy, writeUnits } from "./apps.ts";
 import {
   backupHost,
@@ -132,7 +133,7 @@ export async function restorePanel(kit: Kit, host?: string) {
   await ensureDir(stage, 0o700);
   await ensureDir(keep, 0o700);
   // Owners are kept (files under /etc/pano belong to the pano user); the stage is new and root-only.
-  const tar = await feedVerified(kitClient(found.dest).file(found.key).stream(), Buffer.from(kit.key, "base64"), ["tar", "-xf", "-", "-C", fsPath(stage)]);
+  const tar = await feedVerified(kitClient(found.dest).file(found.key).stream(), Buffer.from(kit.key, "base64"), { kind: "panel", job: "panel", object: objectOf(found.key) }, ["tar", "-xf", "-", "-C", fsPath(stage)]);
   if (tar.code !== 0) throw new Error(`unpacking failed: ${tar.stderr}`);
   // Only the panel's own dirs and databases are taken from the stage, and no symlinks: cp -a and install would follow or keep them as root.
   const links = await run(["find", fsPath(stage), "-type", "l"], { check: false });
@@ -230,6 +231,8 @@ async function latestBackup(job: BackupJob): Promise<{ d: DestId; key: string; e
   return best;
 }
 
+const ctxOf = (job: BackupJob, key: string) => ({ kind: job.kind, job: job.name, object: objectOf(key) });
+
 /** Unpacks a file backup (app or path job) into an empty directory. */
 async function unpack(job: BackupJob, b: { d: DestId; key: string; engine: "archive" | "restic" }, dir: string) {
   if (b.engine === "restic") {
@@ -239,15 +242,14 @@ async function unpack(job: BackupJob, b: { d: DestId; key: string; engine: "arch
   }
   const { s3 } = await client(b.d);
   // Site/app files are untrusted: no owners, no setuid bits, nothing outside dir.
-  const tar = await feedVerified(s3.file(b.key).stream(), await backupKey(), ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(dir)]);
+  const tar = await feedVerified(s3.file(b.key).stream(), await backupKey(), ctxOf(job, b.key), ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(dir)]);
   if (tar.code !== 0) throw new Error(`tar: ${tar.stderr.split("\n").at(-1)}`);
-  void job;
 }
 
 /** A database dump straight into the database. */
 async function loadDump(job: BackupJob, b: { d: DestId; key: string; engine: "archive" | "restic" }, cmd: string[]) {
   if (b.engine !== "restic") {
-    const res = await feedVerified((await client(b.d)).s3.file(b.key).stream(), await backupKey(), cmd);
+    const res = await feedVerified((await client(b.d)).s3.file(b.key).stream(), await backupKey(), ctxOf(job, b.key), cmd);
     if (res.code !== 0) throw new Error(`load failed: ${res.stderr.split("\n").slice(-2).join(" ")}`);
     return;
   }
