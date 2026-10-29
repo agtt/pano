@@ -1,3 +1,4 @@
+import { AppCharts, type History } from "./charts.tsx";
 import { formatProcesses, type ProcessSpec } from "../../shared/validate.ts";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
@@ -177,6 +178,7 @@ export function AppDetail(p: {
   github: { connected: boolean; repo: string };
   revealed?: boolean;
   crons?: { jobs: JobRow[]; logs: string };
+  history?: History | null;
 }) {
   const a = p.app;
   const managed = a.kind === "managed";
@@ -283,6 +285,8 @@ export function AppDetail(p: {
           </table>
         ) : null}
       </Card>
+
+      {p.history ? <AppCharts h={p.history} app={a.name} limitMb={managed ? a.memory_mb : undefined} /> : null}
 
       {p.deployId ? (
         <Card title={`Deploy #${p.deployId}`}>

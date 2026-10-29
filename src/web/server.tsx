@@ -11,6 +11,7 @@ import { addUser, csrfOk, generatePassword, killSessions, listUsers, login, logo
 import { checkUsername } from "../shared/admins.ts";
 import { AdminsPage, type AdminSecret } from "./views/admins.tsx";
 import { t } from "./i18n.ts";
+import { parseRange } from "./views/charts.tsx";
 import css from "./static/app.css" with { type: "text" };
 import js from "./static/app.js" with { type: "text" };
 import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
@@ -147,7 +148,10 @@ export function createWebApp() {
   };
 
   // ---- home
-  app.get("/", async (c) => page(c, t("Home"), <HomePage info={await call("system.info")} />));
+  app.get("/", async (c) => {
+    const [info, history] = await Promise.all([call("system.info"), call("metrics.history", { range: parseRange(c.req.query("range")) }).catch(() => null)]);
+    return page(c, t("Home"), <HomePage info={info} history={history} />);
+  });
 
   // ---- apps
   const runtimeList = () => call<{ runtime: string; version: string }[]>("runtimes.list");
@@ -200,12 +204,17 @@ export function createWebApp() {
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
       ]);
-      const [edge, gh, crons] = await Promise.all([call("edge.status"), call("github.status"), call("apps.crons", { name }).catch(() => undefined)]);
+      const [edge, gh, crons, history] = await Promise.all([
+        call("edge.status"),
+        call("github.status"),
+        call("apps.crons", { name }).catch(() => undefined),
+        call("metrics.history", { range: parseRange(c.req.query("range")), app: name }).catch(() => null),
+      ]);
       const hooks = edge.settings.hooksDomain;
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
       const github = { connected: gh.connected, repo: m?.[1] ?? "" };
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} crons={crons} />);
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={!!revealed} crons={crons} history={history} />);
     } catch (e) {
       return c.redirect(err("/apps", e));
     }

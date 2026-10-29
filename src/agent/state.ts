@@ -114,6 +114,17 @@ export type BackupRun = {
   engine: string;
 };
 
+/** Metric samples: res 60 = one point a minute (48 h), res 900 = 15-minute averages (30 days). One narrow row per value. */
+export const METRICS_DDL = `
+CREATE TABLE IF NOT EXISTS metrics (
+  res INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  value REAL NOT NULL,
+  PRIMARY KEY (res, key, ts)
+) WITHOUT ROWID;
+`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS apps (
@@ -215,7 +226,7 @@ CREATE TABLE IF NOT EXISTS audit (
   action TEXT NOT NULL,
   detail TEXT NOT NULL DEFAULT ''
 );
-`;
+${METRICS_DDL}`;
 
 let db: Database | null = null;
 

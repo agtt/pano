@@ -1,4 +1,5 @@
 import { fmtBytes, fmtDuration, t } from "../i18n.ts";
+import { ServerCharts, type History } from "./charts.tsx";
 import { Badge, Card } from "./layout.tsx";
 
 const TILES: { href: string; label: string; icon: string; desc: string }[] = [
@@ -31,7 +32,7 @@ function Meter({ used, total }: { used: number; total: number }) {
   return <meter class="meter" min={0} max={total || 1} value={used} high={(total || 1) * 0.85} optimum={0} />;
 }
 
-export function HomePage({ info }: { info: ServerInfo }) {
+export function HomePage({ info, history }: { info: ServerInfo; history?: History | null }) {
   const memUsed = info.memory.total - info.memory.available;
   return (
     <div class="home">
@@ -46,6 +47,7 @@ export function HomePage({ info }: { info: ServerInfo }) {
             </a>
           ))}
         </div>
+        {history ? <ServerCharts h={history} base="/" /> : null}
       </div>
       <aside>
         <Card title={t("Server")}>

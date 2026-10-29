@@ -301,7 +301,7 @@ export async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: M
   await run(["systemctl", "daemon-reload"]);
 }
 
-const activeUnits = (app: App): string[] =>
+export const activeUnits = (app: App): string[] =>
   app.kind === "external"
     ? (app.external_unit ? [app.external_unit] : [])
     : app.active_slot

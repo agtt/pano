@@ -7,6 +7,7 @@ import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startMonitor } from "./alerts.ts";
+import { startMetrics } from "./metrics.ts";
 import { startRealtime } from "./realtime.ts";
 import { startVulns } from "./vulns.ts";
 import { applyTuning } from "./tune.ts";
@@ -112,6 +113,7 @@ export async function startAgent() {
   ensureDefaultJobs();
   startScheduler();
   startMonitor();
+  startMetrics();
   startShield();
   startRealtime();
   startVulns();

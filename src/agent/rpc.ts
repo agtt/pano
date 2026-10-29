@@ -15,6 +15,7 @@ import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
 import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
+import { RANGES, metricsHistory, type Range } from "./metrics.ts";
 import * as queues from "./queues.ts";
 import * as realtime from "./realtime.ts";
 import * as firewall from "./firewall.ts";
@@ -97,6 +98,11 @@ export const methods: Record<string, Handler> = {
   "system.info": () => system.info(),
   "system.audit": () => system.audit(),
   "audit.list": () => auditList(300),
+  "metrics.history": (p) => {
+    const range = String(p.range ?? "24h");
+    if (!Object.hasOwn(RANGES, range)) throw new Error("range is 1h, 24h, 7d or 30d");
+    return metricsHistory(range as Range, p.app ? v.appName(p.app) : undefined);
+  },
 
   // ---- apps
   "apps.list": async () => Promise.all(apps.list().map(async (a) => ({ ...hideSecret(a), status: await appsOps.appStatus(a) }))),

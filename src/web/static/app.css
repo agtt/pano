@@ -16,10 +16,14 @@
   --header: #14202e;
   --header-text: #e8eef6;
   --radius: 8px;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
     --bg: #0f141a;
     --panel: #161d26;
     --text: #e3e9f1;
@@ -198,3 +202,23 @@ details.job .row { margin: 8px 0; }
 }
 img.qr { display: block; background: #fff; padding: 8px; border-radius: 8px; margin-bottom: 12px; }
 form.inline { display: inline; }
+
+/* metrics charts (inline SVG, colors from variables) */
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px 20px; }
+.charts + .charts { margin-top: 16px; }
+figure.chart { margin: 0; min-width: 0; }
+figure.chart figcaption { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 4px; }
+figure.chart svg { display: block; width: 100%; height: auto; }
+.legend { font-weight: 400; color: var(--muted); font-size: 12px; display: inline-flex; gap: 12px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 3px; }
+.sw.s1 { background: var(--chart-1); }
+.sw.s2 { background: var(--chart-2); }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .line.s1 { stroke: var(--chart-1); }
+.chart .line.s2 { stroke: var(--chart-2); }
+.chart .area { stroke: none; fill-opacity: 0.14; }
+.chart .area.s1 { fill: var(--chart-1); }
+.chart .hit { fill: transparent; }
+.chart .hit:hover { fill: var(--text); fill-opacity: 0.06; }
