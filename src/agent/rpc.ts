@@ -22,6 +22,7 @@ import * as turn from "./turn.ts";
 import * as recovery from "./recovery.ts";
 import * as tune from "./tune.ts";
 import * as vulns from "./vulns.ts";
+import * as wordpress from "./wordpress.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
@@ -50,6 +51,7 @@ const SENSITIVE = new Set([
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
   "firewall.enable", "firewall.disable", "firewall.ports",
+  "wp.install", "wp.resetPassword",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -392,6 +394,14 @@ export const methods: Record<string, Handler> = {
     return warnings;
   },
   "sites.logs": (p) => php.phpLogs(p.name),
+  // ---- WordPress (wp-cli, as the site user)
+  "wp.detect": (p) => wordpress.detect(p.name),
+  "wp.status": (p) => wordpress.status(p.name),
+  "wp.install": (p, actor) => wordpress.install(p, actor),
+  "wp.update": (p, actor) => wordpress.update({ name: p.name, core: !!p.core, plugins: p.plugins, themes: p.themes }, actor),
+  "wp.maintenance": (p, actor) => wordpress.setMaintenance(p.name, !!p.on, actor),
+  "wp.resetPassword": (p, actor) => wordpress.resetPassword(p.name, p.userId, actor),
+  "wp.autoUpdate": (p, actor) => wordpress.setAutoUpdate(p.name, !!p.on, actor),
   "sites.save": async (p, actor) => {
     const name = v.siteName(p.name);
     const kind = p.kind as Site["kind"];

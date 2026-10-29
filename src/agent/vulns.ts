@@ -26,6 +26,7 @@ import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
 import { installCaddy } from "./edge.ts";
 import { installedPhp, phpCli, upgradePhpPackages } from "./php.ts";
+import { nightlyUpdates as wordpressNightly } from "./wordpress.ts";
 import * as realtime from "./realtime.ts";
 import { installed as installedRuntimes } from "./runtimes.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
@@ -600,6 +601,7 @@ async function nightly() {
   const p = patchSettings();
   if (p.os && !(await run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false })).stdout.includes("enabled")) await applyOsPatching(true);
   if (p.php) await patchPhp();
+  await wordpressNightly().catch((e) => console.error(`[agent] wordpress auto-update: ${e}`));
   const result = await scan();
   await patchUrgent(result.findings);
   if (p.edge && (await exists(paths.caddy))) await patchEdge(result.findings);

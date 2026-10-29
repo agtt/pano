@@ -1,3 +1,4 @@
+import type { Child } from "hono/jsx";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
 
@@ -216,7 +217,7 @@ export function NoticePage({ title, items, back }: { title: string; items: strin
   );
 }
 
-export function SiteForm({ site, csrf, versions = [], logs = "" }: { site?: SiteRow; csrf: string; versions?: PhpVersion[]; logs?: string }) {
+export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site?: SiteRow; csrf: string; versions?: PhpVersion[]; logs?: string; extra?: Child }) {
   const s = site;
   return (
     <div class="stack">
@@ -259,6 +260,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "" }: { site?: Site
         </form>
       </Card>
       {s?.kind === "php" ? <PhpPanel s={s} csrf={csrf} versions={versions} logs={logs} /> : null}
+      {extra}
       {s?.kind === "legacy" && versions.length ? <ConvertPanel s={s} csrf={csrf} versions={versions} /> : null}
       {s ? (
         <Card title={t("Delete")} class="danger-zone">

@@ -27,6 +27,7 @@ import { VulnsCard, type VulnView } from "./views/vulns.tsx";
 import { TuneCard, type TuneView } from "./views/tune.tsx";
 import { FirewallCard, type FirewallView } from "./views/firewall.tsx";
 import { Card, Layout } from "./views/layout.tsx";
+import { WordPressCard, WordPressPage, WpSecretPage, type WpDetectView, type WpStatusView } from "./views/wordpress.tsx";
 import {
   ActivityPage,
   BackupsPage,
@@ -309,8 +310,73 @@ export function createWebApp() {
       php ? call("php.versions") : [],
       site.kind === "php" ? call<string>("sites.logs", { name: site.name }).catch(() => "") : "",
     ]);
-    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} />);
+    const wp = site.kind === "php" ? await call<WpDetectView>("wp.detect", { name: site.name }).catch(() => null) : null;
+    const extra = wp ? <WordPressCard site={site.name} d={wp} csrf={c.get("s").csrf} /> : null;
+    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} extra={extra} />);
   });
+  // ---- WordPress tools (wp-cli through the agent)
+  const wpList = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
+  app.get("/sites/:name/wordpress", async (c) => {
+    const name = c.req.param("name");
+    try {
+      return page(c, name, <WordPressPage site={name} st={await call<WpStatusView>("wp.status", { name })} csrf={c.get("s").csrf} />);
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}`, e));
+    }
+  });
+  app.post("/sites/:name/wordpress/install", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      const r = await call<{ adminUrl: string; adminUser: string; adminPassword: string }>("wp.install", { name, title: f.title, adminUser: f.adminUser, adminEmail: f.adminEmail }, actor(c));
+      return page(c, name, <WpSecretPage title="WordPress installed" back={`/sites/${name}`} lines={[["Admin URL", r.adminUrl], ["User", r.adminUser], ["Password", r.adminPassword]]} />);
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}`, e));
+    }
+  });
+  app.post("/sites/:name/wordpress/password", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      const r = await call<{ login: string; password: string }>("wp.resetPassword", { name, userId: f.userId }, actor(c));
+      return page(c, name, <WpSecretPage title="Admin password reset" back={`/sites/${name}/wordpress`} lines={[["User", r.login], ["Password", r.password]]} />);
+    } catch (e) {
+      return c.redirect(err(`/sites/${name}/wordpress`, e));
+    }
+  });
+  app.post("/sites/:name/wordpress/update", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    const to = `/sites/${name}/wordpress`;
+    try {
+      const all = f.all === "1";
+      const plugins = all ? "all" : wpList(f.plugins);
+      const themes = all ? "all" : wpList(f.themes);
+      const items = await call<string[]>(
+        "wp.update",
+        { name, core: all || f.core === "1", plugins: plugins === "all" || plugins.length ? plugins : undefined, themes: themes === "all" || themes.length ? themes : undefined },
+        actor(c),
+      );
+      return page(c, name, <NoticePage title="WordPress updated" items={items} back={to} />);
+    } catch (e) {
+      return c.redirect(err(to, e));
+    }
+  });
+  const wpToggle = (method: string, msg: (on: boolean) => string) => async (c: Context<Env>) => {
+    const name = c.req.param("name");
+    const to = `/sites/${name}/wordpress`;
+    const on = (await form(c)).on === "1";
+    try {
+      await call(method, { name, on }, actor(c));
+      return back(c, to, msg(on));
+    } catch (e) {
+      return c.redirect(err(to, e));
+    }
+  };
+  app.post("/sites/:name/wordpress/maintenance", wpToggle("wp.maintenance", (on) => (on ? "Maintenance mode on" : "Maintenance mode off")));
+  app.post("/sites/:name/wordpress/auto", wpToggle("wp.autoUpdate", (on) => (on ? "Nightly auto-update on" : "Nightly auto-update off")));
   app.post("/sites/php", act("/sites/new-php", async (c, f) => {
     const r = await call("sites.createPhp", { name: f.name, domains: f.domains, php_version: f.php_version }, actor(c));
     return `/sites/${r.name}`;
