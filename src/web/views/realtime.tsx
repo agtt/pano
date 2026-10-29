@@ -11,7 +11,7 @@ export type RealtimeView = {
   memory: number;
   domain: string;
   port: number;
-  apps: { id: string; name: string; key: string; origins: string[]; created_at: number }[];
+  apps: { id: string; name: string; key: string; origins: string[]; webhook_url?: string; max_connections?: number; created_at: number }[];
 };
 
 const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
@@ -75,6 +75,8 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
             <th>App ID</th>
             <th>Key</th>
             <th>Origins</th>
+            <th>Webhook</th>
+            <th>Max conn.</th>
             <th />
           </tr>
         </thead>
@@ -91,12 +93,26 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
                 <code data-copy>{a.key}</code>
               </td>
               <td class="small">{a.origins.length ? a.origins.join(" ") : <span class="muted">any</span>}</td>
+              <td class="small">{a.webhook_url ? <code>{a.webhook_url}</code> : <span class="muted">none</span>}</td>
+              <td class="small">{a.max_connections || <span class="muted">no limit</span>}</td>
               <td class="row">
                 <form method="post" action={`/services/realtime/apps/${a.name}/reveal`} class="inline">
                   <Csrf token={csrf} />
                   <Otp />
                   <button class="btn small">Secret</button>
                 </form>
+                <details>
+                  <summary class="btn small">Edit</summary>
+                  <form method="post" action={`/services/realtime/apps/${a.name}/update`} class="grid-form">
+                    <Csrf token={csrf} />
+                    <Field label="Allowed origins" name="origins" value={a.origins.join(" ")} />
+                    <Field label="Webhook URL" name="webhook_url" value={a.webhook_url ?? ""} placeholder="https://app.example.com/api/webhooks/pusher" />
+                    <Field label="Max connections (0 = no limit)" name="max_connections" value={String(a.max_connections ?? 0)} />
+                    <div class="actions">
+                      <button class="btn small primary">{t("Save")}</button>
+                    </div>
+                  </form>
+                </details>
               </td>
             </tr>
           ))}
@@ -108,6 +124,8 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
           <Csrf token={csrf} />
           <Field label="Name" name="name" required placeholder="fastpos" />
           <Field label="Allowed origins (optional)" name="origins" placeholder="https://app.example.com" hint="Browsers from other sites cannot connect." />
+          <Field label="Webhook URL (optional)" name="webhook_url" placeholder="https://app.example.com/api/webhooks/pusher" hint="Channel occupied/vacated and presence events, signed with the app secret like Pusher." />
+          <Field label="Max connections (optional)" name="max_connections" placeholder="0 = no limit" hint="Keeps one app from using every connection of the server." />
           <div class="actions">
             <button class="btn primary">+ App</button>
           </div>

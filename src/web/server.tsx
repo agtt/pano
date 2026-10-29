@@ -415,8 +415,12 @@ export function createWebApp() {
     return f.domain ? `Realtime on wss://${f.domain}` : "Realtime on localhost only";
   }));
   app.post("/services/realtime/apps", act("/services", async (c, f) => {
-    const r = await call("realtime.app.add", { name: f.name, origins: f.origins }, actor(c));
+    const r = await call("realtime.app.add", { name: f.name, origins: f.origins, webhook_url: f.webhook_url, max_connections: f.max_connections }, actor(c));
     return `${r.name} added (key ${r.key})`;
+  }));
+  app.post("/services/realtime/apps/:name/update", act("/services", async (c, f) => {
+    await call("realtime.app.update", { name: c.req.param("name"), origins: f.origins, webhook_url: f.webhook_url, max_connections: f.max_connections }, actor(c));
+    return `${c.req.param("name")} saved`;
   }));
   app.post("/services/realtime/to-app", act("/services", async (c, f) => {
     needOtp(c, f.otp);

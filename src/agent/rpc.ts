@@ -264,7 +264,8 @@ export const methods: Record<string, Handler> = {
     }
     return realtime.setDomain(domain ? parseDomains(domain)[0]! : "", actor);
   },
-  "realtime.app.add": (p, actor) => realtime.addApp({ name: p.name, origins: p.origins }, actor),
+  "realtime.app.add": (p, actor) => realtime.addApp({ name: p.name, origins: p.origins, webhook_url: p.webhook_url, max_connections: p.max_connections }, actor),
+  "realtime.app.update": (p, actor) => realtime.updateApp({ name: p.name, origins: p.origins, webhook_url: p.webhook_url, max_connections: p.max_connections }, actor),
   "realtime.app.remove": (p, actor) => {
     if (p.confirm !== p.name) throw new Error("type the app name to confirm");
     return realtime.removeApp(p.name, actor);

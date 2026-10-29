@@ -11,6 +11,7 @@ import { createHmac } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
+import { assertPublicEndpoint } from "./backup.ts";
 import { applyEdge } from "./edge.ts";
 import { arch, download, expectedSum, sha256 } from "./runtimes.ts";
 import { audit, settings, sites, state } from "./state.ts";
@@ -22,7 +23,18 @@ const CONFIG = `${paths.etc}/realtime.toml`;
 const UNIT = "pano-realtime.service";
 export const PORT = 6001;
 
-export type RealtimeApp = { id: string; name: string; key: string; secret: string; origins: string[]; created_at: number };
+export type RealtimeApp = {
+  id: string;
+  name: string;
+  key: string;
+  secret: string;
+  origins: string[];
+  /** Pusher-style webhooks (occupancy, presence), signed with the app secret; "" = none */
+  webhook_url: string;
+  /** concurrent connections for this app; 0 = no limit of its own */
+  max_connections: number;
+  created_at: number;
+};
 
 // ---- apps (Pusher "apps": id, key, secret) --------------------------------------------
 
@@ -30,7 +42,29 @@ function table() {
   state().exec(`CREATE TABLE IF NOT EXISTS realtime_apps (
     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, key TEXT NOT NULL UNIQUE, secret TEXT NOT NULL,
     origins TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL)`);
+  const cols = new Set((state().query("PRAGMA table_info(realtime_apps)").all() as { name: string }[]).map((c) => c.name));
+  if (!cols.has("webhook_url")) state().exec("ALTER TABLE realtime_apps ADD COLUMN webhook_url TEXT NOT NULL DEFAULT ''");
+  if (!cols.has("max_connections")) state().exec("ALTER TABLE realtime_apps ADD COLUMN max_connections INTEGER NOT NULL DEFAULT 0");
 }
+
+/** The events Pusher sends to webhooks: channel occupancy and presence members. */
+export const WEBHOOK_EVENTS = ["channel_occupied", "channel_vacated", "member_added", "member_removed"];
+
+/** https to a public host, or plain http to an app on this server. */
+export async function parseWebhookUrl(s: unknown): Promise<string> {
+  const url = String(s ?? "").trim();
+  if (!url) return "";
+  if (/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(url)) return url;
+  if (!/^https:\/\/[A-Za-z0-9.-]+(:\d{2,5})?\/[A-Za-z0-9._~\/-]*$/.test(url)) throw new Error("webhook: https://example.com/path or http://127.0.0.1:PORT/path");
+  await assertPublicEndpoint(url);
+  return url;
+}
+
+const parseMaxConnections = (s: unknown) => {
+  const n = Number(String(s ?? "").trim() || 0);
+  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new Error("max connections: 0 (no limit) to 1000000");
+  return n;
+};
 
 export function listApps(): RealtimeApp[] {
   table();
@@ -58,7 +92,9 @@ export function parseOrigins(text: unknown): string[] {
 
 const hex = (bytes: number) => Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
 
-export async function addApp(input: { name?: unknown; origins?: unknown }, actor: string): Promise<Omit<RealtimeApp, "secret">> {
+type AppInput = { name?: unknown; origins?: unknown; webhook_url?: unknown; max_connections?: unknown };
+
+export async function addApp(input: AppInput, actor: string): Promise<Omit<RealtimeApp, "secret">> {
   const name = String(input.name ?? "").trim();
   if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) throw new Error("name: lowercase letters, digits and -");
   if (listApps().some((a) => a.name === name)) throw new Error(`${name} already exists`);
@@ -69,16 +105,29 @@ export async function addApp(input: { name?: unknown; origins?: unknown }, actor
     key: hex(10),
     secret: hex(20),
     origins: parseOrigins(input.origins),
+    webhook_url: await parseWebhookUrl(input.webhook_url),
+    max_connections: parseMaxConnections(input.max_connections),
     created_at: Math.floor(Date.now() / 1000),
   };
   table();
   state()
-    .query("INSERT INTO realtime_apps (id, name, key, secret, origins, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(app.id, app.name, app.key, app.secret, JSON.stringify(app.origins), app.created_at);
+    .query("INSERT INTO realtime_apps (id, name, key, secret, origins, webhook_url, max_connections, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(app.id, app.name, app.key, app.secret, JSON.stringify(app.origins), app.webhook_url, app.max_connections, app.created_at);
   if (installedVersion()) await apply();
   audit(actor, "realtime.app.add", { name, id: app.id });
   const { secret: _s, ...pub } = app;
   return pub;
+}
+
+/** Origins, webhook and connection limit of an existing app; id, key and secret stay. */
+export async function updateApp(input: AppInput, actor: string) {
+  const a = mustApp(input.name);
+  const origins = parseOrigins(input.origins);
+  const webhook = await parseWebhookUrl(input.webhook_url);
+  const max = parseMaxConnections(input.max_connections);
+  state().query("UPDATE realtime_apps SET origins = ?, webhook_url = ?, max_connections = ? WHERE id = ?").run(JSON.stringify(origins), webhook, max, a.id);
+  if (installedVersion()) await apply();
+  audit(actor, "realtime.app.update", { name: a.name, webhook: !!webhook, max_connections: max });
 }
 
 export async function removeApp(name: unknown, actor: string) {
@@ -101,6 +150,10 @@ export function envFor(a: RealtimeApp, domain: string): Record<string, string> {
     PUSHER_PORT: String(PORT),
     PUSHER_SCHEME: "http",
     PUSHER_APP_CLUSTER: "mt1",
+    // The names the Pusher Node SDK docs (and most Next.js apps) use.
+    PUSHER_KEY: a.key,
+    PUSHER_SECRET: a.secret,
+    PUSHER_CLUSTER: "mt1",
     NEXT_PUBLIC_PUSHER_KEY: a.key,
     NEXT_PUBLIC_PUSHER_HOST: pub.host,
     NEXT_PUBLIC_PUSHER_PORT: pub.port,
@@ -176,6 +229,12 @@ export function renderConfig(apps: RealtimeApp[]): string {
       "enable_user_authentication = true",
     );
     if (a.origins.length) lines.push("", "[app_manager.array.apps.policy.channels]", `allowed_origins = [${a.origins.map(toml).join(", ")}]`);
+    // A limit keeps one busy app from taking every connection of the server; 0 = none.
+    if (a.max_connections) lines.push("", "[app_manager.array.apps.policy.limits]", `max_connections = ${a.max_connections}`);
+    if (a.webhook_url) {
+      // Signed like Pusher's (X-Pusher-Key / X-Pusher-Signature with the app secret); delivered through the memory queue.
+      lines.push("", "[[app_manager.array.apps.policy.webhooks]]", `url = ${toml(a.webhook_url)}`, `event_types = [${WEBHOOK_EVENTS.map(toml).join(", ")}]`, "request_timeout_ms = 5000");
+    }
   }
   return `${lines.join("\n")}\n`;
 }

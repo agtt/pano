@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { envFor, newer, parseOrigins, renderConfig, renderUnit, signQuery, type RealtimeApp } from "../src/agent/realtime.ts";
+import { envFor, newer, parseOrigins, parseWebhookUrl, renderConfig, renderUnit, signQuery, type RealtimeApp } from "../src/agent/realtime.ts";
 import { RealtimeCard } from "../src/web/views/realtime.tsx";
 
-const app: RealtimeApp = { id: "123456", name: "fastpos", key: "k1", secret: "s1", origins: ["https://pos.example.com"], created_at: 1 };
+const app: RealtimeApp = { id: "123456", name: "fastpos", key: "k1", secret: "s1", origins: ["https://pos.example.com"], webhook_url: "", max_connections: 0, created_at: 1 };
 
 test("config is valid TOML with our apps, localhost only, no client events", () => {
   const cfg = Bun.TOML.parse(renderConfig([app, { ...app, id: "2", name: "b", key: "k2", origins: [] }])) as any;
@@ -52,4 +52,17 @@ test("realtime card renders", () => {
   expect(on).toContain("Update to 6.0.0");
   expect(on).toContain("Add to app environment");
   expect(on).not.toContain("s1");
+});
+
+test("webhooks and a connection limit go into the app's policy", async () => {
+  const cfg = Bun.TOML.parse(renderConfig([{ ...app, webhook_url: "http://127.0.0.1:3000/api/webhooks/pusher", max_connections: 500 }, { ...app, id: "2", name: "b", key: "k2" }])) as any;
+  const [a, b] = cfg.app_manager.array.apps;
+  expect(a.policy.limits).toEqual({ max_connections: 500 });
+  expect(a.policy.webhooks[0].url).toBe("http://127.0.0.1:3000/api/webhooks/pusher");
+  expect(a.policy.webhooks[0].event_types).toContain("channel_vacated");
+  expect(b.policy.limits).toBeUndefined();
+  expect(b.policy.webhooks).toBeUndefined();
+  expect(await parseWebhookUrl("")).toBe("");
+  for (const bad of ["http://example.com/x", "https://127.0.0.1/x", "https://a.com/x?y=1", "ftp://a.com/"]) await expect(parseWebhookUrl(bad)).rejects.toThrow();
+  expect(envFor(app, "").PUSHER_KEY).toBe("k1");
 });
