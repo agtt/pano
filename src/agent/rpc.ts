@@ -5,6 +5,7 @@ import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../share
 import { addAdmin, adminNames, checkOtp, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as appsOps from "./apps.ts";
+import * as previewsOps from "./previews.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
 import * as cpanel from "./cpanel.ts";
@@ -28,7 +29,7 @@ import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
 import * as shield from "./shield.ts";
-import { apps, audit, auditList, backups, deploys, settings, sites, type Site } from "./state.ts";
+import { apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
 import * as system from "./system.ts";
 import * as vpn from "./vpn.ts";
 
@@ -57,7 +58,8 @@ const SENSITIVE = new Set([
 export const ENV_MASK = "••••••••";
 
 /** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url"] as const;
+// preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives.
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -82,7 +84,7 @@ const serviceKey = (s: unknown): services.ServiceKey => {
   return s as services.ServiceKey;
 };
 
-const allDomains = () => ({ apps: apps.list(), sites: sites.list() });
+const allDomains = () => ({ apps: apps.list(), sites: sites.list(), previews: previews.list() });
 
 export const methods: Record<string, Handler> = {
   // ---- login: the web checks the password, the agent checks the code
@@ -109,7 +111,7 @@ export const methods: Record<string, Handler> = {
   "apps.get": async (p) => {
     const a = apps.get(v.appName(p.name));
     if (!a) throw new Error("not found");
-    return { ...hideSecret(a), status: await appsOps.appStatus(a), deploys: deploys.list(a.name) };
+    return { ...hideSecret(a), status: await appsOps.appStatus(a), deploys: deploys.list(a.name), previews: previewsOps.previewList(a.name) };
   },
   "apps.create": async (p, actor) => {
     const input = appsOps.validateAppInput(p);
@@ -125,9 +127,11 @@ export const methods: Record<string, Handler> = {
     await appsOps.checkSchedules(input.crons);
     appsOps.assertDomainsFree(appsOps.inputHosts(input), { app: input.name }, allDomains());
     await appsOps.updateApp(input.name, input, actor);
+    await previewsOps.reconcilePreviews(input.name, actor);
   },
-  "apps.delete": (p, actor) => {
+  "apps.delete": async (p, actor) => {
     if (p.confirm !== p.name) throw new Error("type the app name to confirm");
+    await previewsOps.removeAll(p.name, actor);
     return appsOps.deleteApp(p.name, actor, !!p.removeFiles);
   },
   "apps.deploy": (p, actor) => ({ id: appsOps.startDeploy(p.name, "manual", actor) }),
@@ -144,7 +148,7 @@ export const methods: Record<string, Handler> = {
   "apps.logs": (p) => appsOps.appLogs(p.name, p.lines ?? 300),
   "apps.deployLog": (p) => {
     const id = v.int(p.id, 1, 1e9, "id");
-    if (p.name !== undefined && deploys.get(id)?.app !== p.name) throw new Error("no such deploy for this app");
+    if (p.name !== undefined && deploys.get(id)?.app !== p.name && !previewsOps.previewOwnsDeploy(p.name, id)) throw new Error("no such deploy for this app");
     return appsOps.readDeployLog(id, v.int(p.offset ?? 0, 0, 1e12, "offset"));
   },
   // Values never leave the agent without a code; the editor shows masks and keeps masked values unchanged.
@@ -185,13 +189,18 @@ export const methods: Record<string, Handler> = {
     if (!a) throw new Error("not found");
     return a.webhook_secret;
   },
-  "apps.webhook": (p) => {
+  "apps.webhook": async (p) => {
     const source = p.gitlabToken ? "gitlab" : "github";
     const r = appsOps.verifyWebhook(p.name, String(p.body ?? ""), String(p.signature ?? ""), String(p.ref ?? ""), String(p.gitlabToken ?? ""));
-    if (!r.deploy) return r;
+    // A push to another branch builds (or, on branch deletion, removes) its preview when the app has a preview domain.
+    if (!r.deploy) return (await previewsOps.onPush(String(p.name), String(p.ref ?? ""), String(p.body ?? ""), source)) ?? r;
     if (apps.get(p.name)?.auto_deploy === 0) return { deploy: false, reason: "auto deploy is off" };
     return { ...r, id: appsOps.startDeploy(p.name, "push", source) };
   },
+
+  // ---- previews (branch deploys under a wildcard domain)
+  "previews.start": (p, actor) => previewsOps.startPreview(v.appName(p.name), String(p.branch ?? ""), "manual", actor),
+  "previews.remove": (p, actor) => previewsOps.removePreview(v.appName(p.name), v.int(p.id, 1, 1e9, "id"), actor),
 
   // ---- GitHub connection (optional)
   "github.status": () => github.status(),

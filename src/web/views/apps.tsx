@@ -28,8 +28,25 @@ export type AppRow = {
   ask_url: string;
   auto_deploy: number;
   crons: { schedule: string; command: string }[];
+  preview_domain?: string;
+  preview_max?: number;
+  preview_ttl_days?: number;
+  preview_env_exclude?: string;
+  previews?: PreviewRow[];
   status: { active: string; memory: number; since: string; procs?: { name: string; active: string; memory: number }[] };
   deploys?: { id: number; status: string; trigger: string; commit_sha: string; release: string; error: string; started_at: number; finished_at: number | null }[];
+};
+
+export type PreviewRow = {
+  id: number;
+  branch: string;
+  host: string;
+  status: "building" | "live" | "failed";
+  error: string;
+  commit: string;
+  deploy: number;
+  updated_at: number;
+  expires_at: number;
 };
 
 export function AppsPage({ apps }: { apps: AppRow[] }) {
@@ -142,6 +159,16 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         <input type="hidden" name="auto_deploy" value="0" />
         <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
       </label>
+      <Field label="Preview domain" name="preview_domain" value={a.preview_domain ?? ""} placeholder="*.preview.example.com" hint="Wildcard you own (DNS * to this server). Empty: no previews." />
+      <Field label="Max previews" name="preview_max" type="number" value={a.preview_max ?? 3} hint="Oldest is removed first" />
+      <Field label="Preview lifetime (days)" name="preview_ttl_days" type="number" value={a.preview_ttl_days ?? 7} hint="Counted from the last push" />
+      <Field
+        label="Prod-only variables"
+        name="preview_env_exclude"
+        value={a.preview_env_exclude ?? ""}
+        placeholder="DATABASE_URL, STRIPE_*"
+        hint="Left out of a preview's copy of the environment (comma separated; a trailing * matches a prefix)"
+      />
       <label class="field wide">
         <span>Cron</span>
         <textarea name="crons" rows={3} class="mono" spellcheck={false} placeholder={"*:0/15 | bun run scripts/sync.ts\ndaily | node scripts/cleanup.js"}>
@@ -157,7 +184,7 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           label="Authenticator code"
           name="otp"
           autocomplete="one-time-code"
-          hint="Only when changing the repository, branch, directory or commands: they decide what runs with the app's secrets."
+          hint="Only when changing the repository, branch, directory, commands, preview domain or prod-only variables: they decide what runs with the app's secrets."
         />
       ) : null}
       <div class="actions">
@@ -390,6 +417,69 @@ export function AppDetail(p: {
             </form>
           </Card>
 
+          <Card title="Previews">
+            {a.preview_domain ? (
+              <>
+                {a.previews?.length ? (
+                  <table class="compact">
+                    <thead>
+                      <tr>
+                        <th>{t("Branch")}</th>
+                        <th>{t("Status")}</th>
+                        <th>Commit</th>
+                        <th>{t("Expires")}</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {a.previews.map((pv) => (
+                        <tr>
+                          <td>
+                            {pv.status === "live" ? <a href={`https://${pv.host}`} rel="noopener">{pv.branch}</a> : pv.branch}
+                            <div class="muted small">{pv.host}</div>
+                          </td>
+                          <td>
+                            <Badge state={pv.status === "live" ? "active" : pv.status} /> <a class="small" href={`/apps/${a.name}?deploy=${pv.deploy}`}>log</a>
+                            {pv.error ? <div class="muted small">{pv.error}</div> : null}
+                          </td>
+                          <td>
+                            <code>{pv.commit.slice(0, 7)}</code>
+                          </td>
+                          <td class="muted small">{fmtTime(pv.expires_at)}</td>
+                          <td>
+                            <div class="row">
+                              <form method="post" action={`/apps/${a.name}/previews`}>
+                                <Csrf token={p.csrf} />
+                                <input type="hidden" name="branch" value={pv.branch} />
+                                <button class="btn">↻</button>
+                              </form>
+                              <form method="post" action={`/apps/${a.name}/previews/${pv.id}/delete`}>
+                                <Csrf token={p.csrf} />
+                                <button class="btn">{t("Delete")}</button>
+                              </form>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p class="muted small">No previews yet.</p>
+                )}
+                <form method="post" action={`/apps/${a.name}/previews`} class="row">
+                  <Csrf token={p.csrf} />
+                  <input name="branch" placeholder="feature/login" required />
+                  <button class="btn primary">Preview branch</button>
+                  <span class="muted small">
+                    Own user, ports and data; env copied without the prod-only variables. Max {a.preview_max ?? 3}, kept {a.preview_ttl_days ?? 7} days after the last push.
+                  </span>
+                </form>
+              </>
+            ) : (
+              <p class="muted small">Set a preview domain (a wildcard such as *.preview.example.com) in Settings to build pushed branches on their own host.</p>
+            )}
+          </Card>
+
           <Card title={`Git · ${t("Webhook")}`}>
             {p.github.connected && p.github.repo ? (
               <form method="post" action={`/apps/${a.name}/github-link`} class="row">
@@ -402,7 +492,10 @@ export function AppDetail(p: {
                 <a href="/git">Connect GitHub</a> to link this repository in one click, or set it up by hand below.
               </p>
             ) : null}
-            <p class="muted small">{a.auto_deploy !== 0 ? `Every push to ${a.branch} deploys.` : "Automatic deploys are off: pushes are ignored."}</p>
+            <p class="muted small">
+              {a.auto_deploy !== 0 ? `Every push to ${a.branch} deploys.` : "Automatic deploys are off: pushes are ignored."}
+              {a.preview_domain ? " Pushes to other branches build a preview; deleting a branch removes its preview." : ""}
+            </p>
             <form method="post" action={`/apps/${a.name}/deploy-key`} class="row">
               <Csrf token={p.csrf} />
               <button class="btn">Show deploy key</button>

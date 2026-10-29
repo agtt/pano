@@ -231,6 +231,21 @@ export function createWebApp() {
       return c.redirect(err(`/apps/${name}`, e));
     }
   });
+  app.post("/apps/:name/previews", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      const r = await call("previews.start", { name, branch: f.branch }, actor(c));
+      return c.redirect(`/apps/${name}?deploy=${r.deploy}`);
+    } catch (e) {
+      return c.redirect(err(`/apps/${name}`, e));
+    }
+  });
+  app.post("/apps/:name/previews/:id/delete", act("/apps", async (c) => {
+    const name = c.req.param("name")!;
+    await call("previews.remove", { name, id: Number(c.req.param("id")) }, actor(c));
+    return `/apps/${name}`;
+  }));
   app.post("/apps/:name/action", act("/apps", async (c, f) => {
     const name = c.req.param("name")!;
     await call("apps.action", { name, action: f.action }, actor(c));

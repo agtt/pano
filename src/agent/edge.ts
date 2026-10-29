@@ -5,7 +5,7 @@
 // before every reload, so a bad change never replaces a working config.
 
 import { env, fsPath, paths } from "../shared/config.ts";
-import { apps as appStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
+import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
 const CLOUDFLARE_RANGES = [
@@ -114,7 +114,10 @@ const ASSET_CACHE = [
   '\theader @pano_assets ?Cache-Control "public, max-age=604800"',
 ];
 
-export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[] }): string {
+/** A live preview, as the synthetic app the deploy code built (see previewApp), and the app it belongs to. */
+export type EdgePreview = { parent: string; app: App };
+
+export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[]; previews?: EdgePreview[] }): string {
   const { settings: s } = input;
   const out: string[] = [
     "# Managed by pano. Every change here is overwritten; edit through the panel.",
@@ -189,6 +192,24 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     }
   }
 
+  // Previews: one exact host each. Certificates are issued on demand, and the ask endpoint
+  // (agent main.ts) approves only hosts of existing previews.
+  for (const { parent, app: pv } of input.previews ?? []) {
+    if (!pv.active_slot) continue;
+    for (const [host, routes] of appRoutes(pv)) {
+      const single = routes.length === 1 && routes[0]!.path === "/";
+      out.push(
+        `${host} {`,
+        "\timport pano_common",
+        ...tlsLine("", false, true),
+        ...(single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true)),
+        ...logBlock(`preview-${parent}`),
+        "}",
+        "",
+      );
+    }
+  }
+
   for (const site of input.sites) {
     if (!site.enabled || !site.domains.length) continue;
     const onDemand = !!site.on_demand_tls || site.domains.includes("*");
@@ -233,7 +254,11 @@ async function syncCerts(): Promise<Set<string>> {
 export async function buildCaddyfile(): Promise<string> {
   const certs = await syncCerts();
   const banned = (JSON.parse(settings.get("shield.bans") ?? "[]") as string[]).filter((ip) => /^[0-9a-fA-F:.]{3,45}$/.test(ip));
-  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned });
+  const previews = previewStore.list().flatMap((pv) => {
+    const parent = appStore.get(pv.app);
+    return parent ? [{ parent: parent.name, app: previewApp(parent, pv) }] : [];
+  });
+  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned, previews });
 }
 
 export async function edgeInstalled() {

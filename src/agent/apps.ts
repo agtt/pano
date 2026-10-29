@@ -10,6 +10,7 @@
 import { appendFile, readdir } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
+import { normalizeEnvExclude, PREVIEW_MAX_DEFAULT, PREVIEW_TTL_DEFAULT, validatePreviewDomain } from "../shared/preview.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { reportStatus } from "./github.ts";
@@ -48,6 +49,10 @@ export type AppInput = {
   ask_url: string;
   auto_deploy: number;
   crons: Cron[];
+  preview_domain: string;
+  preview_max: number;
+  preview_ttl_days: number;
+  preview_env_exclude: string;
 };
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
@@ -74,6 +79,10 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     // Arrays (API callers) go through the same checks as the text form.
     crons: parseCrons(Array.isArray(x.crons) ? x.crons.map((c: any) => `${String(c?.schedule ?? "").replace(/[|\r\n]/g, " ")} | ${String(c?.command ?? "")}`).join("\n") : String(x.crons ?? "")),
     auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
+    preview_domain: validatePreviewDomain(x.preview_domain),
+    preview_max: v.int(x.preview_max || PREVIEW_MAX_DEFAULT, 1, 20, "max previews"),
+    preview_ttl_days: v.int(x.preview_ttl_days || PREVIEW_TTL_DEFAULT, 1, 90, "preview lifetime (days)"),
+    preview_env_exclude: normalizeEnvExclude(x.preview_env_exclude),
   };
 }
 
@@ -83,8 +92,10 @@ export function inputHosts(input: AppInput): string[] {
   return [...new Set(input.processes.flatMap((p) => p.routes.map((r) => r.split("/")[0]!)))];
 }
 
-export function assertDomainsFree(domains: string[], except: { app?: string; site?: string }, all: { apps: App[]; sites: { name: string; domains: string[] }[] }) {
+export function assertDomainsFree(domains: string[], except: { app?: string; site?: string }, all: { apps: App[]; sites: { name: string; domains: string[] }[]; previews?: { app: string; host: string }[] }) {
   for (const d of domains) {
+    const pv = all.previews?.find((x) => x.app !== except.app && x.host === d);
+    if (pv) throw new Error(`${d} is already used by a preview of app ${pv.app}`);
     const a = all.apps.find((x) => x.name !== except.app && appHosts(x).includes(d));
     const s = all.sites.find((x) => x.name !== except.site && x.domains.includes(d));
     if (a || s) throw new Error(`${d} is already used by ${a ? `app ${a.name}` : `site ${s!.name}`}`);
@@ -154,23 +165,28 @@ export async function deleteApp(name: string, actor: string, removeFiles: boolea
   const app = mustGet(name);
   if (app.kind === "managed") {
     await writeCrons({ ...app, crons: [] });
-    for (const file of await unitFiles(name)) {
-      const base = file.replace(/@\.service$/, "");
-      for (const slot of ["a", "b"]) await run(["systemctl", "disable", "--now", `${base}@${slot}.service`], { check: false });
-      await remove(`${paths.systemd}/${file}`);
-    }
-    await run(["systemctl", "daemon-reload"], { check: false });
-    if (removeFiles) {
-      await remove(appHome(name));
-      await run(["userdel", appUser(name)], { check: false });
-    }
+    await teardownUnits(name, removeFiles);
   }
   apps.remove(name);
   await applyEdge();
   audit(actor, "app.delete", { name, removeFiles });
 }
 
-function mustGet(name: string): App {
+/** Stops and removes the units of a managed app (or preview) and, optionally, its home and system user. */
+export async function teardownUnits(name: string, removeFiles: boolean) {
+  for (const file of await unitFiles(name)) {
+    const base = file.replace(/@\.service$/, "");
+    for (const slot of ["a", "b"]) await run(["systemctl", "disable", "--now", `${base}@${slot}.service`], { check: false });
+    await remove(`${paths.systemd}/${file}`);
+  }
+  await run(["systemctl", "daemon-reload"], { check: false });
+  if (removeFiles) {
+    await remove(appHome(name));
+    await run(["userdel", appUser(name)], { check: false });
+  }
+}
+
+export function mustGet(name: string): App {
   const app = apps.get(v.appName(name));
   if (!app) throw new Error(`no app named ${name}`);
   return app;
@@ -490,13 +506,44 @@ export function startDeploy(name: string, trigger: string, actor: string): numbe
   const app = mustGet(name);
   if (app.kind !== "managed") throw new Error("external apps are deployed by their own tooling");
   if (deploys.running(name)) throw new Error("a deploy is already running for this app");
-  const id = deploys.start(name, trigger);
+  const id = enqueueDeploy(app, appTarget(name), trigger);
   audit(actor, "app.deploy", { name, id, trigger });
-  buildQueue = buildQueue.then(() => deploy(app, id)).catch(() => {});
   return id;
 }
 
-async function deploy(app: App, id: number) {
+/**
+ * Where a deploy keeps its state. A real app lives in the apps table; a preview (previews.ts)
+ * is deployed by the same code as a synthetic app and keeps its state in its own row.
+ */
+export type DeployTarget = {
+  /** latest state, null when it was removed while the build ran */
+  get(): App | null;
+  update(patch: Partial<App>): void;
+  /** releases kept on disk */
+  keep: number;
+  /** no alert for a failed build */
+  quiet?: boolean;
+  /** runs once the home exists, before the build reads its env file */
+  prepare?(): Promise<void>;
+  report(app: App, sha: string, state: "pending" | "success" | "failure", description: string): void;
+};
+
+const appTarget = (name: string): DeployTarget => ({
+  get: () => apps.get(name),
+  update: (patch) => apps.update(name, patch),
+  keep: 2,
+  report: (app, sha, state, description) => void reportStatus(app, sha, state, description),
+});
+
+/** Queues a build (one at a time) and returns the deploy id. */
+export function enqueueDeploy(app: App, target: DeployTarget, trigger: string): number {
+  if (deploys.running(app.name)) throw new Error("a deploy is already running for this app");
+  const id = deploys.start(app.name, trigger);
+  buildQueue = buildQueue.then(() => deploy(app, id, target)).catch(() => {});
+  return id;
+}
+
+async function deploy(app: App, id: number, target: DeployTarget) {
   const logFile = fsPath(deployLog(id));
   await ensureDir(paths.deployLogs, 0o700);
   const log = (line: string) => appendFile(logFile, `${line}\n`).catch(() => {});
@@ -513,6 +560,7 @@ async function deploy(app: App, id: number) {
 
   try {
     await ensureAppHome(app.name); // brings homes made before the root-owned layout up to date
+    await target.prepare?.();
     if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
       throw new Error(`${app.runtime} ${app.runtime_version} is not installed (Runtimes page)`);
     }
@@ -532,7 +580,7 @@ async function deploy(app: App, id: number) {
     const sha = (await run(["git", "-C", fsPath(dir), "rev-parse", "HEAD"], { user, check: false })).stdout.trim();
     await log(`commit ${sha}`);
     commit = sha;
-    void reportStatus(app, sha, "pending", `Deploying (deploy ${id})`);
+    target.report(app, sha, "pending", `Deploying (deploy ${id})`);
     // Every process directory sees the shared .env (Next.js reads it from its own directory).
     for (const d of new Set(procs.map((p) => (p.dir ? `${workdir}/${p.dir}` : workdir)))) {
       await run(["ln", "-sfn", fsPath(`${home}/shared/.env`), fsPath(`${d}/.env`)], { user, check: false });
@@ -556,8 +604,8 @@ async function deploy(app: App, id: number) {
       await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true });
     }
     if (!app.processes.length && plan.start !== app.start_cmd) {
-      apps.update(app.name, { start_cmd: plan.start });
-      app = apps.get(app.name)!;
+      target.update({ start_cmd: plan.start });
+      app = target.get()!;
     }
     const starts = new Map<string, string>();
     for (const p of procsOf(app)) {
@@ -576,9 +624,10 @@ async function deploy(app: App, id: number) {
 
     await step("switch traffic");
     const previous = app.active_slot as "a" | "b" | "";
-    apps.update(app.name, { active_slot: slot, current_release: release });
+    if (!target.get()) throw new Error("removed while it was building");
+    target.update({ active_slot: slot, current_release: release });
     await run(["ln", "-sfn", fsPath(`${home}/slot-${slot}`), fsPath(`${home}/current`)]);
-    await writeCrons(apps.get(app.name)!);
+    await writeCrons(target.get()!);
     for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(app.name, p, slot)], { check: false });
     const edge = await applyEdge();
     await log(edge.reloaded ? "edge reloaded" : "edge not running yet (traffic switches at cutover)");
@@ -595,21 +644,21 @@ async function deploy(app: App, id: number) {
         run(["systemctl", "disable", "--now", ...old], { check: false });
       }, 15_000);
     }
-    await pruneReleases(app.name, [release]);
+    await pruneReleases(app.name, [release], target.keep);
     await log(`\ndeploy ${id} done: ${release} (${sha.slice(0, 7)})`);
     deploys.finish(id, { status: "success", commit_sha: sha, release });
-    void reportStatus(app, sha, "success", `Live: release ${release}`);
+    target.report(app, sha, "success", `Live: release ${release}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await log(`\nFAILED: ${msg}`);
-    if (apps.get(app.name)?.active_slot !== slot) {
+    if (target.get()?.active_slot !== slot) {
       await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
       // A release that never went live is only disk space.
       await remove(dir).catch(() => {});
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
-    void notify(`🔴 deploy of ${app.name} failed: ${msg.slice(0, 300)}`);
-    if (commit) void reportStatus(app, commit, "failure", msg);
+    if (!target.quiet) void notify(`🔴 deploy of ${app.name} failed: ${msg.slice(0, 300)}`);
+    if (commit) target.report(app, commit, "failure", msg);
   }
 }
 

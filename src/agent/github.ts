@@ -109,12 +109,12 @@ export async function link(app: App, deployKey: string, actor: string) {
 }
 
 /** Commit status shown next to the commit and in pull requests. Never fails a deploy. */
-export async function reportStatus(app: App, sha: string, state: "pending" | "success" | "failure", description: string) {
+export async function reportStatus(app: App, sha: string, state: "pending" | "success" | "failure", description: string, as: { context: string } = { context: "pano/deploy" }) {
   const r = parseRepo(app.repo);
   if (!r || !/^[0-9a-f]{40}$/.test(sha) || !(await status()).connected) return;
   const target = (app.domains ?? [])[0];
   await gh(`/repos/${r.owner}/${r.repo}/statuses/${sha}`, {
     method: "POST",
-    body: { state, context: "pano/deploy", description: description.slice(0, 140), ...(target && state === "success" ? { target_url: `https://${target}` } : {}) },
+    body: { state, context: as.context, description: description.slice(0, 140), ...(target && state === "success" ? { target_url: `https://${target}` } : {}) },
   }).catch(() => {});
 }

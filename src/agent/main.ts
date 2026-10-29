@@ -17,7 +17,8 @@ import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
 import { methods, needsOtp } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
-import { type App, appHosts, apps, backups, deploys, procsOf, sites, state } from "./state.ts";
+import { sweepPreviews } from "./previews.ts";
+import { type App, appHosts, apps, backups, deploys, previews, procsOf, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 import { startFirewall } from "./firewall.ts";
 import { recoverPending } from "./vpn.ts";
@@ -93,6 +94,8 @@ export async function startAgent() {
       const owners = [
         ...apps.list().map((a) => ({ hosts: appHosts(a), ask: a.ask_url, ports: appPorts(a) })),
         ...sites.list().filter((s) => s.enabled).map((s) => ({ hosts: s.domains, ask: s.ask_url, ports: s.routes.map((r) => r.upstream.split(":").at(-1)!) })),
+        // Preview hosts: certificates only for previews that exist (no ask URL, never a catch-all).
+        ...previews.list().map((pv) => ({ hosts: [pv.host], ask: "", ports: [] as string[] })),
       ];
       const all = owners.flatMap((o) => o.hosts);
       if (all.includes(domain)) return new Response("ok");
@@ -117,6 +120,8 @@ export async function startAgent() {
   startShield();
   startRealtime();
   startVulns();
+  // Previews past their lifetime go (hourly; every new preview sweeps as well).
+  setInterval(() => sweepPreviews().catch((e) => console.error(`[agent] previews: ${e}`)), 60 * 60_000);
   applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));

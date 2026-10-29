@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { APP_PORT_BASE, fsPath, paths } from "../shared/config.ts";
+import { pvName } from "../shared/preview.ts";
 import type { ProcessSpec } from "../shared/validate.ts";
 
 export type App = {
@@ -37,6 +38,11 @@ export type App = {
   auto_deploy: number;
   /** scheduled commands run in the live release (systemd timers) */
   crons: { schedule: string; command: string }[];
+  /** preview deploys: wildcard such as *.preview.example.com ("" = off), how many at once, days to keep, variables left out */
+  preview_domain: string;
+  preview_max: number;
+  preview_ttl_days: number;
+  preview_env_exclude: string;
   created_at: number;
   updated_at: number;
 };
@@ -73,6 +79,23 @@ export type Site = {
   /** php sites: scheduled commands run as the site user with the site's PHP (systemd timers) */
   crons: { schedule: string; command: string }[];
   created_at: number;
+};
+
+/** A branch built on its own (own user, home, ports and data) and served at <slug>.<preview domain>. */
+export type Preview = {
+  id: number;
+  app: string;
+  branch: string;
+  slug: string;
+  host: string;
+  processes: Process[];
+  active_slot: "a" | "b" | "";
+  current_release: string;
+  /** the deploys row of the latest build: status, commit and error come from there */
+  last_deploy: number;
+  created_at: number;
+  updated_at: number;
+  expires_at: number;
 };
 
 export type Deploy = {
@@ -178,6 +201,21 @@ CREATE TABLE IF NOT EXISTS deploys (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS deploys_app ON deploys(app, id DESC);
+CREATE TABLE IF NOT EXISTS previews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  app TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  host TEXT NOT NULL UNIQUE,
+  processes TEXT NOT NULL DEFAULT '[]',
+  active_slot TEXT NOT NULL DEFAULT '',
+  current_release TEXT NOT NULL DEFAULT '',
+  last_deploy INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  UNIQUE (app, slug)
+);
 CREATE TABLE IF NOT EXISTS backup_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -247,6 +285,10 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "ask_url", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "auto_deploy", "INTEGER NOT NULL DEFAULT 1"],
   ["apps", "crons", "TEXT NOT NULL DEFAULT '[]'"],
+  ["apps", "preview_domain", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "preview_max", "INTEGER NOT NULL DEFAULT 3"],
+  ["apps", "preview_ttl_days", "INTEGER NOT NULL DEFAULT 7"],
+  ["apps", "preview_env_exclude", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
@@ -325,9 +367,62 @@ export const apps = {
       used.add(a.port_a), used.add(a.port_b);
       for (const p of a.processes) used.add(p.port_a), used.add(p.port_b);
     }
+    for (const pv of previews.list()) for (const p of pv.processes) used.add(p.port_a), used.add(p.port_b);
     let p = APP_PORT_BASE;
     while (used.has(p) || used.has(p + 1)) p += 2;
     return [p, p + 1];
+  },
+};
+
+/** The preview as the app deploy code sees it: the parent's build settings, the preview's own branch, host, ports and state. */
+export function previewApp(parent: App, pv: Preview): App {
+  return {
+    ...parent,
+    name: pvName(pv.id),
+    kind: "managed",
+    branch: pv.branch,
+    domains: [pv.host],
+    processes: pv.processes,
+    port_a: pv.processes[0]?.port_a ?? 0,
+    port_b: pv.processes[0]?.port_b ?? 0,
+    active_slot: pv.active_slot,
+    current_release: pv.current_release,
+    ask_url: "",
+    auto_deploy: 0,
+    crons: [],
+    preview_domain: "",
+  };
+}
+
+const decodePreview = (row: any): Preview => ({ ...row, processes: JSON.parse(row.processes || "[]") });
+
+export const previews = {
+  list(app?: string): Preview[] {
+    const rows = app === undefined ? state().query("SELECT * FROM previews ORDER BY id").all() : state().query("SELECT * FROM previews WHERE app = ? ORDER BY id").all(app);
+    return rows.map(decodePreview);
+  },
+  get(id: number): Preview | null {
+    const row = state().query("SELECT * FROM previews WHERE id = ?").get(id);
+    return row ? decodePreview(row) : null;
+  },
+  find(app: string, slug: string): Preview | null {
+    const row = state().query("SELECT * FROM previews WHERE app = ? AND slug = ?").get(app, slug);
+    return row ? decodePreview(row) : null;
+  },
+  insert(p: Pick<Preview, "app" | "branch" | "slug" | "host" | "processes" | "expires_at">): number {
+    const t = now();
+    const r = state()
+      .query("INSERT INTO previews (app, branch, slug, host, processes, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+      .get(p.app, p.branch, p.slug, p.host, JSON.stringify(p.processes), t, t, p.expires_at) as { id: number };
+    return r.id;
+  },
+  update(id: number, patch: Partial<Pick<Preview, "active_slot" | "current_release" | "last_deploy" | "expires_at" | "updated_at">>) {
+    const row: Record<string, unknown> = { updated_at: now(), ...patch };
+    const sets = Object.keys(row).map((c) => `${c} = $${c}`);
+    state().query(`UPDATE previews SET ${sets.join(", ")} WHERE id = $id`).run({ ...row, id } as any);
+  },
+  remove(id: number) {
+    state().query("DELETE FROM previews WHERE id = ?").run(id);
   },
 };
 
