@@ -76,12 +76,12 @@ async function detect(k: ServiceKey): Promise<Record_ | null> {
 }
 
 export async function status() {
-  const out = [];
-  for (const k of Object.keys(SERVICES) as ServiceKey[]) {
-    const r = await detect(k);
-    out.push({ key: k, ...SERVICES[k], installed: !!r, version: r?.version ?? "", managed: r?.managed ?? false, ...(r ? await unitState(r.unit) : { active: "", memory: 0, enabled: false }) });
-  }
-  return out;
+  return Promise.all(
+    (Object.keys(SERVICES) as ServiceKey[]).map(async (k) => {
+      const r = await detect(k);
+      return { key: k, ...SERVICES[k], installed: !!r, version: r?.version ?? "", managed: r?.managed ?? false, ...(r ? await unitState(r.unit) : { active: "", memory: 0, enabled: false }) };
+    }),
+  );
 }
 
 // ---- install -------------------------------------------------------------------
@@ -278,6 +278,11 @@ const pgLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 export async function pgList() {
   const rows = await psql("SELECT datname, pg_database_size(datname), pg_get_userbyid(datdba) FROM pg_database WHERE NOT datistemplate ORDER BY 1;");
   return rows.map(([name, size, owner]) => ({ name: name!, sizeMb: Math.round(Number(size) / 104857.6) / 10, owner: owner!, system: RESERVED_PG.has(name!) }));
+}
+
+/** Names only, without the system databases (pickers; no size per database). */
+export async function pgNames(): Promise<string[]> {
+  return (await psql("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1;")).map(([n]) => n!).filter((n) => !RESERVED_PG.has(n));
 }
 
 export async function pgCreate(input: { name?: unknown; user?: unknown; password?: string }, actor: string) {

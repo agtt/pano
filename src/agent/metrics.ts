@@ -183,11 +183,16 @@ export function history(db: Database, range: Range, app: string | undefined, now
   const from = now - RANGES[range];
   const step = STEPS[range];
   const keys = app ? [`app:${app}:mem`, `app:${app}:cpu`] : null;
-  const filter = keys ? ` AND key IN (${keys.map(() => "?").join(",")})` : " AND key NOT LIKE 'app:%'";
+  // Key ranges, not NOT LIKE: the primary key (res, key, ts) then skips every app's rows.
+  // "app;" is the first key after all "app:…" ones.
+  const filters = keys ? [` AND key IN (${keys.map(() => "?").join(",")})`] : [" AND key < 'app:'", " AND key >= 'app;'"];
   // Past the minute data's reach the series comes from the 15-minute averages, plus the minutes not rolled up yet.
   const cut = RANGES[range] > KEEP_FINE / 2 ? Math.floor(now / COARSE) * COARSE : from;
   const q = (res: number, lo: number, hi: number) =>
-    db.query(`SELECT key, ts, value FROM metrics WHERE res = ? AND ts >= ? AND ts < ?${filter}`).all(res, lo, hi, ...(keys ?? [])) as { key: string; ts: number; value: number }[];
+    filters.flatMap(
+      (filter) =>
+        db.query(`SELECT key, ts, value FROM metrics WHERE res = ?${filter} AND ts >= ? AND ts < ?`).all(res, ...(keys ?? []), lo, hi) as { key: string; ts: number; value: number }[],
+    );
   const rows = cut > from ? [...q(COARSE, from, cut), ...q(FINE, cut, now + 1)] : q(FINE, from, now + 1);
   const raw: Record<string, Point[]> = {};
   for (const r of rows) (raw[r.key] ??= []).push([r.ts, r.value]);

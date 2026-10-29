@@ -7,7 +7,7 @@ import { paths } from "../shared/config.ts";
 import { failedJobs } from "./jobs.ts";
 import { checkQueues } from "./queues.ts";
 import { apps, procsOf, settings } from "./state.ts";
-import { ensureDir, readText, run, writeAtomic } from "./sys.ts";
+import { diskUsage, ensureDir, readText, run, showUnits, writeAtomic } from "./sys.ts";
 
 const TOKEN_FILE = `${paths.secrets}/telegram.token`;
 
@@ -59,25 +59,26 @@ async function problem(key: string, bad: boolean, text: string) {
   }
 }
 
-const isActive = async (units: string[]) => {
-  if (!units.length) return true;
-  const r = await run(["systemctl", "is-active", ...units], { check: false });
-  return r.stdout.trim().split("\n").every((s) => s === "active");
-};
+/** One `systemctl is-active` for every unit (it answers one line per unit, in order). */
+async function activeStates(units: string[]): Promise<Map<string, boolean>> {
+  if (!units.length) return new Map();
+  const lines = (await run(["systemctl", "is-active", ...units], { check: false })).stdout.trim().split("\n");
+  return new Map(units.map((u, i) => [u, lines[i] === "active"]));
+}
 
 export async function checkOnce() {
-  for (const a of apps.list()) {
-    if (a.kind !== "managed" || !a.active_slot) continue;
-    const units = procsOf(a).map((p) => `pano-app-${a.name}${p.name ? `_${p.name}` : ""}@${a.active_slot}.service`);
-    await problem(`app:${a.name}`, !(await isActive(units)), `app ${a.name} is down`);
-  }
+  const appUnits = apps
+    .list()
+    .filter((a) => a.kind === "managed" && a.active_slot)
+    .map((a) => ({ name: a.name, units: procsOf(a).map((p) => `pano-app-${a.name}${p.name ? `_${p.name}` : ""}@${a.active_slot}.service`) }));
+  const services = Object.entries(await watchedServices());
+  const active = await activeStates([...appUnits.flatMap((a) => a.units), ...services.map(([, u]) => u)]);
+  for (const a of appUnits) await problem(`app:${a.name}`, !a.units.every((u) => active.get(u)), `app ${a.name} is down`);
   for (const j of await failedJobs()) await problem(j.key, j.failed, j.text);
   await checkQueues(problem, notify);
-  for (const [key, unit] of Object.entries(await watchedServices())) {
-    await problem(`svc:${key}`, !(await isActive([unit])), `${key} is not running`);
-  }
-  const df = await run(["df", "-P", "/"], { check: false });
-  const used = Number(df.stdout.trim().split("\n")[1]?.split(/\s+/)[4]?.replace("%", "") ?? 0);
+  for (const [key, unit] of services) await problem(`svc:${key}`, !active.get(unit), `${key} is not running`);
+  const disk = await diskUsage("/");
+  const used = disk.used + disk.avail ? Math.round((disk.used / (disk.used + disk.avail)) * 100) : 0;
   await problem("disk", used >= 85, `disk ${used}% full`);
   const mem = (await readText("/proc/meminfo")) ?? "";
   const kb = (k: string) => Number(mem.match(new RegExp(`^${k}:\\s+(\\d+)`, "m"))?.[1] ?? 0);
@@ -88,9 +89,9 @@ export async function checkOnce() {
 /** Services worth watching: the ones enabled on this server. */
 async function watchedServices(): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  for (const [key, val] of Object.entries({ edge: "pano-edge.service", vpn: "pano-vpn.service" })) {
-    if ((await run(["systemctl", "is-enabled", val], { check: false })).stdout.trim() === "enabled") out[key] = val;
-  }
+  const own = { edge: "pano-edge.service", vpn: "pano-vpn.service" };
+  const state = await showUnits(Object.values(own), ["UnitFileState"]);
+  for (const [key, val] of Object.entries(own)) if (state.get(val)?.UnitFileState === "enabled") out[key] = val;
   for (const key of ["mariadb", "postgres", "valkey"]) {
     const rec = JSON.parse(settings.get(`svc.${key}`) || "null") as { unit: string } | null;
     if (rec) out[key] = rec.unit;

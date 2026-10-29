@@ -111,7 +111,13 @@ export const methods: Record<string, Handler> = {
   },
 
   // ---- apps
-  "apps.list": async () => Promise.all(apps.list().map(async (a) => ({ ...hideSecret(a), status: await appsOps.appStatus(a) }))),
+  "apps.list": async () => {
+    const list = apps.list();
+    const status = await appsOps.appStatuses(list);
+    return list.map((a, i) => ({ ...hideSecret(a), status: status[i]! }));
+  },
+  /** Names only (pickers): no unit status. */
+  "apps.names": () => apps.list().map((a) => ({ name: a.name, kind: a.kind })),
   "apps.get": async (p) => {
     const a = apps.get(v.appName(p.name));
     if (!a) throw new Error("not found");
@@ -278,6 +284,8 @@ export const methods: Record<string, Handler> = {
   },
   "services.valkeyUrl": () => services.valkeyUrl(),
   "pg.list": () => services.pgList(),
+  "pg.names": () => services.pgNames(),
+  "db.names": () => mysql.databaseNames(),
   "pg.create": (p, actor) => services.pgCreate({ name: p.name, user: p.user }, actor),
   "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
 

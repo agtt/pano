@@ -592,8 +592,11 @@ async function patchEdge(findings: Finding[]) {
 }
 
 /** Reboot needed after kernel/glibc/systemd updates: reported, never done on its own. */
+let rebootCache: { at: number; value: boolean } | null = null;
+
 export async function rebootNeeded(): Promise<boolean> {
   const r = await run(["dnf", "needs-restarting", "-r"], { check: false, quiet: true });
+  rebootCache = { at: Date.now(), value: r.code === 1 }; // after patching the page shows the fresh answer
   return r.code === 1;
 }
 
@@ -614,11 +617,19 @@ export function patchNow(actor: string) {
   void nightly().catch((e) => notify(`🔴 patching failed: ${e instanceof Error ? e.message : e}`));
 }
 
+// `dnf needs-restarting` starts the whole dnf (Python, package database): seconds on a busy
+// server. Only updates change its answer, so the page reuses it for 10 minutes.
+async function rebootNeededCached(): Promise<boolean> {
+  if (rebootCache && Date.now() - rebootCache.at < 600_000) return rebootCache.value;
+  return rebootNeeded().catch(() => false);
+}
+
 export async function vulnStatus() {
+  const [timer, reboot] = await Promise.all([run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false }), rebootNeededCached()]);
   return {
     patch: patchSettings(),
-    osAutomatic: (await run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false })).stdout.trim() === "enabled",
-    rebootNeeded: await rebootNeeded().catch(() => false),
+    osAutomatic: timer.stdout.trim() === "enabled",
+    rebootNeeded: reboot,
     last: lastScan(),
     scanning: !!scanning,
   };

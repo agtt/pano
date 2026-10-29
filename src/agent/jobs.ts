@@ -10,7 +10,7 @@ import { v } from "../shared/validate.ts";
 import { LOW, checkSchedules, parseCrons } from "./apps.ts";
 import { confDir, phpRoot, phpSandbox, siteHome, siteUser } from "./php.ts";
 import { apps, audit, sites, type Site } from "./state.ts";
-import { readText, remove, run, writeAtomic } from "./sys.ts";
+import { readText, remove, run, showUnits, writeAtomic } from "./sys.ts";
 
 export type JobRef = { owner: "app" | "site"; name: string; index: number };
 export type Job = JobRef & {
@@ -101,22 +101,19 @@ const stamp = (s: string) => {
   return s.startsWith("@") && n > 0 ? n : null;
 };
 
-async function unitInfo(base: string) {
-  const show = async (unit: string, props: string[]) => {
-    const r = await run(["systemctl", "show", unit, "--timestamp=unix", ...props.flatMap((p) => ["-p", p])], { check: false });
-    return (k: string) => r.stdout.match(new RegExp(`^${k}=(.*)$`, "m"))?.[1] ?? "";
-  };
-  const timer = await show(`${base}.timer`, ["ActiveState", "NextElapseUSecRealtime", "LastTriggerUSec"]);
-  const svc = await show(`${base}.service`, ["ActiveState", "Result", "ExecMainStartTimestamp", "ExecMainExitTimestamp"]);
-  const started = stamp(svc("ExecMainStartTimestamp"));
-  const exited = stamp(svc("ExecMainExitTimestamp"));
-  const last = stamp(timer("LastTriggerUSec")) ?? started;
+const TIMER_PROPS = ["ActiveState", "NextElapseUSecRealtime", "LastTriggerUSec"];
+const SERVICE_PROPS = ["ActiveState", "Result", "ExecMainStartTimestamp", "ExecMainExitTimestamp"];
+
+function unitInfo(timer: Record<string, string>, svc: Record<string, string>) {
+  const started = stamp(svc.ExecMainStartTimestamp ?? "");
+  const exited = stamp(svc.ExecMainExitTimestamp ?? "");
+  const last = stamp(timer.LastTriggerUSec ?? "") ?? started;
   return {
-    armed: timer("ActiveState") === "active",
-    running: svc("ActiveState") === "activating",
-    next: stamp(timer("NextElapseUSecRealtime")),
+    armed: timer.ActiveState === "active",
+    running: svc.ActiveState === "activating",
+    next: stamp(timer.NextElapseUSecRealtime ?? ""),
     last,
-    result: last ? svc("Result") : "",
+    result: last ? (svc.Result ?? "") : "",
     seconds: started && exited && exited >= started ? exited - started : null,
   };
 }
@@ -130,7 +127,12 @@ export function jobRefs(): (JobRef & { schedule: string; command: string })[] {
 
 export async function listJobs(filter?: { owner: JobRef["owner"]; name: string }): Promise<Job[]> {
   const refs = jobRefs().filter((j) => !filter || (j.owner === filter.owner && j.name === filter.name));
-  return Promise.all(refs.map(async (j) => ({ ...j, ...(await unitInfo(baseOf(j))) })));
+  // Two systemctl calls for all jobs (timers, services), not two per job: the monitor asks every minute.
+  const [timers, svcs] = await Promise.all([
+    showUnits(refs.map((j) => `${baseOf(j)}.timer`), TIMER_PROPS, ["--timestamp=unix"]),
+    showUnits(refs.map((j) => `${baseOf(j)}.service`), SERVICE_PROPS, ["--timestamp=unix"]),
+  ]);
+  return refs.map((j) => ({ ...j, ...unitInfo(timers.get(`${baseOf(j)}.timer`) ?? {}, svcs.get(`${baseOf(j)}.service`) ?? {}) }));
 }
 
 export function parseRef(p: Record<string, unknown>): JobRef {

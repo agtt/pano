@@ -67,11 +67,19 @@ export async function disconnect(actor: string) {
 }
 
 /** Repositories the token can see, newest push first (for the new-app form). */
-export async function repos(): Promise<{ full_name: string; ssh_url: string; default_branch: string; private: boolean }[]> {
-  if (!(await status()).connected) return [];
+type Repo = { full_name: string; ssh_url: string; default_branch: string; private: boolean };
+let repoCache: { at: number; login: string; list: Repo[] } | null = null;
+
+/** Kept a minute: the new-app form asks on every load, GitHub's answer takes a second. */
+export async function repos(): Promise<Repo[]> {
+  const s = await status();
+  if (!s.connected) return [];
+  if (repoCache && repoCache.login === s.login && Date.now() - repoCache.at < 60_000) return repoCache.list;
   const r = await gh<any[]>("/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member");
   if (r.status !== 200) return [];
-  return r.data.map((x) => ({ full_name: x.full_name, ssh_url: x.ssh_url, default_branch: x.default_branch, private: x.private }));
+  const list = r.data.map((x) => ({ full_name: x.full_name, ssh_url: x.ssh_url, default_branch: x.default_branch, private: x.private }));
+  repoCache = { at: Date.now(), login: s.login, list };
+  return list;
 }
 
 /**

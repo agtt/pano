@@ -616,6 +616,11 @@ export function audit(actor: string, action: string, detail: unknown = "") {
     .run(now(), actor, action, typeof detail === "string" ? detail : JSON.stringify(detail));
 }
 
+/** The audit log keeps a year: enough to look back on an incident, without growing forever. */
+export function pruneAudit(days = 365) {
+  state().query("DELETE FROM audit WHERE at < ?").run(now() - days * 86400);
+}
+
 export function auditList(limit = 200) {
   return state().query("SELECT * FROM audit ORDER BY id DESC LIMIT ?").all(limit) as {
     id: number;

@@ -42,6 +42,11 @@ export async function listDatabases(): Promise<DbInfo[]> {
   }));
 }
 
+/** Names only, without the protected ones (pickers; no size scan over information_schema). */
+export async function databaseNames(): Promise<string[]> {
+  return (await sql("SHOW DATABASES;")).map(([n]) => n!).filter((n) => !PROTECTED_DBS.has(n));
+}
+
 export async function listUsers(): Promise<{ user: string; host: string }[]> {
   const rows = await sql("SELECT User, Host FROM mysql.user WHERE User <> '' ORDER BY User;");
   return rows.map(([user, host]) => ({ user: user!, host: host! }));

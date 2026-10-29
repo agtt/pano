@@ -19,7 +19,7 @@ import { reportStatus } from "./github.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
-import { ensureDir, exists, randomToken, readText, remove, run, writeAtomic, type RunOptions } from "./sys.ts";
+import { ensureDir, exists, randomToken, readText, remove, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
 
 export const appUser = (name: string) => `app-${name}`;
 export const appHome = (name: string) => `${paths.apps}/${name}`;
@@ -458,21 +458,26 @@ export async function appAction(name: string, action: "start" | "stop" | "restar
 
 type UnitStatus = { active: string; memory: number; since: string };
 
-async function unitStatus(unit: string): Promise<UnitStatus> {
-  const r = await run(["systemctl", "show", unit, "--property=ActiveState,MemoryCurrent,ActiveEnterTimestamp"], { check: false });
-  const props = Object.fromEntries(r.stdout.trim().split("\n").map((l) => l.split(/=(.*)/s).slice(0, 2)));
-  const mem = Number(props.MemoryCurrent);
-  return { active: props.ActiveState ?? "unknown", memory: Number.isFinite(mem) ? mem : 0, since: props.ActiveEnterTimestamp ?? "" };
+type AppStatus = UnitStatus & { procs: (UnitStatus & { name: string })[] };
+
+/** Status of many apps from one `systemctl show` for all their units. */
+export async function appStatuses(list: App[]): Promise<AppStatus[]> {
+  const shown = await showUnits(list.flatMap(activeUnits), ["ActiveState", "MemoryCurrent", "ActiveEnterTimestamp"]);
+  return list.map((app) => {
+    const units = activeUnits(app);
+    if (!units.length) return { active: app.kind === "external" ? "unknown" : "not deployed", memory: 0, since: "", procs: [] };
+    const names = app.kind === "external" ? [app.name] : procsOf(app).map((p) => p.name || app.name);
+    const procs = units.map((u, i) => {
+      const p = shown.get(u) ?? {};
+      const mem = Number(p.MemoryCurrent);
+      return { name: names[i]!, active: p.ActiveState || "unknown", memory: Number.isFinite(mem) ? mem : 0, since: p.ActiveEnterTimestamp ?? "" };
+    });
+    const down = procs.find((p) => p.active !== "active");
+    return { active: down?.active ?? "active", memory: procs.reduce((n, p) => n + p.memory, 0), since: procs[0]!.since, procs };
+  });
 }
 
-export async function appStatus(app: App): Promise<UnitStatus & { procs: (UnitStatus & { name: string })[] }> {
-  const units = activeUnits(app);
-  if (!units.length) return { active: app.kind === "external" ? "unknown" : "not deployed", memory: 0, since: "", procs: [] };
-  const names = app.kind === "external" ? [app.name] : procsOf(app).map((p) => p.name || app.name);
-  const procs = await Promise.all(units.map(async (u, i) => ({ name: names[i]!, ...(await unitStatus(u)) })));
-  const down = procs.find((p) => p.active !== "active");
-  return { active: down?.active ?? "active", memory: procs.reduce((n, p) => n + p.memory, 0), since: procs[0]!.since, procs };
-}
+export const appStatus = async (app: App): Promise<AppStatus> => (await appStatuses([app]))[0]!;
 
 export async function appLogs(name: string, lines = 200): Promise<string> {
   const app = mustGet(name);

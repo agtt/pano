@@ -36,10 +36,25 @@ export function cmpVer(a: string, b: string): number {
   return 0;
 }
 
-export async function available(): Promise<{ node: { version: string; lts: string | false }[]; bun: string[] }> {
+type Available = { node: { version: string; lts: string | false }[]; bun: string[] };
+let availableCache: { at: number; value: Available } | null = null;
+
+/**
+ * Versions to install. Kept 10 minutes: the Runtimes page asks on every load, the Node.js index
+ * is large and GitHub allows 60 unauthenticated calls an hour.
+ */
+export async function available(): Promise<Available> {
+  if (availableCache && Date.now() - availableCache.at < 600_000) return availableCache.value;
+  const value = await fetchAvailable();
+  if (value.node.length && value.bun.length) availableCache = { at: Date.now(), value };
+  return value;
+}
+
+async function fetchAvailable(): Promise<Available> {
+  const signal = AbortSignal.timeout(15_000);
   const [nodeRes, bunRes] = await Promise.all([
-    fetch("https://nodejs.org/dist/index.json"),
-    fetch("https://api.github.com/repos/oven-sh/bun/releases?per_page=10", { headers: { "user-agent": "pano" } }),
+    fetch("https://nodejs.org/dist/index.json", { signal }),
+    fetch("https://api.github.com/repos/oven-sh/bun/releases?per_page=10", { headers: { "user-agent": "pano" }, signal }),
   ]);
   const nodeAll = nodeRes.ok ? ((await nodeRes.json()) as { version: string; lts: string | false }[]) : [];
   // Latest release of each of the newest majors.

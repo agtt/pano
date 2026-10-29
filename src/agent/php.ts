@@ -6,7 +6,7 @@
 // a site needs that version, and pm=ondemand keeps an idle site at one small
 // process: nothing PHP runs on the server unless a PHP site exists.
 
-import { readdir, realpath, rename, unlink } from "node:fs/promises";
+import { readdir, readlink, realpath, rename, unlink } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { DEFAULT_PHP, PHP_VERSIONS, v } from "../shared/validate.ts";
 import { ensureJob } from "./backup.ts";
@@ -18,7 +18,7 @@ import {
   gpgFingerprints, installedDebPackages, mysqlSocketFor, ondrejSources, phpRootFor, suryList, type PhpOs,
 } from "./php-os.ts";
 import { audit, sites, type Site } from "./state.ts";
-import { ensureDir, exists, remove, run, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, remove, run, showUnits, writeAtomic } from "./sys.ts";
 
 const scl = (ver: string) => `php${ver.replace(".", "")}`;
 export const phpRoot = (ver: string) => phpRootFor(currentOs(), ver);
@@ -496,10 +496,13 @@ export async function phpLogs(name: string): Promise<string> {
 
 /** Reloads pools whose php-fpm binary was replaced by a package update (same minor, new patch release). */
 export async function reloadUpdatedPhp() {
-  for (const s of sites.list().filter((x) => x.kind === "php" && x.enabled)) {
-    const pid = (await run(["systemctl", "show", "-p", "MainPID", "--value", unitName(s.name)], { check: false })).stdout.trim();
+  // One systemctl for all pools; the binary is read from /proc without a process per site.
+  const units = sites.list().filter((x) => x.kind === "php" && x.enabled).map((s) => unitName(s.name));
+  const shown = await showUnits(units, ["MainPID"]);
+  for (const unit of units) {
+    const pid = shown.get(unit)?.MainPID;
     if (!pid || pid === "0") continue;
-    const exe = (await run(["readlink", `/proc/${pid}/exe`], { check: false })).stdout.trim();
-    if (exe.endsWith("(deleted)")) await run(["systemctl", "reload", unitName(s.name)], { check: false });
+    const exe = await readlink(`/proc/${pid}/exe`).catch(() => "");
+    if (exe.endsWith("(deleted)")) await run(["systemctl", "reload", unit], { check: false });
   }
 }

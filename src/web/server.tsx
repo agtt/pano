@@ -12,8 +12,7 @@ import { checkUsername } from "../shared/admins.ts";
 import { AdminsPage, type AdminSecret } from "./views/admins.tsx";
 import { t } from "./i18n.ts";
 import { parseRange } from "./views/charts.tsx";
-import css from "./static/app.css" with { type: "text" };
-import js from "./static/app.js" with { type: "text" };
+import { assets } from "./assets.ts";
 import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
@@ -82,12 +81,15 @@ export function createWebApp() {
   app.use("*", (c, next) => stepUp.run({}, next));
   app.use("*", async (c, next) => {
     await next();
-    for (const [k, val] of Object.entries(SECURITY_HEADERS)) c.res.headers.set(k, val);
+    // Static files keep their own Cache-Control (pages are no-store). HTML is deliberately not
+    // compressed: pages carry the CSRF token next to reflected text (BREACH).
+    for (const [k, val] of Object.entries(SECURITY_HEADERS)) if (k !== "Cache-Control" || !c.res.headers.has(k)) c.res.headers.set(k, val);
     if (!plainHttp(c)) c.res.headers.set("Strict-Transport-Security", "max-age=31536000");
   });
 
-  app.get("/static/app.css", (c) => c.body(css, 200, { "content-type": "text/css; charset=utf-8", "cache-control": "max-age=3600" }));
-  app.get("/static/app.js", (c) => c.body(js, 200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "max-age=3600" }));
+  for (const a of Object.values(assets)) {
+    app.get(a.url.split("?")[0]!, (c) => c.body(a.body, 200, { "content-type": a.type, "cache-control": "public, max-age=31536000, immutable" }));
+  }
 
   app.get("/login", (c) => c.html(<Layout title={t("Sign in")} path="/login"><LoginPage /></Layout>));
 
@@ -205,25 +207,21 @@ export function createWebApp() {
     const envOf = (scope: "production" | "preview") =>
       revealed?.scope === scope ? Promise.resolve(revealed.vars) : call<Record<string, string>>("apps.env.get", { name, scope }).catch(() => ({}));
     try {
-      const [a, envVars, previewEnv, logs, runtimes] = await Promise.all([
+      // One round of calls, all at once; database names only (no size scans) for the connect picker.
+      const [a, envVars, previewEnv, logs, runtimes, edge, gh, crons, history, mariadb, pg] = await Promise.all([
         call<AppRow>("apps.get", { name }),
         envOf("production"),
         envOf("preview"),
         call<string>("apps.logs", { name, lines: 200 }).catch(() => ""),
         runtimeList(),
-      ]);
-      const [edge, gh, crons, history, mariadb, pg] = await Promise.all([
         call("edge.status"),
         call("github.status"),
         call("apps.crons", { name }).catch(() => undefined),
         call("metrics.history", { range: parseRange(c.req.query("range")), app: name }).catch(() => null),
-        call<{ databases: { name: string; system: boolean }[] }>("db.list").catch(() => ({ databases: [] })),
-        call<{ name: string; system: boolean }[]>("pg.list").catch(() => []),
+        call<string[]>("db.names").catch(() => []),
+        call<string[]>("pg.names").catch(() => []),
       ]);
-      const databases = [
-        ...mariadb.databases.filter((d) => !d.system).map((d) => ({ engine: "mariadb" as const, name: d.name })),
-        ...pg.filter((d) => !d.system).map((d) => ({ engine: "postgres" as const, name: d.name })),
-      ];
+      const databases = [...mariadb.map((n) => ({ engine: "mariadb" as const, name: n })), ...pg.map((n) => ({ engine: "postgres" as const, name: n }))];
       const hooks = edge.settings.hooksDomain;
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
@@ -544,13 +542,13 @@ export function createWebApp() {
 
   // ---- database and cache servers
   const servicesPage = async (c: Context<Env>, secret?: { title: string; lines: [string, string][] }) => {
-    const [list, realtime, turn, apps] = await Promise.all([
+    const [list, realtime, turn, apps, pg] = await Promise.all([
       call<ServiceRow[]>("services.status"),
       call<RealtimeView>("realtime.status"),
       call<TurnView>("turn.status"),
-      call<{ name: string; kind: string }[]>("apps.list"),
+      call<{ name: string; kind: string }[]>("apps.names"),
+      call<PgDb[]>("pg.list").catch(() => [] as PgDb[]), // fails fast when PostgreSQL is not installed
     ]);
-    const pg = list.find((s) => s.key === "postgres")?.installed ? await call<PgDb[]>("pg.list").catch(() => []) : [];
     const appNames = apps.filter((a) => a.kind === "managed").map((a) => a.name);
     return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} secret={secret} realtime={realtime} turn={turn} appNames={appNames} />);
   };
@@ -671,8 +669,8 @@ export function createWebApp() {
     const [s, jobs, dbs, apps] = await Promise.all([
       call<BackupSettings>("backup.settings"),
       call("backup.jobs"),
-      call("db.list").then((d: any) => d.databases.filter((x: any) => !x.system).map((x: any) => x.name)).catch(() => []),
-      call("apps.list").then((a: any[]) => a.filter((x) => x.kind === "managed").map((x) => x.name)),
+      call<string[]>("db.names").catch(() => []),
+      call<{ name: string; kind: string }[]>("apps.names").then((a) => a.filter((x) => x.kind === "managed").map((x) => x.name)),
     ]);
     return page(c, t("Backups"), <BackupsPage csrf={c.get("s").csrf} s={s} jobs={jobs} dbs={dbs} apps={apps} key={key} />);
   };
@@ -1030,7 +1028,7 @@ export function createWebApp() {
       c.req.query("scan") ? call("import.scan") : undefined,
       cpFile ? call<CpPlanView>("import.cpanel.scan", { file: cpFile }) : undefined,
       call("import.cpanel.list").catch(() => []),
-      call<any[]>("apps.list"),
+      call<any[]>("apps.names"),
       call<any[]>("sites.list"),
     ]);
     const existing = new Set([...apps.map((a) => `app:${a.name}`), ...sites.map((s) => `site:${s.name}`)]);

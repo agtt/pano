@@ -10,14 +10,13 @@ import { kitState } from "./recovery.ts";
 import { bindAddress } from "./mysql.ts";
 import { PHP_EOL } from "../shared/validate.ts";
 import { backups, settings, sites } from "./state.ts";
-import { exists, readText, run } from "./sys.ts";
+import { diskUsage, exists, readText, run, showUnits } from "./sys.ts";
 import { paths } from "../shared/config.ts";
 
 export async function info() {
   const meminfo = (await readText("/proc/meminfo")) ?? "";
   const kb = (k: string) => Number(meminfo.match(new RegExp(`^${k}:\\s+(\\d+)`, "m"))?.[1] ?? 0) * 1024;
-  const df = await run(["df", "-B1", "--output=size,used,avail", "/"], { check: false });
-  const [size, used, avail] = (df.stdout.trim().split("\n")[1] ?? "").trim().split(/\s+/).map(Number);
+  const { size, used, avail } = await diskUsage("/").catch(() => ({ size: 0, used: 0, avail: 0 }));
   const os = (await readText("/etc/os-release"))?.match(/^PRETTY_NAME="?([^"\n]+)/m)?.[1] ?? process.platform;
   const services: { unit: string; state: string; memory: number }[] = [];
   const units = ["pano-agent", "pano-web", "pano-edge", "lshttpd", "mariadb", "redis", "lscpd", "fastapi_ssh_server", "docker"];
@@ -47,9 +46,22 @@ const EXPECTED_PUBLIC = new Set([22, 80, 443]);
 
 export async function audit(): Promise<Finding[]> {
   const f: Finding[] = [];
+  // Every probe at once; the checks below only read the answers.
+  const UNITS = ["firewalld.service", "lscpd.service", "fastapi_ssh_server.service", "dnf-automatic.timer", "unattended-upgrades.service"];
+  const [ss, units, nft, sshd, bind, se, edgeUp, kit] = await Promise.all([
+    run(["ss", "-Htlnp"], { check: false }),
+    showUnits(UNITS, ["ActiveState", "UnitFileState"]),
+    // Chains only: the ruleset would also list every banned address in the shield's sets.
+    run(["nft", "list", "chains"], { check: false }),
+    run(["sshd", "-T"], { check: false }),
+    bindAddress(),
+    run(["getenforce"], { check: false }),
+    settings.get("edge.cutover") === "1" ? edgeActive() : Promise.resolve(true),
+    destIds().length ? kitState() : Promise.resolve(null),
+  ]);
+  const unit = (u: string) => units.get(u) ?? {};
 
   // Public listeners
-  const ss = await run(["ss", "-Htlnp"], { check: false });
   const exposed: string[] = [];
   for (const line of ss.stdout.split("\n").filter(Boolean)) {
     const local = line.split(/\s+/)[3] ?? "";
@@ -74,9 +86,7 @@ export async function audit(): Promise<Finding[]> {
   );
 
   // Firewall
-  const fw = await run(["systemctl", "is-active", "firewalld"], { check: false });
-  const nft = await run(["nft", "list", "ruleset"], { check: false });
-  const hasFirewall = fw.stdout.trim() === "active" || /hook input.*policy drop/s.test(nft.stdout);
+  const hasFirewall = unit("firewalld.service").ActiveState === "active" || /hook input.*policy drop/.test(nft.stdout);
   f.push(
     hasFirewall
       ? { id: "firewall", level: "ok", title: "Host firewall active", detail: "" }
@@ -90,7 +100,6 @@ export async function audit(): Promise<Finding[]> {
   );
 
   // SSH
-  const sshd = await run(["sshd", "-T"], { check: false });
   const conf = Object.fromEntries(sshd.stdout.split("\n").map((l) => l.split(" ")).map(([k, ...val]) => [k, val.join(" ")]));
   if (conf.passwordauthentication === "yes")
     f.push({ id: "ssh-password", level: "fail", title: "SSH accepts passwords", detail: "Brute-force target; use keys only.", fix: "echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/10-pano.conf && systemctl reload sshd" });
@@ -100,7 +109,6 @@ export async function audit(): Promise<Finding[]> {
     f.push({ id: "ssh", level: "ok", title: "SSH: keys only", detail: "" });
 
   // Database
-  const bind = await bindAddress();
   f.push(
     // NULL (unset) means every interface
     !bind || bind === "NULL" || bind === "0.0.0.0" || bind === "*" || bind === "::"
@@ -109,13 +117,12 @@ export async function audit(): Promise<Finding[]> {
   );
 
   // CyberPanel leftovers
-  for (const [unit, why] of [
+  for (const [name, why] of [
     ["lscpd", "CyberPanel's own web server (panel on :8090)"],
     ["fastapi_ssh_server", "CyberPanel web terminal, runs as root on :8888"],
   ] as const) {
-    const s = await run(["systemctl", "is-active", unit], { check: false });
-    if (s.stdout.trim() === "active")
-      f.push({ id: `cp-${unit}`, level: "warn", title: `${unit} is still running`, detail: `${why}. Not needed once pano manages the server.`, fix: `systemctl disable --now ${unit}` });
+    if (unit(`${name}.service`).ActiveState === "active")
+      f.push({ id: `cp-${name}`, level: "warn", title: `${name} is still running`, detail: `${why}. Not needed once pano manages the server.`, fix: `systemctl disable --now ${name}` });
   }
 
   // OpenLiteSpeed admin console
@@ -125,16 +132,13 @@ export async function audit(): Promise<Finding[]> {
     f.push({ id: "ols-admin", level: "warn", title: "OpenLiteSpeed admin console is public", detail: `address ${adminAddr}`, fix: `sed -i 's/^\\(\\s*address\\s*\\).*:7080/\\1127.0.0.1:7080/' ${paths.ols}/admin/conf/admin_config.conf && ${paths.ols}/bin/lswsctrl restart` });
 
   // Automatic security updates
-  const auto = await run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false });
-  const unattended = await run(["systemctl", "is-enabled", "unattended-upgrades"], { check: false });
   f.push(
-    auto.stdout.trim() === "enabled" || unattended.stdout.trim() === "enabled"
+    unit("dnf-automatic.timer").UnitFileState === "enabled" || unit("unattended-upgrades.service").UnitFileState === "enabled"
       ? { id: "updates", level: "ok", title: "Automatic security updates on", detail: "" }
       : { id: "updates", level: "warn", title: "No automatic security updates", detail: "", fix: "dnf install -y dnf-automatic && sed -i 's/^upgrade_type.*/upgrade_type = security/; s/^apply_updates.*/apply_updates = yes/' /etc/dnf/automatic.conf && systemctl enable --now dnf-automatic.timer" },
   );
 
   // SELinux
-  const se = await run(["getenforce"], { check: false });
   if (se.code === 0 && se.stdout.trim() !== "Enforcing")
     f.push({ id: "selinux", level: "warn", title: `SELinux is ${se.stdout.trim()}`, detail: "Enforcing mode contains a compromised service. Test before switching on a live server." });
 
@@ -159,11 +163,9 @@ export async function audit(): Promise<Finding[]> {
   );
 
   // Edge
-  if (settings.get("edge.cutover") === "1" && !(await edgeActive()))
-    f.push({ id: "edge", level: "fail", title: "Edge is down", detail: "Sites are unreachable.", fix: "systemctl restart pano-edge; journalctl -u pano-edge -n 50" });
+  if (!edgeUp) f.push({ id: "edge", level: "fail", title: "Edge is down", detail: "Sites are unreachable.", fix: "systemctl restart pano-edge; journalctl -u pano-edge -n 50" });
 
-  if (destIds().length) {
-    const kit = await kitState();
+  if (kit) {
     f.push(
       kit === "ok"
         ? { id: "recovery-kit", level: "ok", title: "Recovery kit saved off the server", detail: "With it this server can be rebuilt elsewhere (pano recover)." }

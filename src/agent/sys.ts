@@ -3,7 +3,7 @@
 // build/start commands, and that runs as the app's unprivileged user.
 
 import { constants } from "node:fs";
-import { chmod, lchown, lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { chmod, lchown, lstat, mkdir, open, readFile, rename, rm, stat, statfs } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DRY_RUN, fsPath } from "../shared/config.ts";
 
@@ -192,4 +192,28 @@ export function randomPassword(len = 28): string {
     }
   }
   return out;
+}
+
+/**
+ * Properties of many systemd units in one `systemctl show` (one process instead of one per unit).
+ * Keyed by the unit name as asked; a unit systemd does not know comes back with its defaults.
+ */
+export async function showUnits(units: string[], props: string[], extra: string[] = []): Promise<Map<string, Record<string, string>>> {
+  const out = new Map<string, Record<string, string>>();
+  if (!units.length) return out;
+  const r = await run(["systemctl", "show", ...extra, ...units, `--property=${props.join(",")}`], { check: false });
+  return parseShow(r.stdout, units);
+}
+
+/** `systemctl show` output for several units: one block per unit, in the order asked, separated by a blank line. */
+export function parseShow(stdout: string, units: string[]): Map<string, Record<string, string>> {
+  const blocks = stdout.replace(/\n+$/, "").split("\n\n");
+  return new Map(units.map((u, i) => [u, Object.fromEntries((blocks[i] ?? "").split("\n").filter(Boolean).map((l) => l.split(/=(.*)/s).slice(0, 2) as [string, string]))]));
+}
+
+/** Size, used and available bytes of the file system holding a path (no `df` process). */
+export async function diskUsage(abs = "/"): Promise<{ size: number; used: number; avail: number }> {
+  const s = await statfs(fsPath(abs));
+  const size = s.blocks * s.bsize;
+  return { size, used: (s.blocks - s.bfree) * s.bsize, avail: s.bavail * s.bsize };
 }

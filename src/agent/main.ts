@@ -18,7 +18,7 @@ import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./ot
 import { methods, needsOtp } from "./rpc.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { sweepPreviews } from "./previews.ts";
-import { type App, appHosts, apps, backups, deploys, previews, procsOf, sites, state } from "./state.ts";
+import { type App, appHosts, apps, backups, deploys, previews, procsOf, pruneAudit, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 import { startFirewall } from "./firewall.ts";
 import { renewTlsCert } from "./turn.ts";
@@ -131,5 +131,7 @@ export async function startAgent() {
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
   // coturn reads its certificate at start: pick up the edge's renewals (only does anything when TURN over TLS is on).
   setInterval(() => renewTlsCert().catch((e) => console.error(`[agent] turn cert: ${e}`)), 6 * 3600_000);
+  pruneAudit();
+  setInterval(() => pruneAudit(), 24 * 3600_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);
 }

@@ -1,4 +1,5 @@
 import type { Child } from "hono/jsx";
+import { assets } from "../assets.ts";
 import { t } from "../i18n.ts";
 
 export const NAV: [string, string][] = [
@@ -30,8 +31,8 @@ export function Layout(p: PageProps) {
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{`${p.title} · pano`}</title>
-        <link rel="stylesheet" href="/static/app.css" />
-        <script src="/static/app.js" defer></script>
+        <link rel="stylesheet" href={assets.css.url} />
+        <script src={assets.js.url} defer></script>
       </head>
       <body>
         {p.user ? (
