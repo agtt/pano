@@ -65,6 +65,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 **Backups**
 - Full archives (AES-256-GCM, encrypted on the server) or incremental (restic: deduplicated, encrypted with restic's own AES-256-CTR + Poly1305-AES).
+- SQLite databases in an app's `DATA_DIR` are backed up consistently while the app writes: each gets a `VACUUM INTO` copy (made as the app's user) that the backup holds instead of the live file and its `-wal`; restores put the copy in place.
 - Each backup carries an authenticated header (kind, job, location, time): a restore refuses an object swapped in from another job or run.
 - One or two destinations at once: Cloudflare R2, Backblaze B2, Hetzner Object Storage, Wasabi, AWS S3, MinIO.
 - Hourly/daily/weekly schedules, retention, restore; the storage provider only sees ciphertext.

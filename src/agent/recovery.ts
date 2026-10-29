@@ -36,6 +36,7 @@ import { reprovisionSite, startRestoredSite } from "./php.ts";
 import * as realtime from "./realtime.ts";
 import { install as installRuntime, runtimeBin } from "./runtimes.ts";
 import { ensureService, pgEnsure, pgEnsureDb, pgGrantAccess, pgName, pgRestoreCommand, recordedServices, reinstall, type ServiceKey } from "./services.ts";
+import { placeSnapshots } from "./sqlite.ts";
 import { apps, audit, backups, settings, sites, type BackupJob } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 import * as turn from "./turn.ts";
@@ -281,6 +282,7 @@ async function restoreJob(job: BackupJob) {
       for (const d of ["shared", "data", ".ssh"]) {
         if (await exists(`${base}/${d}`)) await run(["cp", "-a", "--no-preserve=ownership", fsPath(`${base}/${d}`) + "/.", fsPath(`${home}/${d}`)]);
       }
+      await placeSnapshots(`${home}/data`); // consistent copies of the SQLite databases
       const user = appUser(job.target);
       await run(["chown", "-R", `${user}:${user}`, fsPath(`${home}/data`), fsPath(`${home}/.ssh`)]);
       await run(["chown", "-R", `root:${user}`, fsPath(`${home}/shared`)]);

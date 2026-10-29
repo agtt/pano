@@ -70,6 +70,13 @@ async function main() {
     case "version":
       console.log(VERSION);
       break;
+    case "sqlite-snapshot": {
+      // Internal: the agent runs it as an app's user before a backup (agent/sqlite.ts).
+      if (args.length !== 2) fail("usage: pano sqlite-snapshot <database> <copy>");
+      const { vacuumInto } = await import("./agent/sqlite.ts");
+      vacuumInto(args[0]!, args[1]!);
+      break;
+    }
     case "recover": {
       if (!DRY_RUN && process.getuid?.() !== 0) fail("run as root");
       // Never from the command line: the kit would land in shell history and in every process listing.

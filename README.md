@@ -12,7 +12,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 
 | Area | |
 |---|---|
-| Apps | git → sandboxed install/build → blue/green systemd slots → health check → traffic switch. Zero-downtime deploys, one-click rollback to the previous release (kept on disk: no build, seconds), per-app env, logs, memory limits, cron jobs (systemd timers in the live release, same user/env/sandbox, never overlapping, missed runs catch up). bun is the package manager for every app (installed automatically; reads package-lock/yarn/pnpm lockfiles with their exact versions); Node.js apps still run on node. `DATA_DIR` is a per-app directory kept across deploys (SQLite, uploads) and included in app backups. |
+| Apps | git → sandboxed install/build → blue/green systemd slots → health check → traffic switch. Zero-downtime deploys, one-click rollback to the previous release (kept on disk: no build, seconds), per-app env, logs, memory limits, cron jobs (systemd timers in the live release, same user/env/sandbox, never overlapping, missed runs catch up). bun is the package manager for every app (installed automatically; reads package-lock/yarn/pnpm lockfiles with their exact versions); Node.js apps still run on node. `DATA_DIR` is a per-app directory kept across deploys (SQLite, uploads) and included in app backups (SQLite databases as a consistent copy, even while the app writes). |
 | Git | Push-to-deploy from GitHub, GitLab, Gitea, Forgejo (webhook per app, HMAC or token checked in constant time; can be switched off per app). Optional GitHub connection (one fine-grained token, root-only): repository picker, one-click link (read-only deploy key + webhook) and a `pano/deploy` commit status on every deploy, Vercel-style. Preview deploys per branch, with the preview link commented (and kept up to date) on the branch's open pull requests. |
 | Environment | Per-app variables (masked, 2FA to show or change), preview-only values (a test payment key for branch previews), shared variable groups used by several apps (root-only, the app's own value wins), and a hint on the app page when a restart, or for variables built into the code (`NEXT_PUBLIC_*`, `VITE_*`, …) a redeploy, would apply changed values. |
 | Runtimes | Any Node.js / Bun version side by side under `/opt/pano/runtimes`, checksum-verified. Apps pin their own version; OS updates never change them. |
@@ -124,6 +124,7 @@ dev/vm-e2e-shield.sh      # then: planted web shells, quarantine/restore, reputa
 dev/vm-e2e-ops.sh         # then: bun installs, cron, rollback, MariaDB into env, databases over WireGuard, SSH guard
 dev/vm-e2e-secrets.sh     # then: + Database into an app env, masked env, agent-side 2FA, a compromised pano-web
 dev/vm-e2e-env.sh         # then: shared variable groups, restart/redeploy hints, preview-only values, connecting existing databases
+dev/vm-e2e-sqlite.sh      # then: SQLite in DATA_DIR backed up consistently under constant writes (archive and restic), restored
 dev/vm-e2e-vpn-services.sh  # then: WireGuard from a netns "laptop", locks + auto-undo, PostgreSQL/Valkey on demand
 ```
 

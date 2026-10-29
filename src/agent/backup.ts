@@ -26,6 +26,7 @@ import { appHome } from "./apps.ts";
 import { pgDumpCommand, pgName, pgRestoreCommand } from "./services.ts";
 import { decryptToFile, encryptStream, objectOf, type BackupContext } from "./crypto-stream.ts";
 import { dumpCommand, restoreCommand } from "./mysql.ts";
+import { dropSnapshots, liveFiles, placeSnapshots, snapshotApp } from "./sqlite.ts";
 import { apps, audit, backups, settings, state, type BackupJob, type BackupRun } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
@@ -272,10 +273,13 @@ function dumpOf(job: BackupJob): string[] | null {
   return null;
 }
 
-function archiveCommand(job: BackupJob): { cmd: string[]; ext: string } {
+/** `sqlite`: databases in DATA_DIR with a consistent copy in data/.pano-sqlite; their live files stay out. */
+function archiveCommand(job: BackupJob, sqlite: string[] = []): { cmd: string[]; ext: string } {
   const dump = dumpOf(job);
   if (dump) return { cmd: dump, ext: "sql" };
   const excludes = [...EXCLUDES.map((e) => `--exclude=${e}`), "--exclude=./cache"];
+  // Exact member names from here on (a database called "a*.db" must not exclude others).
+  if (sqlite.length) excludes.push("--anchored", "--no-wildcards", ...sqlite.flatMap((rel) => liveFiles(rel).map((f) => `--exclude=data/${f}`)));
   if (job.kind === "app") {
     if (!apps.get(job.target)) throw new Error(`app ${job.target} no longer exists`);
     const home = fsPath(appHome(job.target));
@@ -352,7 +356,12 @@ async function executeArchive(job: BackupJob, runId: number, d: DestId) {
   try {
     const { s3, prefix } = await client(d);
     const key = await backupKey();
-    const { cmd, ext, cleanup } = job.kind === "panel" ? await panelArchive() : { ...archiveCommand(job), cleanup: async () => {} };
+    const { cmd, ext, cleanup } =
+      job.kind === "panel"
+        ? await panelArchive()
+        : job.kind === "app"
+          ? { ...archiveCommand(job, await snapshotApp(job.target)), cleanup: () => dropSnapshots(job.target) }
+          : { ...archiveCommand(job), cleanup: async () => {} };
     const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "").replace("T", "-");
     const objectKey = `${prefix}/${backupHost()}/${job.name}/${stamp}.${ext}.gz.enc`;
     if (DRY_RUN) {
@@ -456,7 +465,15 @@ async function executeRestic(job: BackupJob, runId: number, d: DestId) {
     } else {
       const dirs = await resticPaths(job);
       if (!dirs.length) throw new Error("nothing to back up");
-      r = await restic(env, ["backup", "--json", "--one-file-system", "--exclude-caches", ...EXCLUDES.flatMap((e) => ["--exclude", e]), ...tagArgs(job), ...dirs]);
+      // Databases in DATA_DIR go in as their consistent copy; a name restic would read as a pattern keeps its live files too.
+      const sqlite = job.kind === "app" ? await snapshotApp(job.target) : [];
+      const data = fsPath(`${appHome(job.target)}/data`);
+      const live = sqlite.filter((rel) => !/[*?[\\]/.test(rel)).flatMap((rel) => liveFiles(rel).flatMap((f) => ["--exclude", `${data}/${f}`]));
+      try {
+        r = await restic(env, ["backup", "--json", "--one-file-system", "--exclude-caches", ...EXCLUDES.flatMap((e) => ["--exclude", e]), ...live, ...tagArgs(job), ...dirs]);
+      } finally {
+        if (job.kind === "app") await dropSnapshots(job.target);
+      }
     }
     // 3: some files could not be read (live sites); the snapshot exists.
     const sum = parseSummary(r.stdout);
@@ -514,6 +531,8 @@ export async function restore(runId: number, target: unknown, actor: string): Pr
 
   if (r.engine === "restic") await restoreRestic(r, job, d, cmd, where);
   else await restoreArchive(r, job, d, cmd ?? ["tar", "-xf", "-", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "-C", fsPath(where)]);
+  // The consistent copies of the app's SQLite databases take their place.
+  if (job.kind === "app") await placeSnapshots(r.engine === "restic" ? `${where}${fsPath(appHome(job.target))}/data` : `${where}/data`);
   audit(actor, "backup.restore", { runId, where });
   return `restored into ${where}`;
 }
