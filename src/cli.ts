@@ -3,6 +3,7 @@
 //   pano install            set up users, directories and systemd units (root)
 //   pano agent              privileged agent (systemd: pano-agent)
 //   pano web                web UI as the unprivileged `pano` user (systemd: pano-web)
+//   pano update --latest | <binary> <sha256>  update to the latest release or a given binary (root)
 //   pano admin <username>   create an admin or reset its password + 2FA (root)
 //   pano rpc <method> [json]  call the agent directly (root)
 
@@ -98,9 +99,22 @@ async function main() {
     }
     case "update": {
       const { update } = await import("./update.ts");
-      const usage = "usage: pano update <path to the new pano binary> <sha256> [--allow-downgrade]";
+      const usage = "usage: pano update --latest [--allow-downgrade] | pano update <path to the new pano binary> <sha256> [--allow-downgrade]";
       const [file, sha] = args.filter((a) => !a.startsWith("--"));
-      await update(file ?? fail(usage), sha ?? fail(usage), args.includes("--allow-downgrade"));
+      const allowDowngrade = args.includes("--allow-downgrade");
+      if (args.includes("--latest")) {
+        if (file || sha) fail(usage);
+        const { fetchLatest } = await import("./release.ts");
+        const rel = await fetchLatest();
+        console.log(`latest release ${rel.tag}, checksum verified`);
+        try {
+          await update(rel.file, rel.sha, allowDowngrade);
+        } finally {
+          await rel.cleanup();
+        }
+        break;
+      }
+      await update(file ?? fail(usage), sha ?? fail(usage), allowDowngrade);
       break;
     }
     case "update-rollback": {
@@ -109,7 +123,7 @@ async function main() {
       break;
     }
     default:
-      fail("usage: pano install | version | update <binary> [sha256] | update-rollback | recover | agent | web | admin <username> | rpc <method> [json]");
+      fail("usage: pano install | version | update --latest | update <binary> <sha256> | update-rollback | recover | agent | web | admin <username> | rpc <method> [json]");
   }
 }
 

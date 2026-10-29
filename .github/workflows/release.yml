@@ -1,0 +1,61 @@
+# Tag vX.Y.Z → tested, compiled linux binaries + SHA256SUMS on a GitHub release.
+# The version baked into the binary (VERSION in src/shared/config.ts) is read from
+# package.json at compile time, so the tag is written there before building.
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+      - name: Put the tag version into package.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}" bun -e '
+            const f = Bun.file("package.json");
+            const pkg = await f.json();
+            pkg.version = process.env.VERSION;
+            await Bun.write(f, JSON.stringify(pkg, null, 2) + "\n");
+          '
+          grep -m1 '"version"' package.json
+
+      - name: Build
+        run: |
+          bun run build
+          bun run build:arm
+          mkdir release
+          mv dist/pano release/pano-linux-x64
+          mv dist/pano-arm64 release/pano-linux-arm64
+          cd release
+          sha256sum pano-linux-x64 pano-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" release/pano-linux-x64 release/pano-linux-arm64 release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag --generate-notes
