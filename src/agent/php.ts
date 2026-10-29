@@ -1,7 +1,8 @@
 // PHP sites without OpenLiteSpeed and without a shared PHP. Each site gets its
 // own system user and its own PHP-FPM master running as that user (never root)
 // in a hardened systemd unit, with a socket only the edge may open. PHP itself
-// (Remi packages, one directory per minor version) is installed the first time
+// (Remi packages on AlmaLinux/Rocky, Sury's on Debian/Ubuntu; one install per
+// minor version, see php-os.ts) is installed the first time
 // a site needs that version, and pm=ondemand keeps an idle site at one small
 // process: nothing PHP runs on the server unless a PHP site exists.
 
@@ -11,19 +12,22 @@ import { DEFAULT_PHP, PHP_VERSIONS, v } from "../shared/validate.ts";
 import { ensureJob } from "./backup.ts";
 import { EDGE_USER, applyEdge, ensureUser, phpSocket } from "./edge.ts";
 import { scanHtaccess } from "./htaccess.ts";
+import {
+  ONDREJ_FINGERPRINT, ONDREJ_KEYRING, ONDREJ_KEY_URL, ONDREJ_SOURCES, SURY_KEYRING, SURY_KEYRING_DEB, SURY_LIST,
+  assertSupported, cliFor, currentOs, debOptionalPackages, debRequiredPackages, debShimRoot, distroFpmUnit, elPackages, fpmBinFor,
+  gpgFingerprints, installedDebPackages, mysqlSocketFor, ondrejSources, phpRootFor, suryList, type PhpOs,
+} from "./php-os.ts";
 import { audit, sites, type Site } from "./state.ts";
-import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, remove, run, writeAtomic } from "./sys.ts";
 
 const scl = (ver: string) => `php${ver.replace(".", "")}`;
-export const phpRoot = (ver: string) => `/opt/remi/${scl(ver)}/root`;
-const fpmBin = (ver: string) => `${phpRoot(ver)}/usr/sbin/php-fpm`;
-export const phpCli = (ver: string) => `${phpRoot(ver)}/usr/bin/php`;
+export const phpRoot = (ver: string) => phpRootFor(currentOs(), ver);
+const fpmBin = (ver: string) => fpmBinFor(currentOs(), ver);
+export const phpCli = (ver: string) => cliFor(currentOs(), ver);
 export const siteUser = (name: string) => `site-${name.replace(/[^a-z0-9]/g, "-").slice(0, 27)}`;
 export const siteHome = (name: string) => `${paths.sites}/${name}`;
 const unitName = (name: string) => `pano-php-${name}.service`;
 export const confDir = (name: string) => `${paths.phpEtc}/${name}`;
-
-const EXTENSIONS = ["fpm", "cli", "common", "mysqlnd", "opcache", "gd", "intl", "mbstring", "xml", "sodium", "bcmath", "pecl-zip"];
 
 // ---- PHP versions ------------------------------------------------------------
 
@@ -33,38 +37,122 @@ export async function installedPhp(): Promise<string[]> {
   return out;
 }
 
-async function elMajor(): Promise<string> {
-  const os = (await readText("/etc/os-release")) ?? "";
-  const major = os.match(/^VERSION_ID="?(\d+)/m)?.[1] ?? "";
-  if (!/^(ID|ID_LIKE)=.*\b(rhel|centos|fedora|almalinux|rocky)\b/m.test(os) || !["8", "9", "10"].includes(major)) {
-    throw new Error("PHP sites currently need AlmaLinux, Rocky or RHEL 8-10 (Remi packages)");
+const APT_ENV = { DEBIAN_FRONTEND: "noninteractive", NEEDRESTART_MODE: "a" };
+const APT_OPTS = ["-y", "-o", "Dpkg::Options::=--force-confold"];
+const LONG = { timeoutMs: 1_800_000 };
+
+/**
+ * Surý's repository with a signed keyring under /usr/share/keyrings (no apt-key).
+ * Debian: his keyring package + sources.list entry; Ubuntu: ppa:ondrej/php as a
+ * deb822 source whose key is checked against a pinned fingerprint. Idempotent,
+ * and left alone when the admin already added the repository themselves.
+ */
+async function ensureDebRepo(os: PhpOs) {
+  const ubuntu = os.id === "ubuntu";
+  const have = async (needle: string) =>
+    (await run(["grep", "-rqs", needle, "/etc/apt/sources.list", "/etc/apt/sources.list.d"], { check: false })).code === 0;
+  if (await have(ubuntu ? "ondrej/php" : "packages.sury.org")) return;
+  await run(["apt-get", "update", "-qq"], { env: APT_ENV, check: false, ...LONG });
+  await run(["apt-get", "install", ...APT_OPTS, "--no-install-recommends", "ca-certificates", "curl", "gnupg"], { env: APT_ENV, ...LONG });
+  const tmp = (await run(["mktemp", "-d"])).stdout.trim();
+  try {
+    if (ubuntu) {
+      const armored = `${tmp}/ondrej.asc`;
+      await run(["curl", "-fsSL", "--max-time", "60", "-o", armored, ONDREJ_KEY_URL]);
+      const fprs = gpgFingerprints((await run(["gpg", "--show-keys", "--with-colons", armored])).stdout);
+      if (!fprs.includes(ONDREJ_FINGERPRINT)) throw new Error(`ppa:ondrej/php signing key has an unexpected fingerprint (${fprs.join(", ") || "none"}); not trusting it`);
+      await run(["gpg", "--batch", "--yes", "--dearmor", "-o", fsPath(ONDREJ_KEYRING), armored]);
+      await run(["chmod", "0644", fsPath(ONDREJ_KEYRING)]);
+      await writeAtomic(ONDREJ_SOURCES, ondrejSources(os.codename), 0o644);
+    } else {
+      const deb = `${tmp}/keyring.deb`;
+      await run(["curl", "-fsSL", "--max-time", "60", "-o", deb, SURY_KEYRING_DEB]);
+      await run(["dpkg", "-i", deb], { env: APT_ENV });
+      if (!(await exists(SURY_KEYRING))) throw new Error(`${SURY_KEYRING} is missing after installing the Sury keyring package`);
+      await writeAtomic(SURY_LIST, suryList(os.codename), 0o644);
+    }
+  } finally {
+    await run(["rm", "-rf", "--", tmp], { check: false });
   }
-  return major;
+  await run(["apt-get", "update", "-qq"], { env: APT_ENV, ...LONG });
+}
+
+/** Debian: `php` for this minor in a directory cron jobs can put on PATH. */
+async function ensureCliShim(ver: string) {
+  const bin = `${debShimRoot(ver)}/usr/bin`;
+  await ensureDir(bin, 0o755);
+  await run(["ln", "-sfn", cliFor(currentOs(), ver), `${fsPath(bin)}/php`]);
+}
+
+async function installPhpDeb(ver: string, os: PhpOs) {
+  await ensureDebRepo(os);
+  // Masked before the package lands, so its postinst never starts the server-wide pool.
+  await run(["systemctl", "mask", `${distroFpmUnit(os, ver)}.service`], { check: false });
+  await run(["apt-get", "install", ...APT_OPTS, "--no-install-recommends", "acl", ...debRequiredPackages(ver)], { env: APT_ENV, ...LONG });
+  // One by one: an extension that does not exist for this version (built in, or not built yet) is skipped.
+  for (const pkg of debOptionalPackages(ver)) {
+    await run(["apt-get", "install", ...APT_OPTS, "--no-install-recommends", pkg], { env: APT_ENV, check: false, ...LONG });
+  }
 }
 
 export async function installPhp(ver: string, actor: string) {
   v.phpVersion(ver);
-  if (await exists(fpmBin(ver))) return;
-  const major = await elMajor();
-  // remi-release brings Remi's signing keys; every PHP package after it is GPG-checked by dnf.
-  if (!(await exists("/etc/yum.repos.d/remi-safe.repo"))) {
-    await run(["dnf", "-y", "install", "epel-release"], { timeoutMs: 900_000, check: false });
-    await run(["dnf", "-y", "install", `https://rpms.remirepo.net/enterprise/remi-release-${major}.rpm`], { timeoutMs: 900_000 });
+  const os = currentOs();
+  if (await exists(fpmBin(ver))) {
+    if (os.family === "debian") await ensureCliShim(ver);
+    return;
   }
-  // strict=0: an extension that does not exist for this version (built in) is skipped, not fatal.
-  const pkgs = EXTENSIONS.map((e) => `${scl(ver)}-php-${e}`);
-  await run(["dnf", "-y", "--setopt=strict=0", "install", "acl", ...pkgs], { timeoutMs: 1_800_000 });
+  assertSupported(os);
+  if (os.family === "debian") await installPhpDeb(ver, os);
+  else {
+    // remi-release brings Remi's signing keys; every PHP package after it is GPG-checked by dnf.
+    if (!(await exists("/etc/yum.repos.d/remi-safe.repo"))) {
+      await run(["dnf", "-y", "install", "epel-release"], { timeoutMs: 900_000, check: false });
+      await run(["dnf", "-y", "install", `https://rpms.remirepo.net/enterprise/remi-release-${os.version.split(".")[0]}.rpm`], { timeoutMs: 900_000 });
+    }
+    // strict=0: an extension that does not exist for this version (built in) is skipped, not fatal.
+    await run(["dnf", "-y", "--setopt=strict=0", "install", "acl", ...elPackages(ver)], { timeoutMs: 1_800_000 });
+  }
   if (!(await exists(fpmBin(ver)))) throw new Error(`PHP ${ver} did not install: ${fpmBin(ver)} is missing`);
-  // Remi ships a server-wide php-fpm service; pano runs one pool per site instead.
-  await run(["systemctl", "disable", "--now", `${scl(ver)}-php-fpm`], { check: false });
+  // The distribution ships a server-wide php-fpm service; pano runs one pool per site instead.
+  await run(["systemctl", "disable", "--now", distroFpmUnit(os, ver)], { check: false });
+  if (os.family === "debian") {
+    await run(["systemctl", "mask", `${distroFpmUnit(os, ver)}.service`], { check: false });
+    await ensureCliShim(ver);
+  }
   audit(actor, "php.install", { version: ver });
+}
+
+/** Installed phpX.Y-* packages on a Debian-family system. */
+async function debPackages(ver: string): Promise<string[]> {
+  const r = await run(["dpkg-query", "-W", "-f", "${Package} ${db:Status-Abbrev}\\n", `php${ver}-*`], { check: false });
+  return installedDebPackages(r.stdout, ver);
+}
+
+/** Patch releases of the installed minors (vulns.ts). Pools move to the new binary via reloadUpdatedPhp. */
+export async function upgradePhpPackages(minors: string[]): Promise<{ code: number; stderr: string }> {
+  if (currentOs().family === "el") {
+    return run(["dnf", "-y", "-q", "update", ...minors.map((m) => `${scl(m)}-*`)], { check: false, timeoutMs: 900_000 });
+  }
+  const pkgs = (await Promise.all(minors.map(debPackages))).flat();
+  if (!pkgs.length) return { code: 0, stderr: "" };
+  await run(["apt-get", "update", "-qq"], { env: APT_ENV, check: false, timeoutMs: 600_000 });
+  return run(["apt-get", "install", ...APT_OPTS, "--only-upgrade", ...pkgs], { env: APT_ENV, check: false, timeoutMs: 900_000 });
 }
 
 export async function uninstallPhp(ver: string, actor: string) {
   v.phpVersion(ver);
   const users = sites.list().filter((s) => s.kind === "php" && s.php_version === ver);
   if (users.length) throw new Error(`PHP ${ver} is used by ${users.map((s) => s.name).join(", ")}`);
-  await run(["dnf", "-y", "remove", `${scl(ver)}-*`], { timeoutMs: 900_000 });
+  const os = currentOs();
+  if (os.family === "debian") {
+    const pkgs = await debPackages(ver);
+    if (pkgs.length) await run(["apt-get", "remove", ...APT_OPTS, ...pkgs], { env: APT_ENV, timeoutMs: 900_000 });
+    await run(["systemctl", "unmask", `${distroFpmUnit(os, ver)}.service`], { check: false });
+    await remove(debShimRoot(ver));
+  } else {
+    await run(["dnf", "-y", "remove", `${scl(ver)}-*`], { timeoutMs: 900_000 });
+  }
   audit(actor, "php.uninstall", { version: ver });
 }
 
@@ -127,8 +215,8 @@ opcache.jit_buffer_size = 0
 opcache.restrict_api = ${home}/
 
 [MySQL]
-mysqli.default_socket = /var/lib/mysql/mysql.sock
-pdo_mysql.default_socket = /var/lib/mysql/mysql.sock
+mysqli.default_socket = ${mysqlSocketFor(currentOs())}
+pdo_mysql.default_socket = ${mysqlSocketFor(currentOs())}
 `;
 }
 

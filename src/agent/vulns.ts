@@ -25,7 +25,7 @@ import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
 import { installCaddy } from "./edge.ts";
-import { installedPhp, phpCli } from "./php.ts";
+import { installedPhp, phpCli, upgradePhpPackages } from "./php.ts";
 import * as realtime from "./realtime.ts";
 import { installed as installedRuntimes } from "./runtimes.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
@@ -548,7 +548,7 @@ export async function setPatching(next: PatchSettings, actor: string) {
 async function patchPhp() {
   const minors = await installedPhp();
   if (!minors.length) return;
-  const r = await run(["dnf", "-y", "-q", "update", ...minors.map((m) => `php${m.replace(".", "")}-*`)], { check: false, timeoutMs: 900_000 });
+  const r = await upgradePhpPackages(minors);
   if (r.code !== 0) await notify(`🔴 PHP update failed: ${r.stderr.trim().split("\n").at(-1)}`);
 }
 
