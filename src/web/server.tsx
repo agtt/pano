@@ -870,6 +870,18 @@ export function createWebApp() {
       return c.redirect(err("/containers", e));
     }
   });
+  app.post("/containers/:name/reveal", async (c) => {
+    const name = c.req.param("name");
+    const f = await form(c);
+    try {
+      needOtp(c, f.otp);
+      const env = await call<Record<string, string>>("containers.env.reveal", { name }, actor(c));
+      const d = await call("containers.get", { name });
+      return page(c, name, <ContainerDetail csrf={c.get("s").csrf} c={{ ...d, env }} />);
+    } catch (e) {
+      return c.redirect(err(`/containers/${name}`, e));
+    }
+  });
   app.post("/containers/:name/action", act("/containers", async (c, f) => {
     const name = c.req.param("name")!;
     await call("containers.action", { name, action: f.action }, actor(c));

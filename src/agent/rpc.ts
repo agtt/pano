@@ -49,10 +49,11 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
+  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.add", "realtime.app.update", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
   "apps.addDatabase", "apps.addRealtime", "apps.addTurn",
   // These reach root or the network: a container spec can mount the host, a site can take over a domain.
-  "containers.install", "containers.save", "sites.save", "backup.job.add", "vpn.enable", "edge.install", "edge.settings",
+  // A new app picks its code, domains and shared variables at once (the same fields apps.update guards).
+  "apps.create", "sites.createPhp", "containers.install", "containers.save", "containers.env.reveal", "sites.save", "backup.job.add", "vpn.enable", "edge.install", "edge.settings",
   "realtime.install", "turn.install", "turn.tls", "import.apply", "import.cpanel.apply", "db.grant",
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
@@ -70,7 +71,7 @@ export const ENV_MASK = "••••••••";
 // preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives;
 // env_groups hands shared secrets to the app's code.
 // build_isolated: turning it off lets install scripts reach the deploy key and data again.
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups", "build_isolated"] as const;
+const CODE_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups", "build_isolated"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -302,8 +303,16 @@ export const methods: Record<string, Handler> = {
   "containers.status": async () => ({ installed: await containers.podmanInstalled(), templates: containers.TEMPLATES }),
   "containers.install": (_p, actor) => containers.installPodman(actor),
   "containers.list": () => containers.listContainers(),
-  "containers.get": (p) => containers.containerDetail(String(p.name ?? "")),
-  "containers.save": (p, actor) => containers.saveContainer(containers.validateContainer(p), actor),
+  // Values (database passwords, master keys) only with a code, like an app's variables; a masked value saved back keeps what is stored.
+  "containers.get": async (p) => {
+    const d = await containers.containerDetail(String(p.name ?? ""));
+    return { ...d, env: masked(d.env) };
+  },
+  "containers.env.reveal": async (p) => (await containers.containerDetail(String(p.name ?? ""))).env,
+  "containers.save": async (p, actor) => {
+    const input = containers.validateContainer(p);
+    return containers.saveContainer({ ...input, env: unmask(input.env, await containers.containerEnv(input.name)) }, actor);
+  },
   "containers.action": (p, actor) => {
     if (!["start", "stop", "restart", "pull"].includes(p.action)) throw new Error("bad action");
     return containers.containerAction(String(p.name ?? ""), p.action, actor);

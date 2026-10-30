@@ -171,7 +171,18 @@ export function ContainerDetail(p: { csrf: string; c: ContainerRow & { logs: str
       <Card title={t("Logs")} actions={<a class="btn" href={`/containers/${c.name}`}>↻</a>}>
         <pre class="log">{c.logs || "—"}</pre>
       </Card>
-      <Card title={t("Settings")}>
+      <Card
+        title={t("Settings")}
+        actions={
+          <form method="post" action={`/containers/${c.name}/reveal`} class="row">
+            <Csrf token={p.csrf} />
+            <Otp />
+            <button class="btn small" title="Values stay hidden until shown with a code; saving with hidden values keeps them">
+              Show values
+            </button>
+          </form>
+        }
+      >
         <ContainerForm csrf={p.csrf} c={c} edit />
       </Card>
       <Card title={t("Delete")} class="danger-zone">

@@ -31,7 +31,7 @@ import {
   type DestId,
 } from "./backup.ts";
 import { EDGE_USER, applyEdge, edgeInstalled, installCaddy, setupEdgeUnit } from "./edge.ts";
-import { ident, lit, restoreCommand, sql } from "./mysql.ts";
+import { grantDb, ident, lit, restoreCommand, sql } from "./mysql.ts";
 import { reprovisionSite, startRestoredSite } from "./php.ts";
 import * as realtime from "./realtime.ts";
 import { install as installRuntime, runtimeBin } from "./runtimes.ts";
@@ -313,7 +313,7 @@ export async function ensureDbUser(url: string) {
         `CREATE DATABASE IF NOT EXISTS ${ident(name)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
         `CREATE USER IF NOT EXISTS ${lit(who)}@'localhost' IDENTIFIED BY ${lit(pass)};`,
         `ALTER USER ${lit(who)}@'localhost' IDENTIFIED BY ${lit(pass)};`,
-        `GRANT ALL PRIVILEGES ON ${ident(name)}.* TO ${lit(who)}@'localhost';`,
+        `GRANT ALL PRIVILEGES ON ${grantDb(name)}.* TO ${lit(who)}@'localhost';`,
         "FLUSH PRIVILEGES;",
       ].join("\n"),
     );

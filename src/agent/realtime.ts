@@ -282,7 +282,9 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-IPAddressDeny=169.254.169.254/32
+# Webhooks go to public hosts (checked when saved) or to apps on 127.0.0.1: a name that later
+# resolves to a private network, link-local or the cloud metadata address is refused here too.
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 

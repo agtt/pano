@@ -97,8 +97,9 @@ function routeLines(routes: Route[], notFound = false): string[] {
 }
 
 // Never served from a PHP site: dotfiles (.env, .git, .htaccess), dumps and
-// backups, composer manifests, and PHP inside WordPress uploads.
-const PHP_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp|ini|log|sh|env|dist|config)$|/composer\.(json|lock)$|/wp-content/uploads/.*\.(php\d?|phtml|phar)$)`;
+// backups, composer manifests, and PHP inside WordPress uploads (also as x.php/y.jpg, which
+// php_fastcgi splits into the script x.php and a path info).
+const PHP_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp|ini|log|sh|env|dist|config)$|/composer\.(json|lock)$|/wp-content/uploads/.*\.(php\d?|phtml|phar)(/|$))`;
 
 function phpLines(site: Site): string[] {
   const out = [`\troot * ${site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${PHP_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404"];

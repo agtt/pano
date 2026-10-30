@@ -14,6 +14,7 @@ import { readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { fsPath, paths } from "../shared/config.ts";
 import { applyEdge, edgeInstalled } from "./edge.ts";
+import { applyLocalPorts } from "./localports.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
@@ -269,6 +270,8 @@ export async function install(actor: string) {
   if (foreign && !(await exists(`${CONF}.pano-orig`))) await writeAtomic(`${CONF}.pano-orig`, current!, 0o600);
   await write(adopted || confSecret(current) || Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex"));
   await firewall(true);
+  // coturn's own user exists now: the relay may reach this host only on its relay ports.
+  await applyLocalPorts();
   await restart();
   settings.set("turn.installed", "1");
   audit(actor, "turn.install", { adopted: !!adopted });

@@ -145,17 +145,28 @@ function fail(key: string) {
 // Verifying against a dummy hash keeps response time the same for unknown users.
 let dummyHash: string | null = null;
 
+/** Password checks at once: each argon2id verify takes 64 MB, and the web process has a memory cap. */
+const MAX_VERIFYING = 2;
+let verifying = 0;
+
 export async function login(username: string, password: string, otp: string, ip: string): Promise<{ sid: string } | { error: string }> {
   const keys = [`ip:${ip}`, `user:${username.toLowerCase()}`];
   if (keys.some(locked)) return { error: "Too many attempts. Try again in 15 minutes." };
-  const user = webDb().query("SELECT * FROM users WHERE username = ?").get(username.toLowerCase()) as User | null;
-  dummyHash ??= await Bun.password.hash(randomBytes(16).toString("hex"), { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
-  const passOk = await Bun.password.verify(password, user?.password_hash ?? dummyHash);
-  const codeOk = user && passOk ? await call<boolean>("auth.otp", { username: user.username, code: otp }).catch(() => false) : false;
-  if (!user || !passOk || !codeOk) {
-    keys.forEach(fail);
-    return { error: "Invalid username, password or code." };
+  if (verifying >= MAX_VERIFYING) return { error: "Busy, try again in a moment." };
+  // Counted before the slow check, so a burst of parallel attempts cannot get past the limit.
+  keys.forEach(fail);
+  verifying++;
+  let user: User | null;
+  let passOk: boolean;
+  try {
+    user = webDb().query("SELECT * FROM users WHERE username = ?").get(username.toLowerCase()) as User | null;
+    dummyHash ??= await Bun.password.hash(randomBytes(16).toString("hex"), { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
+    passOk = await Bun.password.verify(password, user?.password_hash ?? dummyHash);
+  } finally {
+    verifying--;
   }
+  const codeOk = user && passOk ? await call<boolean>("auth.otp", { username: user.username, code: otp }).catch(() => false) : false;
+  if (!user || !passOk || !codeOk) return { error: "Invalid username, password or code." };
   keys.forEach((k) => webDb().query("DELETE FROM login_failures WHERE key = ?").run(k));
   const sid = randomBytes(32).toString("base64url");
   webDb().query("UPDATE users SET last_login = ? WHERE id = ?").run(now(), user.id);

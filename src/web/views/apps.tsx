@@ -203,9 +203,11 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           label="Authenticator code"
           name="otp"
           autocomplete="one-time-code"
-          hint="Only when changing the repository, branch, directory, commands, preview domain, prod-only or shared variables: they decide what runs with which secrets."
+          hint="Only when changing the repository, branch, directory, runtime, commands, preview domain, prod-only or shared variables: they decide what runs with which secrets."
         />
-      ) : null}
+      ) : (
+        <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+      )}
       <div class="actions">
         <button class="btn primary">{t(p.submit)}</button>
       </div>

@@ -108,7 +108,8 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
                     <Field label="Allowed origins" name="origins" value={a.origins.join(" ")} />
                     <Field label="Webhook URL" name="webhook_url" value={a.webhook_url ?? ""} placeholder="https://app.example.com/api/webhooks/pusher" />
                     <Field label="Max connections (0 = no limit)" name="max_connections" value={String(a.max_connections ?? 0)} />
-                    <div class="actions">
+                    <div class="actions row">
+                      <Otp />
                       <button class="btn small primary">{t("Save")}</button>
                     </div>
                   </form>
@@ -126,7 +127,8 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
           <Field label="Allowed origins (optional)" name="origins" placeholder="https://app.example.com" hint="Browsers from other sites cannot connect." />
           <Field label="Webhook URL (optional)" name="webhook_url" placeholder="https://app.example.com/api/webhooks/pusher" hint="Channel occupied/vacated and presence events, signed with the app secret like Pusher." />
           <Field label="Max connections (optional)" name="max_connections" placeholder="0 = no limit" hint="Keeps one app from using every connection of the server." />
-          <div class="actions">
+          <div class="actions row">
+            <Otp />
             <button class="btn primary">+ App</button>
           </div>
         </form>

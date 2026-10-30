@@ -23,7 +23,8 @@ export function RunnerPage({ v, csrf }: { v: RunnerView; csrf: string }) {
           Optional. Heavy commands from your own machine (or a coding agent on it) run here instead: <code>pano-remote</code> syncs the project over SSH
           (rsync, only what changed), runs the command and streams the output back. Build outputs, node_modules and the download cache stay here, so the next
           run is incremental. Each run is a sandbox as the <code>pano-run</code> user: memory cap, time limit, low CPU priority, nothing of pano, the apps or
-          other users in sight, of the runner only its workspace and the cache. A key added here can run any command in that sandbox: add only your own.
+          other users in sight, of the runner only the workspaces and the cache, and no database, panel, app or other service on this server reachable
+          (only the internet). A key added here can run any command in that sandbox: add only your own.
         </p>
         <div class="row">
           {v.enabled ? (

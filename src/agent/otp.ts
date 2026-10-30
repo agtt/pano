@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { fsPath, paths } from "../shared/config.ts";
 import { checkRemove, checkUsername } from "../shared/admins.ts";
 import { newSecret, otpauthUri, verify } from "../web/totp.ts";
-import { audit, state } from "./state.ts";
+import { audit, settings, state } from "./state.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 
 const MAX_FAILS = 5;
@@ -133,15 +133,23 @@ export async function cliToken(): Promise<string> {
   return t;
 }
 
-/** Older installs kept the secrets in the web database; move them here and blank them there. */
+/**
+ * Older installs kept the secrets in the web database; move them here and blank them there. Once,
+ * on an install that has no admin here yet: the web database belongs to the web process, so reading
+ * secrets from it later would let a compromised web plant a secret it knows (or a new admin) and
+ * pass every 2FA check after the next agent restart.
+ */
 export async function migrateFromWeb() {
-  if (!(await exists(paths.webDb))) return;
+  table();
+  if (settings.get("otp.migrated") === "1") return;
+  const has = state().query("SELECT 1 FROM admins LIMIT 1").get();
+  settings.set("otp.migrated", "1");
+  if (has || !(await exists(paths.webDb))) return;
   const web = new Database(fsPath(paths.webDb));
   try {
     const rows = web.query("SELECT username, totp_secret FROM users WHERE totp_secret <> ''").all() as { username: string; totp_secret: string }[];
     for (const r of rows) {
-      table();
-      state().query("INSERT INTO admins (username, totp_secret) VALUES (?, ?) ON CONFLICT(username) DO UPDATE SET totp_secret = excluded.totp_secret").run(r.username, r.totp_secret);
+      state().query("INSERT INTO admins (username, totp_secret) VALUES (?, ?) ON CONFLICT(username) DO NOTHING").run(r.username, r.totp_secret);
       web.query("UPDATE users SET totp_secret = '' WHERE username = ?").run(r.username);
     }
   } finally {

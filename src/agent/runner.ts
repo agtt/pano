@@ -7,7 +7,8 @@
 // held to the workspaces by rrsync, everything else is asked of the agent on a
 // socket only that user can open. Each run is a transient systemd unit as
 // pano-run: memory cap, time limit, low CPU priority, nothing of pano, the apps
-// or other users in sight, of its own home only the workspace and the cache.
+// or other users in sight, of its own home only the workspaces and the cache,
+// no service listening on this host reachable (nftables by uid).
 
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, chown, readdir, stat, unlink } from "node:fs/promises";
@@ -19,10 +20,12 @@ import { SDK, jdkDir } from "./android.ts";
 import { LOW } from "./apps.ts";
 import { installed as installedRuntimes, runtimeBin } from "./runtimes.ts";
 import { audit, settings } from "./state.ts";
-import { dirBytes, ensureDir, exists, lookupUser, remove, run, writeAtomic } from "./sys.ts";
+import { dirBytes, ensureDir, exists, lookupUser, readText, remove, run, writeAtomic } from "./sys.ts";
 import { hardening } from "./throwaway.ts";
 
 const KEYS = `${runHome}/.ssh/authorized_keys`;
+const NET_UNIT = "pano-runner-net.service";
+const NET_RULES = `${paths.etc}/runner.nft`;
 const FORCED = `restrict,command="${paths.bin}/pano run-shell"`;
 const KEY = /^(ssh-ed25519|sk-ssh-ed25519@openssh\.com|ecdsa-sha2-nistp(?:256|384|521)|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-rsa) ([A-Za-z0-9+/]+={0,2})(?: ([ -~]{0,100}))?$/;
 
@@ -87,6 +90,8 @@ export async function enableRunner(actor: string) {
   await ensureDir(`${runHome}/.ssh`, 0o755);
   await ensureDir(runWorkspaces, 0o700, RUN_USER);
   await ensureDir(runCache, 0o700, RUN_USER);
+  await applyRunnerNet();
+  await restrictPtrace();
   settings.set("runner.enabled", "1");
   await writeKeys();
   await startRunner();
@@ -99,6 +104,57 @@ export async function disableRunner(actor: string) {
   await writeKeys();
   for (const unit of units.values()) await stopUnit(unit);
   audit(actor, "runner.disable");
+}
+
+/**
+ * Runs reach the internet and their own ephemeral ports (Gradle and Kotlin talk to their daemons
+ * over loopback), never a service listening on this host: databases, Valkey, the panel, apps, the edge.
+ * By uid, in the kernel, so nothing a run does can lift it; DNS stays reachable.
+ */
+export function renderRunnerNet(uid: number, ephemeralFrom: number): string {
+  return [
+    "table inet pano_runner",
+    "delete table inet pano_runner",
+    "table inet pano_runner {",
+    "\tchain output {",
+    "\t\ttype filter hook output priority 0; policy accept;",
+    `\t\tmeta skuid != ${uid} accept`,
+    "\t\tfib daddr type local meta l4proto { tcp, udp } th dport 53 accept",
+    `\t\tfib daddr type local meta l4proto { tcp, udp } th dport < ${ephemeralFrom} reject`,
+    "\t}",
+    "}",
+    "",
+  ].join("\n");
+}
+
+async function applyRunnerNet() {
+  const user = await lookupUser(RUN_USER);
+  if (!user) throw new Error(`no ${RUN_USER} user`);
+  const range = (await readText("/proc/sys/net/ipv4/ip_local_port_range")) ?? "";
+  const from = Math.max(1024, Number(range.trim().split(/\s+/)[0]) || 32768);
+  await writeAtomic(NET_RULES, renderRunnerNet(user.uid, from), 0o600);
+  await run(["nft", "-c", "-f", NET_RULES]);
+  await writeAtomic(
+    `${paths.systemd}/${NET_UNIT}`,
+    `[Unit]\nDescription=pano runner: runs cannot reach local services\nAfter=network-pre.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=nft -f ${NET_RULES}\nExecReload=nft -f ${NET_RULES}\nExecStop=-nft delete table inet pano_runner\n\n[Install]\nWantedBy=multi-user.target\n`,
+    0o644,
+  );
+  await run(["systemctl", "daemon-reload"]);
+  await run(["systemctl", "enable", NET_UNIT]);
+  await run(["systemctl", "restart", NET_UNIT]);
+}
+
+/**
+ * A run and the SSH side (rrsync, run-shell) share the pano-run uid. With Yama's ptrace scope 1
+ * (Ubuntu's default) a process can only debug or write the memory of its own children, so a run
+ * cannot take over the unsandboxed SSH side. Raised from 0 when the runner is turned on.
+ */
+async function restrictPtrace() {
+  const scope = (await readText("/proc/sys/kernel/yama/ptrace_scope"))?.trim();
+  if (scope == null) throw new Error("the kernel has no Yama LSM: the runner cannot keep runs from tracing the SSH side");
+  if (scope !== "0") return;
+  await writeAtomic("/etc/sysctl.d/60-pano-ptrace.conf", "# pano runner: no ptrace of processes that are not your children\nkernel.yama.ptrace_scope = 1\n", 0o644);
+  await run(["sysctl", "-w", "kernel.yama.ptrace_scope=1"]);
 }
 
 export function parseKey(line: string): Omit<RunnerKey, "added"> {
@@ -217,9 +273,11 @@ export function runnerArgv(unit: string, ws: string, cmd: string, c: RunnerConfi
     "TasksMax=8192",
     ...LOW.trim().split("\n"),
     ...hardening(true),
-    // Of the runner's home only this workspace and the cache; not the keys, not other workspaces, not the agent's socket.
+    // Of the runner's home only the workspaces and the cache; not the keys, not the agent's socket. The mount
+    // sources are root-owned paths: a workspace the user swapped for a symlink cannot pull another directory
+    // in (the working directory is entered inside the sandbox, where pano's paths do not exist).
     `TemporaryFileSystem=${runHome}:ro`,
-    `BindPaths=${dir} ${runCache}`,
+    `BindPaths=${runWorkspaces} ${runCache}`,
     `InaccessiblePaths=-${dirname(runnerSocket)}`,
     "UMask=0022",
   ];

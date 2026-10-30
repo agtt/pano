@@ -140,9 +140,11 @@ const loaded = async () => (await run(["nft", "list", "table", "inet", TABLE], {
 /** Checks the rules, then swaps the table in one transaction; the old table stays if either step fails. */
 async function apply(rules: string) {
   await ensureDir(paths.etc, 0o755);
-  await writeAtomic(RULES, rules, 0o600);
-  await run(["nft", "-c", "-f", RULES]);
-  await run(["nft", "-f", RULES]);
+  // Checked under another name first: the file the unit loads at boot is only ever a ruleset nft accepted.
+  await writeAtomic(`${RULES}.new`, rules, 0o600);
+  await run(["nft", "-c", "-f", `${RULES}.new`]);
+  await run(["nft", "-f", `${RULES}.new`]);
+  await run(["mv", "-f", `${RULES}.new`, RULES]);
 }
 
 async function unload() {

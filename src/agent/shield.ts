@@ -225,9 +225,11 @@ export async function restore(id: number, actor: string) {
   if (!/^\d+$/.test(uid ?? "") || !/^\d+$/.test(gid ?? "")) throw new Error("unknown original owner");
   // Never give back setuid/setgid/sticky bits, whatever the file had.
   const perm = (/^[0-7]{1,4}$/.test(mode ?? "") ? Number.parseInt(mode!, 8) : 0o644) & 0o777;
+  // Owner and mode set while the file is still in the root-only quarantine: done on the restored path,
+  // the site user could swap it for a link first and have root chmod another file. mv keeps both.
+  await run(["chown", "-h", `${uid}:${gid}`, fsPath(f.quarantine)]);
+  await run(["chmod", perm.toString(8), fsPath(f.quarantine)]);
   await run(["mv", "-n", "--", fsPath(f.quarantine), real]);
-  await run(["chown", "-h", `${uid}:${gid}`, real]);
-  await run(["chmod", perm.toString(8), real]);
   state().query("UPDATE shield_findings SET status = 'ignored', quarantine = '' WHERE path = ?").run(f.path);
   audit(actor, "shield.restore", { path: f.path });
 }

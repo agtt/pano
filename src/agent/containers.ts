@@ -234,6 +234,11 @@ export async function containerStatus(c: Container): Promise<{ active: string; m
   return { active: props.ActiveState ?? "unknown", memory: Number.isFinite(mem) ? mem : 0 };
 }
 
+/** What the env file holds now (empty for a new container). */
+export async function containerEnv(name: string): Promise<Record<string, string>> {
+  return parseEnv((await readText(envFile(name))) ?? "");
+}
+
 export async function containerDetail(name: string) {
   const c = mustGet(name);
   const [status, logs] = await Promise.all([

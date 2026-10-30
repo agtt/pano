@@ -528,7 +528,10 @@ export async function deployKey(name: string): Promise<string> {
   if (!(await exists(key))) {
     await run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", `pano-${name}`, "-f", fsPath(key)], { user: appUser(name) });
   }
-  return ((await readText(`${key}.pub`)) ?? "").trim();
+  // Read as the app's user: .ssh is the app's, so the .pub could be a link to a root-only file.
+  const pub = await run(["cat", "--", fsPath(`${key}.pub`)], { user: appUser(name), check: false });
+  const line = pub.stdout.trim();
+  return /^ssh-ed25519 [A-Za-z0-9+/]+={0,2}( [ -~]*)?$/.test(line) ? line : "";
 }
 
 // ---- deploy ----------------------------------------------------------------
@@ -813,6 +816,18 @@ export async function detectStart(runtime: Runtime, dir: string, pm: string): Pr
   return runtime === "bun" ? "bun run index.ts" : "node server.js";
 }
 
+/** Every process listening on the port is in the unit's cgroup. */
+async function listenerIsUnit(port: number, unit: string): Promise<boolean> {
+  const r = await run(["ss", "-Htlnp", `sport = :${port}`], { check: false });
+  const pids = [...new Set([...r.stdout.matchAll(/pid=(\d+)/g)].map((m) => m[1]!))];
+  if (!pids.length) return false;
+  for (const pid of pids) {
+    const cgroup = (await readText(`/proc/${pid}/cgroup`)) ?? "";
+    if (!cgroup.split("\n").some((l) => l.endsWith(`/${unit}`))) return false;
+  }
+  return true;
+}
+
 async function healthCheck(app: App, p: Process, slot: "a" | "b", log: (l: string) => void) {
   const port = slot === "a" ? p.port_a : p.port_b;
   const url = `http://127.0.0.1:${port}${app.health_path || "/"}`;
@@ -825,6 +840,8 @@ async function healthCheck(app: App, p: Process, slot: "a" | "b", log: (l: strin
     try {
       const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5000) });
       if (res.status < 500) {
+        // Another app's user could have bound this idle slot port first; its answer must not put it live.
+        if (!(await listenerIsUnit(port, unitName(app.name, p, slot)))) throw new Error(`port ${port} is answered by a process outside ${unitName(app.name, p, slot)}`);
         await log(`health ok: ${p.name ? `${p.name} ` : ""}${url} -> ${res.status}`);
         return;
       }

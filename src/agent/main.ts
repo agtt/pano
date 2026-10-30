@@ -18,9 +18,10 @@ import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
 import { methods, needsOtp } from "./rpc.ts";
 import { startRunner } from "./runner.ts";
+import { applyLocalPorts } from "./localports.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { sweepPreviews } from "./previews.ts";
-import { type App, appHosts, apps, backups, deploys, previews, procsOf, pruneAudit, sites, state } from "./state.ts";
+import { type App, appHosts, apps, backups, deploys, previews, procsOf, pruneAudit, settings, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
 import { startFirewall } from "./firewall.ts";
 import { renewTlsCert } from "./turn.ts";
@@ -28,6 +29,26 @@ import { recoverPending } from "./vpn.ts";
 
 const sameSecret = (given: string | null, secret: string) =>
   !!given && given.length === secret.length && timingSafeEqual(Buffer.from(given), Buffer.from(secret));
+
+/**
+ * Names under a wildcard host that already got a certificate pass; new ones at most 20 an hour per
+ * wildcard, so random names sent at the server cannot use up Let's Encrypt's weekly limit for the domain.
+ */
+const WILDCARD_NEW_PER_HOUR = 20;
+let wildcardSeen: Set<string> | null = null;
+const wildcardNew = new Map<string, number[]>();
+
+function wildcardAllowed(wildcard: string, domain: string): boolean {
+  wildcardSeen ??= new Set<string>(JSON.parse(settings.get("edge.wildcard.seen") ?? "[]"));
+  if (wildcardSeen.has(domain)) return true;
+  const now = Date.now();
+  const recent = (wildcardNew.get(wildcard) ?? []).filter((t) => now - t < 3600_000);
+  if (recent.length >= WILDCARD_NEW_PER_HOUR) return false;
+  wildcardNew.set(wildcard, [...recent, now]);
+  wildcardSeen.add(domain);
+  settings.set("edge.wildcard.seen", JSON.stringify([...wildcardSeen].slice(-5000)));
+  return true;
+}
 
 export async function startAgent() {
   if (!DRY_RUN && process.getuid?.() !== 0) throw new Error("pano agent must run as root");
@@ -107,7 +128,8 @@ export async function startAgent() {
         const label = domain.slice(0, domain.length - d.length + 1);
         return /^[a-z0-9-]+$/.test(label);
       };
-      if (all.some(matchesWildcard)) return new Response("ok");
+      const wildcard = all.find(matchesWildcard);
+      if (wildcard) return wildcardAllowed(wildcard, domain) ? new Response("ok") : new Response("too many new names", { status: 429 });
       for (const o of owners.filter((x) => x.hosts.includes("*") && x.ask && x.ports.includes(new URL(x.ask).port))) {
         const r = await fetch(`${o.ask}?domain=${encodeURIComponent(domain)}`, { signal: AbortSignal.timeout(3000), redirect: "manual" }).catch(() => null);
         if (r?.ok) return new Response("ok");
@@ -129,6 +151,7 @@ export async function startAgent() {
   // Android builds cut off by a restart fail; their sandboxes are removed.
   cleanupAndroid().catch((e) => console.error(`[agent] android: ${e}`));
   startRunner().catch((e) => console.error(`[agent] runner: ${e}`));
+  if (!DRY_RUN) applyLocalPorts().catch((e) => console.error(`[agent] local ports: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));

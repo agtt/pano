@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { authorizedKeys, parseKey, runnerArgv } from "../src/agent/runner.ts";
+import { authorizedKeys, parseKey, renderRunnerNet, runnerArgv } from "../src/agent/runner.ts";
 import { cacheName, sandboxArgv } from "../src/agent/throwaway.ts";
 import { EXIT, OUT, frame, readFrames } from "../src/shared/runner.ts";
 import { RunnerPage } from "../src/web/views/runner.tsx";
@@ -42,11 +42,20 @@ test("a run sees only its workspace and the cache, capped and low priority", () 
   expect(props).toContain("MemoryMax=8192M");
   expect(props).toContain("RuntimeMaxSec=3600");
   expect(props).toContain("TemporaryFileSystem=/var/lib/pano-run:ro");
-  expect(props).toContain("BindPaths=/var/lib/pano-run/ws/shop-1a2b3c /var/lib/pano-run/home");
+  expect(props).toContain("BindPaths=/var/lib/pano-run/ws /var/lib/pano-run/home");
+  expect(props).toContain("WorkingDirectory=/var/lib/pano-run/ws/shop-1a2b3c");
   expect(props).toContain("InaccessiblePaths=-/run/pano-run");
   expect(props).toContain("ProtectSystem=strict");
   expect(props.some((p) => p.startsWith("InaccessiblePaths=") && p.includes("/etc/pano"))).toBe(true);
   expect(argv.slice(-4)).toEqual(["--", "/bin/bash", "-c", "./gradlew assembleDebug"]);
+});
+
+test("runs cannot reach services on this host, only their own ephemeral ports and DNS", () => {
+  const r = renderRunnerNet(998, 32768);
+  expect(r).toContain("meta skuid != 998 accept");
+  expect(r).toContain("th dport 53 accept");
+  expect(r).toContain("fib daddr type local meta l4proto { tcp, udp } th dport < 32768 reject");
+  expect(r.indexOf("dport 53 accept")).toBeLessThan(r.indexOf("reject"));
 });
 
 test("Android builds keep a per-project cache under a stable dynamic user", () => {

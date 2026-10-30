@@ -11,7 +11,7 @@ import { fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { createDatabase, listDatabases } from "./mysql.ts";
-import { fixPermissions, phpCli, siteHome, siteUser } from "./php.ts";
+import { fixPermissions, phpCli, phpSandbox, siteHome, siteUser } from "./php.ts";
 import { audit, settings, sites, type Site } from "./state.ts";
 import { currentOs, mysqlSocketFor } from "./php-os.ts";
 import { ensureDir, exists, randomPassword, randomToken, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -210,6 +210,21 @@ function phpSite(name: unknown): Site {
 
 type WpOpts = { secrets?: Record<string, Record<string, string>>; timeoutMs?: number; check?: boolean };
 
+/**
+ * wp-cli loads the site's own code (wp-config.php, plugins), so it runs in the same sandbox as the
+ * site's PHP-FPM: a transient unit as the site user, not a bare runuser outside it.
+ */
+export function wpSandboxed(name: string, user: string, home: string, env: Record<string, string>, cmd: string[]): string[] {
+  const props = phpSandbox(name).split("\n").filter((l) => l && !l.startsWith("#"));
+  return [
+    "systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec",
+    `--uid=${user}`, `--gid=${user}`, `--working-directory=${home}/public`,
+    ...props.flatMap((p) => ["-p", p]),
+    ...Object.entries(env).map(([k, val]) => `--setenv=${k}=${val}`),
+    "--", ...cmd,
+  ];
+}
+
 async function wp(site: Site, args: string[], o: WpOpts = {}) {
   const home = siteHome(site.name);
   const user = siteUser(site.name);
@@ -221,7 +236,7 @@ async function wp(site: Site, args: string[], o: WpOpts = {}) {
     env.WP_CLI_CONFIG_PATH = conf;
   }
   try {
-    return await run(wpCommand(site.php_version, home, args), { user, cwd: `${home}/public`, env, timeoutMs: o.timeoutMs ?? 300_000, check: o.check });
+    return await run(wpSandboxed(site.name, user, home, env, wpCommand(site.php_version, home, args)), { timeoutMs: o.timeoutMs ?? 300_000, check: o.check });
   } finally {
     if (conf) await remove(conf);
   }

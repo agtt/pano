@@ -5,7 +5,7 @@
 
 import { Database } from "bun:sqlite";
 import { mkdirSync, rmSync } from "node:fs";
-import { open, readdir, rename } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { appHome, appUser } from "./apps.ts";
@@ -83,14 +83,40 @@ export function vacuumInto(src: string, dst: string) {
   }
 }
 
-/** A restored DATA_DIR: each copy replaces its database (whose -wal/-shm would belong to the old file). */
+/**
+ * A restored DATA_DIR: each copy replaces its database (whose -wal/-shm would belong to the old file).
+ * Everything in it came from the app, links included, and this runs as root: no path may pass
+ * through a symlink, or a planted data/x -> /root/.ssh would have root write there.
+ */
 export async function placeSnapshots(dataDir: string) {
-  const snaps = join(fsPath(dataDir), SNAP_DIR);
+  const data = fsPath(dataDir);
+  const snaps = join(data, SNAP_DIR);
+  const st = await lstat(snaps).catch(() => null);
+  if (!st?.isDirectory()) {
+    if (st) rmSync(snaps, { force: true });
+    return;
+  }
   for (const rel of await findSqlite(`${dataDir}/${SNAP_DIR}`, 8)) {
-    const target = join(fsPath(dataDir), rel);
-    for (const f of liveFiles(rel).slice(1)) rmSync(join(fsPath(dataDir), f), { force: true });
-    mkdirSync(dirname(target), { recursive: true });
-    await rename(join(snaps, rel), target);
+    try {
+      await plainDirs(snaps, dirname(rel), false);
+      await plainDirs(data, dirname(rel), true);
+    } catch (e) {
+      console.error(`[restore] ${rel}: ${e instanceof Error ? e.message : e}`);
+      continue;
+    }
+    for (const f of liveFiles(rel).slice(1)) rmSync(join(data, f), { force: true });
+    await rename(join(snaps, rel), join(data, rel));
   }
   rmSync(snaps, { recursive: true, force: true });
+}
+
+/** Each directory from root down to root/rel is a real directory, not a link (made when `create`). */
+async function plainDirs(root: string, rel: string, create: boolean) {
+  let p = root;
+  for (const part of rel.split("/").filter((x) => x && x !== ".")) {
+    p = join(p, part);
+    const st = await lstat(p).catch(() => null);
+    if (!st && create) await mkdir(p, { mode: 0o700 });
+    else if (!st?.isDirectory()) throw new Error(`${p} is not a plain directory`);
+  }
 }

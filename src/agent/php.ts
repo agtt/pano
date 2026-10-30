@@ -26,7 +26,7 @@ const fpmBin = (ver: string) => fpmBinFor(currentOs(), ver);
 export const phpCli = (ver: string) => cliFor(currentOs(), ver);
 export const siteUser = (name: string) => `site-${name.replace(/[^a-z0-9]/g, "-").slice(0, 27)}`;
 export const siteHome = (name: string) => `${paths.sites}/${name}`;
-const unitName = (name: string) => `pano-php-${name}.service`;
+export const unitName = (name: string) => `pano-php-${name}.service`;
 export const confDir = (name: string) => `${paths.phpEtc}/${name}`;
 
 // ---- PHP versions ------------------------------------------------------------
@@ -268,6 +268,8 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The cloud's metadata service (instance credentials, user-data) like for apps.
+IPAddressDeny=169.254.169.254/32
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
@@ -363,10 +365,12 @@ export async function fixPermissions(name: string): Promise<string[]> {
     warnings.push(`removed symlink ${link.slice(fsPath(home).length)} (pointed outside the site)`);
   }
   await run(["chown", "-R", "--no-dereference", `${user}:${user}`, fsPath(home)]);
-  await run(["find", fsPath(home), "-type", "d", "-exec", "chmod", "0750", "{}", "+"]);
-  await run(["find", fsPath(home), "-type", "f", "-exec", "chmod", "0640", "{}", "+"]);
+  // As the site's user: the site's PHP may run meanwhile and swap a path for a link, and then chmod
+  // reaches only what that user owns anyway.
+  await run(["find", fsPath(home), "-type", "d", "-exec", "chmod", "0750", "{}", "+"], { user, check: false });
+  await run(["find", fsPath(home), "-type", "f", "-exec", "chmod", "0640", "{}", "+"], { user, check: false });
   // find never follows a symlinked start point: no chmod of whatever such a link points at.
-  await run(["find", ...["tmp", "sessions", "logs"].map((d) => fsPath(`${home}/${d}`)), "-maxdepth", "0", "-type", "d", "-exec", "chmod", "0700", "{}", "+"], { check: false });
+  await run(["find", ...["tmp", "sessions", "logs"].map((d) => fsPath(`${home}/${d}`)), "-maxdepth", "0", "-type", "d", "-exec", "chmod", "0700", "{}", "+"], { user, check: false });
   await run(["chown", "-h", `root:${user}`, fsPath(home)]);
   await edgeAccess(name);
   return warnings;

@@ -58,8 +58,14 @@ export async function update(src: string, sha: string, allowDowngrade = false) {
   await rename(`${PREV}.tmp`, PREV);
   await rm(STATE_PREV, { force: true });
   const db = new Database(fsPath(paths.stateDb), { readonly: true });
-  db.exec(`VACUUM INTO '${STATE_PREV}'`);
-  db.close();
+  // The copy holds 2FA and webhook secrets: created root-only, not readable for a moment before a chmod.
+  const umask = process.umask(0o077);
+  try {
+    db.exec(`VACUUM INTO '${STATE_PREV}'`);
+  } finally {
+    process.umask(umask);
+    db.close();
+  }
   await chmod(STATE_PREV, 0o600);
   // rename, not copy: the running binary stays valid until the restart
   await rename(STAGED, BIN);

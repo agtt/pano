@@ -14,8 +14,8 @@ import { PHP_VERSIONS, v } from "../shared/validate.ts";
 import { assertDomainsFree } from "./apps.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { scanHtaccess } from "./htaccess.ts";
-import { ident, listDatabases, listUsers, lit, sql } from "./mysql.ts";
-import { createPhpSite, fixPermissions, siteHome } from "./php.ts";
+import { grantDb, ident, listDatabases, listUsers, lit, sql } from "./mysql.ts";
+import { createPhpSite, fixPermissions, siteHome, unitName as phpUnit } from "./php.ts";
 import { apps, audit, sites } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, remove, run, writeAtomic } from "./sys.ts";
 
@@ -265,11 +265,11 @@ export async function scanArchive(file: string): Promise<CpPlan> {
   const mailboxes = await run(["find", fsPath(`${root}/homedir/mail`), "-mindepth", "2", "-maxdepth", "2", "-type", "d", "-not", "-name", ".*"], { check: false });
   const boxes = mailboxes.stdout.split("\n").filter(Boolean).length;
   if (boxes) notMigrated.push(`${boxes} mailbox(es): pano does not host mail; move mail to a mail provider and update MX records`);
-  const cron = ((await readText(`${root}/cron/${account}`)) ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !/^[A-Z_]+=/.test(l));
+  const cron = ((safeName(account) ? await readArchive(root, `${root}/cron/${account}`) : null) ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !/^[A-Z_]+=/.test(l));
   if (cron.length) notMigrated.push(`${cron.length} cron job(s), recreate them as needed:\n${cron.slice(0, 20).join("\n")}`);
   const zones = (await readdir(fsPath(`${root}/dnszones`)).catch(() => [] as string[])).filter((z) => z.endsWith(".db")).map((z) => z.slice(0, -3));
   if (zones.length) notMigrated.push(`DNS zones (${zones.join(", ")}): point the A/AAAA records to this server when the sites are ready`);
-  const ftp = ((await readText(`${root}/proftpdpasswd`)) ?? "").split("\n").filter(Boolean).length;
+  const ftp = ((await readArchive(root, `${root}/proftpdpasswd`)) ?? "").split("\n").filter(Boolean).length;
   if (ftp) notMigrated.push(`${ftp} FTP account(s): use SFTP instead`);
   notMigrated.push("SSL certificates: issued again automatically by the edge once DNS points here");
 
@@ -301,7 +301,8 @@ async function loadDump(dumpFile: string, db: string, user: string, password: st
   // --defaults-file: nothing else (e.g. /root/.my.cnf) can swap in root's credentials.
   await writeAtomic(cnf, `[client]\nuser=${user}\npassword=${password}\nsocket=${await mysqlSocket()}\n`, 0o600);
   try {
-    const proc = Bun.spawn(["mysql", `--defaults-file=${fsPath(cnf)}`, "--batch", db], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+    // --binary-mode: a line like "\! cmd" or "source file" in the dump is data, not a client command run as root.
+    const proc = Bun.spawn(["mysql", `--defaults-file=${fsPath(cnf)}`, "--batch", "--binary-mode", db], { stdin: "pipe", stdout: "ignore", stderr: "pipe" });
     const errText = new Response(proc.stderr).text();
     let pending = "";
     const push = async (lines: string[]) => {
@@ -350,7 +351,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
       await sql(`CREATE USER ${lit(user)}@'localhost' IDENTIFIED BY ${lit(pw)};`);
       created.set(user, pw);
     }
-    await sql(`GRANT ALL PRIVILEGES ON ${ident(db.name)}.* TO ${lit(user)}@'localhost';`);
+    await sql(`GRANT ALL PRIVILEGES ON ${grantDb(db.name)}.* TO ${lit(user)}@'localhost';`);
     try {
       if (!(await insideArchive(root, `${root}/mysql/${db.name}.sql`))) throw new Error(`${db.name}: dump is not a regular file in the archive`);
       await loadDump(`${root}/mysql/${db.name}.sql`, db.name, user, created.get(user)!);
@@ -359,7 +360,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
       report.warnings.push(e instanceof Error ? e.message : String(e));
     }
     // Back to exactly what cPanel granted.
-    await sql(`REVOKE ALL PRIVILEGES ON ${ident(db.name)}.* FROM ${lit(user)}@'localhost';`);
+    await sql(`REVOKE ALL PRIVILEGES ON ${grantDb(db.name)}.* FROM ${lit(user)}@'localhost';`);
   }
   for (const u of tempUsers) await sql(`DROP USER IF EXISTS ${lit(u)}@'localhost';`);
 
@@ -372,7 +373,7 @@ export async function applyArchive(file: string, select: { sites: string[]; data
       await sql(`CREATE USER ${lit(u.user)}@'localhost' IDENTIFIED BY ${lit(pw)};`);
       created.set(u.user, pw);
     }
-    for (const [d, privs] of dbs) await sql(`GRANT ${privs.join(", ")} ON ${ident(d)}.* TO ${lit(u.user)}@'localhost';`);
+    for (const [d, privs] of dbs) await sql(`GRANT ${privs.join(", ")} ON ${grantDb(d)}.* TO ${lit(u.user)}@'localhost';`);
     const hash = u.hashOk ? parseGrants((await readArchive(root, `${root}/mysql.sql`)) ?? "").users.get(u.user)?.hash : "";
     if (hash) {
       await sql(`ALTER USER ${lit(u.user)}@'localhost' IDENTIFIED BY PASSWORD ${lit(hash)};`);
@@ -391,8 +392,12 @@ export async function applyArchive(file: string, select: { sites: string[]; data
       if (!(await insideArchive(`${root}/homedir`, s.docroot, true))) throw new Error("document root leaves the archive");
       await createPhpSite({ name: s.name, domains: s.domains, version: s.php, source: "cpanel", placeholder: false }, actor);
       const home = siteHome(s.name);
+      // No PHP runs while root copies: the archive's own code, already copied and called through the
+      // edge, could otherwise swap a directory for a link and have cp write through it.
+      await run(["systemctl", "stop", phpUnit(s.name)]);
       await run(["cp", "-a", "--", `${fsPath(s.docroot)}/.`, fsPath(`${home}/public/`)], { timeoutMs: 3_600_000 });
       report.warnings.push(...(await fixPermissions(s.name)).map((w) => `${s.name}: ${w}`));
+      await run(["systemctl", "start", phpUnit(s.name)]);
       const ht = await scanHtaccess(`${home}/public`);
       sites.upsert({ ...sites.get(s.name)!, deny_paths: ht.denyPaths });
       report.warnings.push(...s.warnings.map((w) => `${s.name}: ${w}`));

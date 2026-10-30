@@ -14,7 +14,13 @@ const PROTECTED_DBS = new Set([...SYSTEM_DBS, "cyberpanel"]);
 const SYSTEM_USERS = new Set(["root", "mysql", "mariadb.sys", "mysql.sys", "mysql.session", "mysql.infoschema", "debian-sys-maint", "cyberpanel", "healthcheck"]);
 
 export const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-export const ident = (s: string) => `\`${s}\``;
+export const ident = (s: string) => `\`${s.replace(/`/g, "``")}\``;
+/**
+ * A database name in GRANT/REVOKE ... ON <db>.*: "_" and "%" are wildcards there, so a_b would also
+ * cover axb (and _____ every five-letter database, mysql included). Escaped, it means only itself.
+ * A name that comes escaped already (cPanel's grants) is read as the database it names.
+ */
+export const grantDb = (s: string) => ident(s.replace(/\\([_%])/g, "$1").replace(/[_%]/g, "\\$&"));
 
 export async function sql(query: string): Promise<string[][]> {
   const r = await run(["mysql", "--batch", "--skip-column-names", "--raw"], { input: query, timeoutMs: 60_000 });
@@ -61,7 +67,7 @@ export async function createDatabase(input: { name: unknown; user?: unknown; pas
   if (user) {
     stmts.push(
       `CREATE USER IF NOT EXISTS ${lit(user)}@'localhost' IDENTIFIED BY ${lit(password)};`,
-      `GRANT ALL PRIVILEGES ON ${ident(name)}.* TO ${lit(user)}@'localhost';`,
+      `GRANT ALL PRIVILEGES ON ${grantDb(name)}.* TO ${lit(user)}@'localhost';`,
       "FLUSH PRIVILEGES;",
     );
   }
@@ -94,7 +100,7 @@ export async function grant(db: unknown, user: unknown, actor: string) {
   if (PROTECTED_DBS.has(name)) throw new Error(`${name} is protected`);
   const u = v.dbUser(user);
   if (SYSTEM_USERS.has(u)) throw new Error(`${u} is a system account`);
-  await sql(`GRANT ALL PRIVILEGES ON ${ident(name)}.* TO ${lit(u)}@'localhost';\nFLUSH PRIVILEGES;`);
+  await sql(`GRANT ALL PRIVILEGES ON ${grantDb(name)}.* TO ${lit(u)}@'localhost';\nFLUSH PRIVILEGES;`);
   audit(actor, "db.grant", { db: name, user: u });
 }
 
@@ -109,8 +115,7 @@ export async function attachUser(db: string, user: string, password: string) {
     [
       `CREATE USER IF NOT EXISTS ${lit(u)}@'localhost' IDENTIFIED BY ${lit(password)};`,
       `ALTER USER ${lit(u)}@'localhost' IDENTIFIED BY ${lit(password)};`,
-      // "_" is a wildcard in a database-level grant: escaped, a_b cannot also match axb.
-      `GRANT ALL PRIVILEGES ON ${ident(name.replace(/_/g, "\\_"))}.* TO ${lit(u)}@'localhost';`,
+      `GRANT ALL PRIVILEGES ON ${grantDb(name)}.* TO ${lit(u)}@'localhost';`,
       "FLUSH PRIVILEGES;",
     ].join("\n"),
   );
@@ -121,8 +126,12 @@ export function dumpCommand(db: string): string[] {
   return ["mysqldump", "--single-transaction", "--quick", "--routines", "--triggers", "--events", "--hex-blob", "--", v.dbName(db)];
 }
 
+/**
+ * --binary-mode: client commands in the dump ("\! cmd", "source file", also inside a /*! *\/ comment
+ * a tenant's routine body can carry) are not run; this client runs as root.
+ */
 export function restoreCommand(db: string): string[] {
-  return ["mysql", v.dbName(db)];
+  return ["mysql", "--binary-mode", v.dbName(db)];
 }
 
 /** Whether the server listens beyond localhost (shown on the Security page). */
