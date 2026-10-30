@@ -14,6 +14,7 @@ export const NAV: [string, string][] = [
   ["/runtimes", "Runtimes"],
   ["/containers", "Containers"],
   ["/android", "Android"],
+  ["/runner", "Runner"],
   ["/edge", "Edge"],
   ["/vpn", "Private access"],
   ["/security", "Security"],

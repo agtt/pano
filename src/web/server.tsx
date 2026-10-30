@@ -15,6 +15,7 @@ import { t } from "./i18n.ts";
 import { parseRange } from "./views/charts.tsx";
 import { assets } from "./assets.ts";
 import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailView, type AndroidStatusView } from "./views/android.tsx";
+import { RunnerPage, type RunnerView } from "./views/runner.tsx";
 import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
@@ -263,6 +264,37 @@ export function createWebApp() {
     const name = c.req.param("name")!;
     needOtp(c, f.otp);
     await call("android.signing.clear", { name }, actor(c));
+    return `/android/${name}`;
+  }));
+  // ---- Runner: heavy commands from a developer's machine (optional)
+  app.get("/runner", async (c) => page(c, t("Runner"), <RunnerPage v={await call<RunnerView>("runner.status")} csrf={c.get("s").csrf} />));
+  app.post("/runner/enable", act("/runner", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("runner.enable", {}, actor(c));
+  }));
+  app.post("/runner/disable", act("/runner", async (c) => {
+    await call("runner.disable", {}, actor(c));
+  }));
+  app.post("/runner/config", act("/runner", async (c, f) => {
+    await call("runner.config", { memory_mb: Number(f.memory_mb), timeout_min: Number(f.timeout_min), parallel: Number(f.parallel) }, actor(c));
+  }));
+  app.post("/runner/keys", act("/runner", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("runner.key.add", { key: f.key }, actor(c));
+  }));
+  app.post("/runner/keys/remove", act("/runner", async (c, f) => {
+    await call("runner.key.remove", { fingerprint: f.fingerprint }, actor(c));
+  }));
+  app.post("/runner/workspaces/clean", act("/runner", async (c, f) => {
+    await call("runner.workspace.clean", { ws: f.ws }, actor(c));
+  }));
+  app.post("/runner/cache/clear", act("/runner", async (c) => {
+    await call("runner.cache.clear", {}, actor(c));
+  }));
+
+  app.post("/android/:name/cache/clear", act("/android", async (c) => {
+    const name = c.req.param("name")!;
+    await call("android.cache.clear", { name }, actor(c));
     return `/android/${name}`;
   }));
   app.post("/android/:name/delete", act("/android", async (c, f) => {

@@ -3,9 +3,11 @@
 // removed after it: a transient systemd unit with a user that exists only
 // while it runs (DynamicUser), its own empty directory, no access to other
 // users' files, a memory cap and low CPU priority. When it ends the user, the
-// directory, the Gradle cache and the source are gone; only the APK/AAB is
-// kept. Signing happens afterwards in a second throwaway sandbox without
-// network, so the project's code (and its dependencies) never see the key.
+// directory and the source are gone; the APK/AAB is kept, and so is the
+// project's download cache (Gradle, npm, bun), which only that project's next
+// build sees (without it every build downloads hundreds of MB again). Signing
+// happens afterwards in a second throwaway sandbox without network, so the
+// project's code (and its dependencies) never see the key.
 
 import { appendFile, chown, readdir } from "node:fs/promises";
 import { ARTIFACT_NAME, artifactFile, toolchainDir } from "../shared/android.ts";
@@ -15,8 +17,8 @@ import { notify } from "./alerts.ts";
 import { ensureUser } from "./edge.ts";
 import { installed as installedRuntimes, runtimeBin, sha256 } from "./runtimes.ts";
 import { androidBuilds, androidProjects, audit, settings, type AndroidArtifact, type AndroidProject } from "./state.ts";
-import { ensureDir, exists, lookupUser, readText, remove, run, writeAtomic } from "./sys.ts";
-import { readResult, removeSandbox, runSandbox, sandboxDir } from "./throwaway.ts";
+import { dirBytes, ensureDir, exists, lookupUser, readText, remove, run, writeAtomic } from "./sys.ts";
+import { cacheName, cachePath, readResult, removeCache, removeSandbox, runSandbox, sandboxDir } from "./throwaway.ts";
 
 /** Fetches sources with the projects' deploy keys; never runs anything from a repository. */
 export const FETCH_USER = "pano-android";
@@ -27,8 +29,8 @@ const keyDir = (name: string) => `${ROOT}/keys/${name}`;
 /** keystore, alias, storepass, keypass: root-only files, handed to the signing sandbox as systemd credentials. */
 const signingDir = (name: string) => `${paths.secrets}/android/${name}`;
 
-const SDK = `${toolchainDir}/sdk`;
-const jdkDir = (n: number) => `${toolchainDir}/jdk-${n}`;
+export const SDK = `${toolchainDir}/sdk`;
+export const jdkDir = (n: number) => `${toolchainDir}/jdk-${n}`;
 const sdkmanager = `${SDK}/cmdline-tools/latest/bin/sdkmanager`;
 const CMDLINE_TOOLS = {
   url: "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip",
@@ -98,8 +100,17 @@ export async function removeProject(name: string, actor: string) {
   for (const id of androidBuilds.older(name, 0)) await dropBuild(id);
   await remove(keyDir(name));
   await remove(signingDir(name));
+  await removeCache(cacheName(name));
   androidProjects.remove(name);
   audit(actor, "android.project.remove", { name });
+}
+
+/** The next build downloads Gradle, its plugins and the dependencies again (a broken or poisoned cache). */
+export async function clearCache(name: string, actor: string) {
+  mustGet(name);
+  if (androidBuilds.running().some((b) => b.project === name)) throw new Error("a build is running for this project");
+  await removeCache(cacheName(name));
+  audit(actor, "android.cache.clear", { name });
 }
 
 /** Read-only deploy key for a private repository (add it to the repository, not to an account). */
@@ -382,21 +393,26 @@ async function runBuild(id: number, p: AndroidProject) {
     androidBuilds.setCommit(id, sha);
     log(`commit ${sha}\n`);
 
-    step(`build in a throwaway sandbox (${p.memory_mb} MB, ${p.timeout_min} min)`);
+    step(`build in a throwaway sandbox (${p.memory_mb} MB, ${p.timeout_min} min, the project's download cache kept)`);
     const runtimes = await installedRuntimes();
     const node = runtimes.find((r) => r.runtime === "node");
     const bun = runtimes.find((r) => r.runtime === "bun");
     const extra = [node && runtimeBin("node", node.version), bun && runtimeBin("bun", bun.version)].filter(Boolean).join(":");
     const home = `/var/lib/${unit("build", id)}`;
+    const cache = cacheName(p.name);
+    const c = cachePath(cache);
     const env = {
-      GRADLE_USER_HOME: `${home}/.gradle`,
+      GRADLE_USER_HOME: `${c}/gradle`,
+      XDG_CACHE_HOME: `${c}/xdg`,
+      npm_config_cache: `${c}/npm`,
+      BUN_INSTALL_CACHE_DIR: `${c}/bun`,
       ANDROID_USER_HOME: `${home}/.android`,
       JAVA_HOME: jdkDir(p.jdk),
       ANDROID_HOME: SDK,
       ANDROID_SDK_ROOT: SDK,
       PATH: `${jdkDir(p.jdk)}/bin:${SDK}/platform-tools${extra ? `:${extra}` : ""}:/usr/local/bin:/usr/bin:/bin`,
     };
-    const r = await runSandbox(unit("build", id), { memoryMb: p.memory_mb, timeoutMin: p.timeout_min, network: true, env }, buildScript(p), {
+    const r = await runSandbox(unit("build", id), { memoryMb: p.memory_mb, timeoutMin: p.timeout_min, network: true, env, cache }, buildScript(p), {
       inputFile: fsPath(tar),
       onLine: tee,
       check: false,
@@ -574,5 +590,11 @@ export async function androidStatus() {
 
 export async function projectDetail(name: string) {
   const p = mustGet(name);
-  return { project: p, signing: await signingAlias(name), deployKey: await deployKey(name), builds: androidBuilds.list(name, KEEP_BUILDS) };
+  return {
+    project: p,
+    signing: await signingAlias(name),
+    deployKey: await deployKey(name),
+    builds: androidBuilds.list(name, KEEP_BUILDS),
+    cacheBytes: await dirBytes(`/var/cache/private/${cacheName(name)}`),
+  };
 }

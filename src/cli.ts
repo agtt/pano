@@ -6,6 +6,7 @@
 //   pano update --latest | <binary> <sha256>  update to the latest release or a given binary (root)
 //   pano admin <username>   create an admin or reset its password + 2FA (root)
 //   pano rpc <method> [json]  call the agent directly (root)
+//   pano run-shell          SSH forced command of the Runner (pano-run)
 
 import { chmod, copyFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { DRY_RUN, VERSION, env, fsPath, paths } from "./shared/config.ts";
@@ -76,6 +77,11 @@ async function main() {
       const { vacuumInto } = await import("./agent/sqlite.ts");
       vacuumInto(args[0]!, args[1]!);
       break;
+    }
+    case "run-shell": {
+      // Internal: the SSH forced command of the Runner's keys (run-shell.ts), as pano-run.
+      const { runShell } = await import("./run-shell.ts");
+      process.exit(await runShell(process.env.SSH_ORIGINAL_COMMAND ?? args.join(" ")));
     }
     case "recover": {
       if (!DRY_RUN && process.getuid?.() !== 0) fail("run as root");

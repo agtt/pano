@@ -43,7 +43,7 @@ test("signing reads the key only from systemd credentials", () => {
 
 test("throwaway sandbox: own user and directory, pano out of sight, no network when asked", () => {
   const net = sandboxArgv("pano-android-build-7", { memoryMb: 6144, timeoutMin: 60, network: true }, "true").join("\n");
-  for (const p of ["DynamicUser=yes", "StateDirectory=pano-android-build-7", "MemoryMax=6144M", "RuntimeMaxSec=3600", "NoNewPrivileges=yes", "InaccessiblePaths=-/etc/pano -/var/lib/pano -/srv/pano", "IPAddressDeny=169.254.169.254/32"]) {
+  for (const p of ["DynamicUser=yes", "StateDirectory=pano-android-build-7", "MemoryMax=6144M", "RuntimeMaxSec=3600", "NoNewPrivileges=yes", "InaccessiblePaths=-/etc/pano -/var/lib/pano -/run/pano -/srv/pano", "IPAddressDeny=169.254.169.254/32"]) {
     expect(net).toContain(p);
   }
   const off = sandboxArgv("pano-android-sign-7", { memoryMb: 1024, timeoutMin: 10, network: false, props: ["LoadCredential=alias:/etc/pano/secrets/android/x/alias"] }, "true").join("\n");

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# pano-remote: run a heavy command (Gradle, tests, a web build) on your pano
+# server instead of this machine. Syncs the project with rsync (only what
+# changed), runs the command in the server's runner sandbox, streams the output
+# and exits with its code. Build outputs, node_modules and caches stay on the
+# server, so the next run is incremental. Turn the runner on and add your key on
+# the panel's Runner page first.
+#
+#   pano-remote init pano-run@server            remember the server (~/.config/pano-remote/host)
+#   pano-remote [options] -- <command...>       sync, run in the current directory, exit with its code
+#   pano-remote pull <path>...                  copy paths (relative to here) back from the server
+#   pano-remote ls | stop | clean               workspaces, stop this project's run, delete its server copy
+#
+# Options:
+#   -p, --pull <path>   after the run, copy this path back (repeatable), e.g. -p android/app/build/outputs
+#   -w <name>           workspace name (default: project folder + hash of its path)
+#   -H <user@host>      server (default: $PANO_REMOTE or the init file)
+#   --jdk 17|21         JDK for Gradle (default 17)
+#   --git               sync .git too (for builds that read the commit)
+#   --no-sync           run on what the server already has
+#
+# Not synced: node_modules, build, .gradle, .cxx, .kotlin, .next, .expo, Pods, DerivedData, .idea,
+# .claude, .DS_Store, .git (see --git) and anything listed in .panoignore (rsync exclude patterns).
+# node_modules come from an install on the server: put it in the command (bun install && ...).
+set -euo pipefail
+
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/pano-remote"
+die() { echo "pano-remote: $*" >&2; exit 2; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+host="${PANO_REMOTE:-}"
+[ -z "$host" ] && [ -f "$conf/host" ] && host=$(<"$conf/host")
+ws="" jdk=17 git=0 sync=1 pulls=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H|--host) host=$2; shift 2 ;;
+    -w|--workspace) ws=$2; shift 2 ;;
+    -p|--pull) pulls+=("${2%/}"); shift 2 ;;
+    --jdk) jdk=$2; shift 2 ;;
+    --git) git=1; shift ;;
+    --no-sync) sync=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) die "unknown option $1 (see --help)" ;;
+    *) break ;;
+  esac
+done
+
+sub=run
+case "${1:-}" in init|pull|ls|stop|clean) sub=$1; shift ;; esac
+
+if [ "$sub" = init ]; then
+  [ $# -eq 1 ] || die "usage: pano-remote init pano-run@server"
+  mkdir -p "$conf"
+  printf '%s\n' "$1" >"$conf/host"
+  host=$1
+fi
+[ -n "$host" ] || die "no server: pano-remote init pano-run@server (or PANO_REMOTE=...)"
+
+ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/pano-remote-%C" -o ControlPersist=10m)
+rsh="ssh ${ssh_opts[*]}"
+remote() { ssh "${ssh_opts[@]}" "$host" "$*"; }
+
+root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+rel=${PWD#"$root"}
+rel=${rel#/}
+if [ -z "$ws" ]; then
+  base=$(basename "$root" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-' | sed 's/^[^a-z0-9]*//; s/-*$//')
+  ws="${base:0:40}-$(printf %s "$root" | { shasum 2>/dev/null || sha1sum; } | cut -c1-6)"
+  ws=${ws#-}
+fi
+[[ "$ws" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "bad workspace name $ws (use -w)"
+here="$ws${rel:+/$rel}"
+
+pull() {
+  local p
+  for p in "$@"; do
+    mkdir -p "$(dirname "$p")"
+    rsync -az -e "$rsh" "$host:$here/$p" "$(dirname "$p")/" || echo "pano-remote: could not pull $p" >&2
+  done
+}
+
+case "$sub" in
+  init) remote ls >/dev/null && echo "pano-remote: $host works" ; exit ;;
+  ls) remote ls; exit ;;
+  stop) remote stop "$ws"; exit ;;
+  clean) remote clean "$ws"; exit ;;
+  pull) [ $# -gt 0 ] || die "usage: pano-remote pull <path>..."; pull "$@"; exit ;;
+esac
+
+[ $# -gt 0 ] || die "nothing to run (pano-remote -- ./gradlew assembleDebug)"
+if [ $# -eq 1 ]; then cmd=$1; else cmd=$(printf '%q ' "$@"); fi
+[ -n "$rel" ] && cmd="cd $(printf %q "$rel") && $cmd"
+
+if [ $sync = 1 ]; then
+  ex=(--exclude=node_modules/ --exclude=build/ --exclude=.gradle/ --exclude=.cxx/ --exclude=.kotlin/ --exclude=.next/
+      --exclude=.expo/ --exclude=Pods/ --exclude=DerivedData/ --exclude=.idea/ --exclude=.claude/ --exclude=.DS_Store)
+  [ $git = 1 ] || ex+=(--exclude=/.git/)
+  [ -f "$root/.panoignore" ] && ex+=("--exclude-from=$root/.panoignore")
+  # --delete leaves excluded paths alone: the server keeps its build outputs and node_modules.
+  rsync -az --delete "${ex[@]}" -e "$rsh" "$root/" "$host:$ws/"
+fi
+
+# Ctrl-C stops the run on the server too.
+trap 'remote stop "$ws" >/dev/null 2>&1; exit 130' INT TERM
+set +e
+remote run "$ws" "$jdk" "$(printf %s "$cmd" | base64 | tr -d '\n')"
+code=$?
+set -e
+trap - INT TERM
+[ ${#pulls[@]} -gt 0 ] && pull "${pulls[@]}"
+exit $code

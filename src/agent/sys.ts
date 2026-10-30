@@ -217,3 +217,10 @@ export async function diskUsage(abs = "/"): Promise<{ size: number; used: number
   const size = s.blocks * s.bsize;
   return { size, used: (s.blocks - s.bfree) * s.bsize, avail: s.bavail * s.bsize };
 }
+
+/** Bytes a directory takes on disk (0 when it does not exist). */
+export async function dirBytes(abs: string): Promise<number> {
+  if (!(await exists(abs))) return 0;
+  const r = await run(["du", "-sb", fsPath(abs)], { check: false, timeoutMs: 60_000 });
+  return Number(r.stdout.split("\t")[0]) || 0;
+}

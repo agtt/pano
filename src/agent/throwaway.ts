@@ -3,8 +3,10 @@
 // with an empty private directory as its home, read-only everything else and
 // nothing of other users. Input comes in on stdin, results are picked up from
 // its directory after it stopped, then the directory goes too: nothing of it
-// is left on the server.
+// is left on the server except, when asked for, a download cache (Gradle,
+// npm, bun) that the next sandbox of the same project starts from.
 
+import { createHash } from "node:crypto";
 import { constants, lstat, open } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { LOW } from "./apps.ts";
@@ -18,25 +20,24 @@ export type SandboxOptions = {
   env?: Record<string, string>;
   /** extra unit properties, e.g. LoadCredential= for a key it may read */
   props?: string[];
+  /** a cache that outlives the sandbox (cacheName): /var/cache/<cache>, owned by a user of that name that still exists only while a sandbox runs */
+  cache?: string;
 };
 
 const UNIT = /^pano-[a-z0-9-]{1,80}$/;
+const CACHE = /^pano-c-[a-f0-9]{12}$/;
 
 /** Where systemd keeps the directory of a DynamicUser unit; root reads results there once the unit stopped. */
 export const sandboxDir = (unit: string) => `/var/lib/private/${unit}`;
 
-export function sandboxArgv(unit: string, o: SandboxOptions, script: string): string[] {
-  if (!UNIT.test(unit)) throw new Error(`bad sandbox name ${unit}`);
-  const home = `/var/lib/${unit}`;
-  const props = [
-    "DynamicUser=yes",
-    `StateDirectory=${unit}`,
-    `WorkingDirectory=${home}`,
-    `MemoryMax=${o.memoryMb}M`,
-    "MemorySwapMax=0",
-    `RuntimeMaxSec=${o.timeoutMin * 60}`,
-    "TasksMax=4096",
-    ...LOW.trim().split("\n"),
+/** A cache per owner (an Android project): a valid user name too (32 chars at most), so the dynamic uid stays the same between runs and nothing is chowned again. */
+export const cacheName = (owner: string) => `pano-c-${createHash("sha256").update(owner).digest("hex").slice(0, 12)}`;
+/** The cache as the sandbox sees it. */
+export const cachePath = (cache: string) => `/var/cache/${cache}`;
+
+/** What every sandbox gets: nothing of pano or other users, no privileges, no kernel knobs, a narrow syscall set. */
+export function hardening(network: boolean): string[] {
+  return [
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     "ProtectHome=yes",
@@ -55,14 +56,32 @@ export function sandboxArgv(unit: string, o: SandboxOptions, script: string): st
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "UMask=0077",
-    // pano's state, secrets, apps and sites (DynamicUser already hides other sandboxes' directories).
-    `InaccessiblePaths=-${paths.etc} -${paths.data} -/srv/pano`,
+    // pano's state, secrets, socket, apps and sites (DynamicUser already hides other sandboxes' directories).
+    `InaccessiblePaths=-${paths.etc} -${paths.data} -${paths.run} -/srv/pano`,
     "SystemCallArchitectures=native",
     "SystemCallFilter=@system-service",
     "SystemCallErrorNumber=ENOSYS",
-    ...(o.network
+    ...(network
       ? ["RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX", "IPAddressDeny=169.254.169.254/32"]
       : ["PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX", "IPAddressDeny=any"]),
+  ];
+}
+
+export function sandboxArgv(unit: string, o: SandboxOptions, script: string): string[] {
+  if (!UNIT.test(unit)) throw new Error(`bad sandbox name ${unit}`);
+  if (o.cache && !CACHE.test(o.cache)) throw new Error(`bad cache name ${o.cache}`);
+  const home = `/var/lib/${unit}`;
+  const props = [
+    "DynamicUser=yes",
+    ...(o.cache ? [`User=${o.cache}`, `CacheDirectory=${o.cache}`] : []),
+    `StateDirectory=${unit}`,
+    `WorkingDirectory=${home}`,
+    `MemoryMax=${o.memoryMb}M`,
+    "MemorySwapMax=0",
+    `RuntimeMaxSec=${o.timeoutMin * 60}`,
+    "TasksMax=4096",
+    ...LOW.trim().split("\n"),
+    ...hardening(o.network),
     ...(o.props ?? []),
   ];
   const env = { HOME: home, CI: "1", XDG_CACHE_HOME: `${home}/.cache`, ...o.env };
@@ -85,6 +104,13 @@ export async function removeSandbox(unit: string) {
   await run(["systemctl", "stop", `${unit}.service`], { check: false, quiet: true });
   await remove(sandboxDir(unit));
   await remove(`/var/lib/${unit}`);
+}
+
+/** Drops a cache (the next sandbox downloads everything again). */
+export async function removeCache(cache: string) {
+  if (!CACHE.test(cache)) return;
+  await remove(`/var/cache/private/${cache}`);
+  await remove(cachePath(cache));
 }
 
 /**

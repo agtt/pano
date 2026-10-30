@@ -35,7 +35,7 @@ export type AndroidStatusView = {
   projects: (AndroidProjectRow & { signing: string; last: AndroidBuildRow | null })[];
 };
 
-export type AndroidDetailView = { project: AndroidProjectRow; signing: string; deployKey: string; builds: AndroidBuildRow[] };
+export type AndroidDetailView = { project: AndroidProjectRow; signing: string; deployKey: string; builds: AndroidBuildRow[]; cacheBytes: number };
 
 const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
 
@@ -46,9 +46,9 @@ export function AndroidPage({ v, csrf, toolchainLog }: { v: AndroidStatusView; c
       <Card title={t("Android builds")} actions={<Badge state={tc.installed ? "active" : tc.state || "off"} />}>
         <p class="muted small">
           Optional. Every build runs in a sandbox made for it on this server and removed when it ends: a user that exists only while it runs, an empty
-          directory of its own, nothing of pano, the apps or other builds in sight, a memory cap and low CPU priority. Afterwards only the APK/AAB is kept; the
-          source, the Gradle cache and the user are gone. Signing happens in a second throwaway sandbox without network, so the project's code never sees the
-          key.
+          directory of its own, nothing of pano, the apps or other builds in sight, a memory cap and low CPU priority. Afterwards the source and the user are
+          gone; the APK/AAB is kept, and so is the project's download cache (only its own next builds see it, so they do not download everything again).
+          Signing happens in a second throwaway sandbox without network, so the project's code never sees the key.
         </p>
         {!tc.supported ? (
           <p class="small">Android's build tools only run on x86-64 servers; this one is not.</p>
@@ -228,6 +228,15 @@ export function AndroidDetail({ d, csrf, buildId }: { d: AndroidDetailView; csrf
         <p class="muted small">
           One build at a time; the newest 3 keep their files. From the server: <code>pano rpc android.build '{`{"name":"${p.name}","trigger":"cli"}`}'</code>
         </p>
+        <form method="post" action={`/android/${p.name}/cache/clear`} class="row">
+          <Csrf token={csrf} />
+          <span class="muted small">
+            Download cache (Gradle, npm, bun) kept for this project's next builds: {fmtBytes(d.cacheBytes)}. Only its own builds see it.
+          </span>
+          <button class="btn small" disabled={!d.cacheBytes} title="The next build downloads everything again">
+            Clear cache
+          </button>
+        </form>
       </Card>
 
       <Card title="Signing">

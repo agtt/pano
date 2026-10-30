@@ -9,6 +9,7 @@ import * as appsOps from "./apps.ts";
 import * as envGroups from "./envgroups.ts";
 import { envPending } from "../shared/env.ts";
 import * as previewsOps from "./previews.ts";
+import * as runner from "./runner.ts";
 import * as backup from "./backup.ts";
 import * as containers from "./containers.ts";
 import * as cpanel from "./cpanel.ts";
@@ -60,6 +61,8 @@ const SENSITIVE = new Set([
   "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
   // A project decides which code is built and signed with its key.
   "android.project.save", "android.project.remove", "android.signing.set", "android.signing.clear",
+  // A runner key runs any command here (sandboxed).
+  "runner.enable", "runner.key.add",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -258,6 +261,15 @@ export const methods: Record<string, Handler> = {
   "android.project.remove": (p, actor) => android.removeProject(v.appName(p.name), actor),
   "android.signing.set": (p, actor) => android.setSigning(v.appName(p.name), p, actor),
   "android.signing.clear": (p, actor) => android.clearSigning(v.appName(p.name), actor),
+  "android.cache.clear": (p, actor) => android.clearCache(v.appName(p.name), actor),
+  "runner.status": () => runner.runnerStatus(),
+  "runner.enable": (_p, actor) => runner.enableRunner(actor),
+  "runner.disable": (_p, actor) => runner.disableRunner(actor),
+  "runner.config": (p, actor) => runner.saveConfig(p, actor),
+  "runner.key.add": (p, actor) => runner.addKey(String(p.key ?? ""), actor),
+  "runner.key.remove": (p, actor) => runner.removeKey(String(p.fingerprint ?? ""), actor),
+  "runner.workspace.clean": (p, actor) => runner.cleanWorkspace(String(p.ws ?? ""), actor),
+  "runner.cache.clear": (_p, actor) => runner.clearRunnerCache(actor),
   "android.build": async (p, actor) => ({ id: await android.startBuild(v.appName(p.name), String(p.trigger ?? "manual") === "cli" ? "cli" : "manual", actor) }),
   "android.build.get": (p) => {
     const b = androidBuilds.get(v.int(p.id, 1, 1e9, "id"));

@@ -17,6 +17,7 @@ import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
 import { methods, needsOtp } from "./rpc.ts";
+import { startRunner } from "./runner.ts";
 import { reloadUpdatedPhp } from "./php.ts";
 import { sweepPreviews } from "./previews.ts";
 import { type App, appHosts, apps, backups, deploys, previews, procsOf, pruneAudit, sites, state } from "./state.ts";
@@ -127,6 +128,7 @@ export async function startAgent() {
   applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
   // Android builds cut off by a restart fail; their sandboxes are removed.
   cleanupAndroid().catch((e) => console.error(`[agent] android: ${e}`));
+  startRunner().catch((e) => console.error(`[agent] runner: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));

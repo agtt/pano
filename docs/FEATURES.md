@@ -106,9 +106,15 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 
 **Android builds (optional, nothing installed until asked; x86-64 servers)**
 - Toolchain on demand: Eclipse Temurin JDK 17/21 and the Android SDK under `/opt/pano/android`, checksums verified, read-only for builds; SDK packages a project needs (NDK, CMake, newer platforms) installed by the agent.
-- Every build runs in a throwaway sandbox: a transient systemd unit with a user that exists only while it runs (DynamicUser), an empty directory of its own, pano's state, secrets, apps and sites out of sight, memory cap, low CPU priority, time limit. When it ends the user, the source and the Gradle cache are gone; only the APK/AAB (size, sha256) is kept, the newest three builds keep their files. One build at a time.
+- Every build runs in a throwaway sandbox: a transient systemd unit with a user that exists only while it runs (DynamicUser), an empty directory of its own, pano's state, secrets, apps and sites out of sight, memory cap, low CPU priority, time limit. When it ends the user and the source are gone; the APK/AAB (size, sha256) is kept, the newest three builds keep their files. One build at a time.
+- Per-project download cache (Gradle, npm, bun) kept between builds so they do not download hundreds of MB each time; only that project's builds see it (stable dynamic user + CacheDirectory), size shown, one-click clear, removed with the project.
 - The commit is fetched by an unprivileged user (bare fetch + `git archive`: no checkout, hooks or submodules) and handed to the sandbox on stdin; read-only deploy key per project.
 - Signing with the project's upload/release keystore after the build (apksigner for APK, jarsigner for AAB) in a second throwaway sandbox without network, the key passed as systemd credentials: the project's code and dependencies never see it. Keystore root-only, write-only from the UI.
+
+**Runner: heavy commands from your own machine (optional, off by default)**
+- `tools/pano-remote` (bash, needs ssh + rsync) syncs the project (only what changed; node_modules, build outputs and caches are not sent), runs the command on the server, streams the output, exits with its code and copies paths back (`-p android/app/build/outputs`). Ctrl-C stops the run on the server. Made for coding agents too: one command, no state on the laptop.
+- Server side: `pano-run` user, SSH only with keys added on the Runner page (2FA), each held to `pano run-shell` (`restrict`, forced command): rsync goes through rrsync, confined to the workspaces; runs are asked of the agent on a socket only that user can open.
+- Each run is a transient systemd unit: memory cap, time limit, low CPU priority, ProtectSystem=strict, pano/apps/secrets out of sight, of the runner's home only its workspace and the shared cache (Gradle, npm, bun). Build outputs and node_modules stay in the workspace, so the next run is incremental. Android SDK/JDK and pano's Node.js/Bun on PATH. Parallel runs configurable (default one, others wait).
 
 **Throwaway build sandbox for apps (per app, off by default)**
 - Install and build see only the new release: not the deploy key, data, env file (systemd hands the env to the build) or the shared caches; their own caches are deleted afterwards. Slower builds, same output path.
