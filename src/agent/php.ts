@@ -7,6 +7,7 @@
 // process: nothing PHP runs on the server unless a PHP site exists.
 
 import { readdir, readlink, realpath, rename, unlink } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { DEFAULT_PHP, PHP_VERSIONS, v } from "../shared/validate.ts";
 import { ensureJob } from "./backup.ts";
@@ -457,7 +458,16 @@ export async function convertLegacy(name: string, version: string, actor: string
     await rename(fsPath(`${home}/public`), fsPath(`${home}/public.${Date.now()}`));
   }
   await provision(site.name, ver);
-  await run(["cp", "-a", "--", `${fsPath(site.root)}/.`, fsPath(`${home}/public/`)], { timeoutMs: 3_600_000 });
+  // The tenant owns the docroot and its parents: root copies only a real directory,
+  // never what a symlink there points to (pano's own secrets, another tenant).
+  const src = resolve(fsPath(site.root));
+  const plain = async () => (await realpath(src).catch(() => "")) === src;
+  if (!(await plain())) throw new Error(`document root ${site.root} is or sits under a symlink; nothing was copied`);
+  await run(["cp", "-a", "--", `${src}/.`, fsPath(`${home}/public/`)], { timeoutMs: 3_600_000 });
+  if (!(await plain())) {
+    await remove(`${home}/public`);
+    throw new Error(`document root ${site.root} changed into a symlink while it was copied; the copy was removed`);
+  }
   const warnings = await fixPermissions(site.name);
   const ht = await scanHtaccess(`${home}/public`);
   warnings.push(...ht.warnings);

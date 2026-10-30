@@ -113,7 +113,7 @@ describe("shield", () => {
     const line = (ip: string, uri: string, method = "POST") => JSON.stringify({ request: { client_ip: ip, method, uri } });
     const now = Date.now();
     const lines = [...Array(21)].map(() => line("198.51.100.4", "/wp-login.php"));
-    lines.push(...[...Array(30)].map(() => line("198.51.100.5", "/wp-login.php", "GET")), ...[...Array(30)].map(() => line("127.0.0.5", "/xmlrpc.php")));
+    lines.push(...[...Array(30)].map(() => line("198.51.100.5", "/wp-login.php", "GET")), ...[...Array(30)].map(() => line("127.0.0.5", "/xmlrpc.php")), ...[...Array(30)].map(() => line("1.2.3.4 } }", "/wp-login.php")));
     expect(countLogins(lines, now)).toEqual(["198.51.100.4"]);
     expect(renderBans(["198.51.100.4"], [])).toContain("elements = { 198.51.100.4 }");
     const caddy = renderCaddyfile({ apps: [], sites: [], settings: { email: "", behindCloudflare: true, hooksDomain: "" }, certs: new Set(), banned: ["198.51.100.4"] });

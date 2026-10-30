@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath, rename, stat } from "node:fs/promises";
+import { isIP } from "node:net";
 import { basename, dirname } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
@@ -395,7 +396,8 @@ export function countLogins(lines: string[], now = Date.now()): string[] {
     if (req.method !== "POST" || !LOGIN.test(String(req.uri ?? ""))) continue;
     const ip = String(req.client_ip || req.remote_ip || "");
     // Never this server or a WireGuard device.
-    if (!ip || /^(127\.|10\.77\.0\.)/.test(ip) || ip === "::1") continue;
+    // Only a plain address: it ends up in nft and Caddy rules.
+    if (!isIP(ip) || /^(127\.|10\.77\.0\.)/.test(ip) || ip === "::1") continue;
     const list = (hits.get(ip) ?? []).filter((t) => now - t < WINDOW);
     list.push(now);
     hits.set(ip, list);
@@ -449,8 +451,8 @@ async function syncBans() {
   const list = shieldSettings().bruteforce ? bans().map((b) => b.ip) : [];
   settings.set("shield.bans", JSON.stringify(list));
   await applyEdge().catch((e) => console.error(`[agent] shield bans: ${e}`));
-  const v4 = list.filter((ip) => ip.includes("."));
-  const v6 = list.filter((ip) => ip.includes(":"));
+  const v4 = list.filter((ip) => isIP(ip) === 4);
+  const v6 = list.filter((ip) => isIP(ip) === 6);
   const file = `${paths.etc}/shield-bans.nft`;
   const kernel = list.length && !edgeSettings().behindCloudflare;
   if (!kernel) {
