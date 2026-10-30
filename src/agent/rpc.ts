@@ -59,6 +59,10 @@ const SENSITIVE = new Set([
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
   "firewall.enable", "firewall.disable", "firewall.ports", "cloudflare.lock",
+  // A public domain (with a certificate) for realtime/TURN, like sites.save; dropping backups, like adding them.
+  "realtime.domain", "turn.domain", "backup.job.remove", "backup.prune",
+  // Confirming keeps a lock that would otherwise roll itself back: the web process alone must not.
+  "vpn.confirm", "firewall.confirm",
   "wp.install", "wp.resetPassword",
   "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
   // A project decides which code is built and signed with its key.
@@ -295,9 +299,12 @@ export const methods: Record<string, Handler> = {
     audit(actor, "runtime.install", { runtime: p.runtime, version: p.version });
   },
   "runtimes.uninstall": async (p, actor) => {
-    const inUse = apps.list().some((a) => a.runtime === p.runtime && a.runtime_version === p.version);
-    await runtimes.uninstall(v.runtime(p.runtime), p.version, inUse);
-    audit(actor, "runtime.uninstall", { runtime: p.runtime, version: p.version });
+    // Compared as the directory it removes: "v20.1.0" is 20.1.0.
+    const runtime = v.runtime(p.runtime);
+    const version = v.version(p.version);
+    const inUse = apps.list().some((a) => a.runtime === runtime && a.runtime_version?.replace(/^v/, "") === version);
+    await runtimes.uninstall(runtime, version, inUse);
+    audit(actor, "runtime.uninstall", { runtime, version });
   },
 
   // ---- containers (optional: Podman is installed only when asked for)

@@ -54,6 +54,7 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
           {p.viaVpn ? (
             <form method="post" action="/vpn/confirm" class="inline">
               <Csrf token={p.csrf} />
+              <Otp />
               <button class="btn primary">Confirm, it works</button>
             </form>
           ) : (

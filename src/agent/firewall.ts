@@ -6,6 +6,7 @@
 // is removed again. Only a confirmed firewall is written to disk and started at
 // boot, so a mistake is undone by waiting or by a reboot.
 
+import { readlink } from "node:fs/promises";
 import { env, paths } from "../shared/config.ts";
 import { type FwPort, formatPorts, parsePorts } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
@@ -103,12 +104,17 @@ export function panelIsPublic(host: string): boolean {
   return !/^172\.(1[6-9]|2\d|3[01])\./.test(host);
 }
 
-/** sshd's configured ports plus whatever sshd is really listening on (a socket-activated or second instance). */
-export function sshPorts(sshdT: string, ss: string): number[] {
+/**
+ * sshd's configured ports plus whatever sshd is really listening on (a second instance). A process
+ * name proves nothing (any user can call a listener "sshd"), so a listener only counts when
+ * `isSshd` vouches for its pid.
+ */
+export function sshPorts(sshdT: string, ss: string, isSshd: (pid: number) => boolean = () => true): number[] {
   const ports = new Set<number>();
   for (const m of sshdT.matchAll(/^port (\d+)$/gm)) ports.add(Number(m[1]));
   for (const line of ss.split("\n")) {
-    if (!line.includes('"sshd')) continue;
+    const pid = Number(line.match(/\("sshd[^"]*",pid=(\d+)/)?.[1]);
+    if (!pid || !isSshd(pid)) continue;
     const local = line.trim().split(/\s+/)[3] ?? "";
     const port = Number(local.slice(local.lastIndexOf(":") + 1));
     if (port > 0 && port < 65536) ports.add(port);
@@ -116,9 +122,20 @@ export function sshPorts(sshdT: string, ss: string): number[] {
   return [...ports].sort((a, b) => a - b);
 }
 
+/** Runs as root from the sshd binary (read as root, so a tenant's process cannot hide what it is). */
+async function rootSshd(pid: number): Promise<boolean> {
+  const status = (await readText(`/proc/${pid}/status`)) ?? "";
+  if (!/^Uid:\s+0\s/m.test(status)) return false;
+  const exe = await readlink(`/proc/${pid}/exe`).catch(() => "");
+  return /\/sshd$/.test(exe.replace(/ \(deleted\)$/, ""));
+}
+
 export async function detectSsh(): Promise<number[]> {
   const [t, ss] = await Promise.all([run(["sshd", "-T"], { check: false }), run(["ss", "-Hltnp"], { check: false })]);
-  return sshPorts(t.stdout, ss.stdout);
+  const pids = [...new Set([...ss.stdout.matchAll(/\("sshd[^"]*",pid=(\d+)/g)].map((m) => Number(m[1])))];
+  const trusted = new Set<number>();
+  for (const pid of pids) if (await rootSshd(pid)) trusted.add(pid);
+  return sshPorts(t.stdout, ss.stdout, (pid) => trusted.has(pid));
 }
 
 /** Every SSH port sshd has (a second Port line or instance too), 22 when none is found. */

@@ -521,6 +521,7 @@ export function BackupsPage(p: {
               </form>
               <form method="post" action={`/backups/jobs/${j.id}/remove`}>
                 <Csrf token={p.csrf} />
+                <Otp />
                 <button class="btn small danger">{t("Delete")}</button>
               </form>
             </div>

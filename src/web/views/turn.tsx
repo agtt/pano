@@ -44,6 +44,7 @@ export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; app
       <form method="post" action="/services/turn/domain" class="row">
         <Csrf token={csrf} />
         <Field label="Domain (optional)" name="domain" value={v.domain} placeholder="turn.example.com" hint="A DNS-only (grey cloud) record to this server." />
+        <Otp />
         <button class="btn">{t("Save")}</button>
       </form>
       {v.domain ? (

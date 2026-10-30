@@ -65,6 +65,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
       <form method="post" action="/services/realtime/domain" class="row">
         <Csrf token={csrf} />
         <Field label="Public domain" name="domain" value={r.domain} placeholder="ws.example.com" hint="Point it at this server; TLS is automatic. Empty: localhost only." />
+        <Otp />
         <button class="btn">{t("Save")}</button>
       </form>
 

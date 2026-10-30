@@ -41,6 +41,9 @@ test("panel exposure and ssh detection", () => {
   const ss = 'LISTEN 0 128 0.0.0.0:2200 0.0.0.0:* users:(("sshd",pid=1,fd=3))\nLISTEN 0 128 [::]:2201 [::]:* users:(("sshd",pid=1,fd=4))\nLISTEN 0 1 0.0.0.0:80 0.0.0.0:* users:(("caddy",pid=2,fd=5))';
   expect(sshPorts("port 22\nport 2200\n", ss)).toEqual([22, 2200, 2201]);
   expect(sshPorts("", "")).toEqual([]);
+  // A tenant's listener named "sshd" (pid 7) is not sshd.
+  const fake = `${ss}\nLISTEN 0 128 0.0.0.0:4444 0.0.0.0:* users:(("sshd",pid=7,fd=3))`;
+  expect(sshPorts("port 22\n", fake, (pid) => pid === 1)).toEqual([22, 2200, 2201]);
 });
 
 test("unit loads the saved rules and removes the table on stop", () => {

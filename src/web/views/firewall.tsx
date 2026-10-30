@@ -33,6 +33,7 @@ export function FirewallCard({ v, csrf }: { v: FirewallView; csrf: string }) {
           </p>
           <form method="post" action="/security/firewall/confirm" class="row">
             <Csrf token={csrf} />
+            <Otp />
             <button class="btn primary">Confirm, keep the firewall on</button>
           </form>
         </div>
