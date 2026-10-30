@@ -6,8 +6,9 @@
 // the tunnel; a lock must be confirmed from inside the tunnel within a few
 // minutes or it is undone automatically, so a mistake cannot lock you out.
 
-import { env, paths } from "../shared/config.ts";
+import { DRY_RUN, env, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
+import { allSshPorts, nftPorts } from "./firewall.ts";
 import { audit, settings, state } from "./state.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 
@@ -15,6 +16,7 @@ export const IFACE = "pano0";
 const NET = "10.77.0";
 export const SERVER_IP = `${NET}.1`;
 const UNIT = "pano-vpn.service";
+const LOCKS_UNIT = "pano-vpn-locks.service";
 const CONF = `${paths.vpn}/${IFACE}.conf`;
 const RULES = `${paths.vpn}/rules.nft`;
 const KEY = `${paths.secrets}/wg.key`;
@@ -43,9 +45,9 @@ export function renderConf(privateKey: string, port: number, list: Pick<Peer, "p
   return out.join("\n");
 }
 
-export function renderRules(l: Locks, sshPort: number): string {
+export function renderRules(l: Locks, sshPort: number | number[]): string {
   const drops = [
-    ...(l.ssh ? [`\t\ttcp dport ${sshPort} drop`] : []),
+    ...(l.ssh ? [`\t\ttcp dport ${nftPorts(sshPort)} drop`] : []),
     ...(l.services ? [`\t\ttcp dport { ${SERVICE_PORTS.join(", ")} } drop`] : []),
   ];
   // Own table, created and replaced atomically; a drop here wins over any accept elsewhere.
@@ -94,6 +96,34 @@ WantedBy=multi-user.target
 `;
 }
 
+/**
+ * The locks on their own, loaded before the network comes up: the WireGuard unit waits for the
+ * network, and until it ran a locked SSH or database port would be open after a reboot.
+ */
+export function renderLocksUnit(): string {
+  return `[Unit]
+Description=pano private access locks (nftables table pano_vpn)
+Wants=network-pre.target
+Before=network-pre.target sshd.service ssh.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=nft -f ${RULES}
+ExecReload=nft -f ${RULES}
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+async function ensureLocksUnit() {
+  await writeAtomic(`${paths.systemd}/${LOCKS_UNIT}`, renderLocksUnit(), 0o644);
+  await run(["systemctl", "daemon-reload"]);
+  await run(["systemctl", "enable", LOCKS_UNIT]);
+}
+
 export function clientConfig(p: { privateKey: string; ip: string; psk: string }, server: { publicKey: string; endpoint: string; port: number }): string {
   const host = server.endpoint.includes(":") ? `[${server.endpoint}]` : server.endpoint;
   return [
@@ -126,19 +156,14 @@ async function serverKey(): Promise<{ privateKey: string; publicKey: string }> {
   return { privateKey, publicKey: await wg(["pubkey"], privateKey) };
 }
 
-async function sshPort(): Promise<number> {
-  const r = await run(["sshd", "-T"], { check: false });
-  return Number(r.stdout.match(/^port (\d+)/m)?.[1] ?? 22);
-}
-
 async function defaultEndpoint(): Promise<string> {
   const r = await run(["ip", "-4", "route", "get", "1.1.1.1"], { check: false });
   return r.stdout.match(/\bsrc (\S+)/)?.[1] ?? "";
 }
 
 /** What a VPN device may reach on the server: SSH and the panel always (the lock confirmation comes through the tunnel), admin services and database forwarders as the locks say. */
-export function zonePorts(l: Locks, sshPort: number, panelPort: number): string[] {
-  const ports = new Set([sshPort, panelPort, ...(l.services ? SERVICE_PORTS : []), ...(l.databases ? DB_PORTS : [])]);
+export function zonePorts(l: Locks, sshPort: number | number[], panelPort: number): string[] {
+  const ports = new Set([...[sshPort].flat(), panelPort, ...(l.services ? SERVICE_PORTS : []), ...(l.databases ? DB_PORTS : [])]);
   return [...ports].sort((a, b) => a - b).map((p) => `${p}/tcp`);
 }
 
@@ -166,7 +191,7 @@ async function sync() {
   const port = Number(settings.get("vpn.port") ?? 51820);
   await ensureDir(paths.vpn, 0o700);
   await writeAtomic(CONF, renderConf(privateKey, port, peers()), 0o600);
-  await writeAtomic(RULES, renderRules(locks(), await sshPort()), 0o600);
+  await writeAtomic(RULES, renderRules(locks(), await allSshPorts()), 0o600);
   if (await active()) await run(["systemctl", "reload", UNIT]);
   const on = settings.get("vpn.enabled") === "1";
   await syncDbForward(on && locks().databases);
@@ -187,7 +212,7 @@ export async function syncZone() {
       inZone: has && (await query([`--zone=${ZONE}`, `--query-interface=${IFACE}`])),
       ports: has ? (await fw([`--zone=${ZONE}`, "--list-ports"])).stdout.trim().split(/\s+/).filter(Boolean) : [],
     },
-    zonePorts(locks(), await sshPort(), env.webPort),
+    zonePorts(locks(), await allSshPorts(), env.webPort),
   );
   if (!cmds.length) return;
   for (const c of cmds) await fw(c);
@@ -257,7 +282,7 @@ export async function status() {
     peers: peers().map(({ psk, ...p }) => ({ ...p, ...(stats.get(p.public_key) ?? { endpoint: "", handshake: 0, rx: 0, tx: 0 }) })),
     locks: locks(),
     pending: pending(),
-    sshPort: await sshPort(),
+    sshPort: (await allSshPorts()).join(", "),
   };
 }
 
@@ -284,6 +309,7 @@ export async function enable(input: { port?: unknown; endpoint?: unknown }, acto
   }
   await run(["systemctl", "enable", UNIT]);
   await run(["systemctl", "restart", UNIT]);
+  await ensureLocksUnit();
   settings.set("vpn.enabled", "1");
   audit(actor, "vpn.enable", { port, endpoint });
 }
@@ -294,6 +320,7 @@ export async function disable(actor: string) {
   await setPanelOverVpn(false);
   await syncDbForward(false);
   await run(["systemctl", "disable", "--now", UNIT], { check: false });
+  await run(["systemctl", "disable", LOCKS_UNIT], { check: false });
   if (await firewalld()) {
     await run(["firewall-cmd", "--permanent", `--remove-port=${settings.get("vpn.port") ?? 51820}/udp`], { check: false });
     await run(["firewall-cmd", "--permanent", `--delete-zone=${ZONE}`], { check: false });
@@ -401,7 +428,11 @@ export function confirm(remote: string, actor: string) {
 /** At agent start: an expired, unconfirmed lock is undone; one still in its window is re-armed. */
 export async function recoverPending() {
   // Old installs still have pano0 in the trusted zone: moved at the first start after the update.
-  if (settings.get("vpn.enabled") === "1") await syncZone().catch((e) => console.error(`[agent] vpn firewall zone: ${e}`));
+  if (settings.get("vpn.enabled") === "1") {
+    await syncZone().catch((e) => console.error(`[agent] vpn firewall zone: ${e}`));
+    // Installs from before the separate locks unit get it (and keep it after every update).
+    if (!DRY_RUN) await ensureLocksUnit().catch((e) => console.error(`[agent] vpn locks unit: ${e}`));
+  }
   const p = pending();
   if (!p) return;
   if (p.deadline <= Date.now()) await revertUnconfirmed();

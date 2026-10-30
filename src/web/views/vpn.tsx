@@ -15,7 +15,7 @@ export type VpnStatus = {
   peers: { id: number; name: string; ip: string; public_key: string; created_at: number; endpoint: string; handshake: number; rx: number; tx: number }[];
   locks: Locks;
   pending: { previous: Locks; deadline: number } | null;
-  sshPort: number;
+  sshPort: number | string;
 };
 export type NewPeer = { name: string; ip: string; config: string; qr: string; generated: boolean };
 

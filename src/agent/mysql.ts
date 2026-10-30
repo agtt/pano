@@ -4,8 +4,8 @@
 // ever interpolated unchecked.
 
 import { v } from "../shared/validate.ts";
-import { audit } from "./state.ts";
-import { randomPassword, run } from "./sys.ts";
+import { audit, settings } from "./state.ts";
+import { exists, randomPassword, run } from "./sys.ts";
 
 const SYSTEM_DBS = new Set(["mysql", "information_schema", "performance_schema", "sys"]);
 /** Databases other software depends on: visible, never droppable from the panel. */
@@ -119,6 +119,47 @@ export async function attachUser(db: string, user: string, password: string) {
       "FLUSH PRIVILEGES;",
     ].join("\n"),
   );
+}
+
+/** A grant pattern with an unescaped "_" or "%": it also covers databases it does not name. */
+export const wildcardGrant = (db: string) => /(^|[^\\])(\\\\)*[_%]/.test(db);
+
+/** `GRANT <privs> ON <db>.* TO ...` lines of SHOW GRANTS: the database and what it grants. */
+export function parseDbGrants(lines: string[]): { db: string; privs: string; withGrant: boolean }[] {
+  const out: { db: string; privs: string; withGrant: boolean }[] = [];
+  for (const line of lines) {
+    const m = line.match(/^GRANT (.+?) ON `((?:[^`]|``)+)`\.\* TO .*?( WITH GRANT OPTION)?$/);
+    if (m) out.push({ db: m[2]!.replace(/``/g, "`"), privs: m[1]!, withGrant: !!m[3] });
+  }
+  return out;
+}
+
+/**
+ * Once: grants written before names were escaped (a_b also covering axb) are
+ * narrowed to the database they name, where a database by exactly that name
+ * exists. A deliberate pattern (cPanel's user\_%) has no such database and stays.
+ */
+export async function narrowWildcardGrants() {
+  if (settings.get("mysql.grants.narrowed") === "1") return;
+  if (!(await exists("/usr/bin/mysql")) && !(await exists("/usr/bin/mariadb"))) return settings.set("mysql.grants.narrowed", "1");
+  const dbs = new Set((await sql("SHOW DATABASES;")).map(([n]) => n!));
+  const narrowed: string[] = [];
+  for (const [db, user, host] of await sql("SELECT Db, User, Host FROM mysql.db;")) {
+    if (!db || !user || !host || SYSTEM_USERS.has(user) || !wildcardGrant(db) || !dbs.has(db)) continue;
+    const lines = (await sql(`SHOW GRANTS FOR ${lit(user)}@${lit(host)};`)).map(([l]) => l!);
+    const g = parseDbGrants(lines).find((x) => x.db === db);
+    if (!g) continue;
+    await sql(
+      [
+        `GRANT ${g.privs} ON ${grantDb(db)}.* TO ${lit(user)}@${lit(host)}${g.withGrant ? " WITH GRANT OPTION" : ""};`,
+        `REVOKE ALL PRIVILEGES${g.withGrant ? ", GRANT OPTION" : ""} ON ${ident(db)}.* FROM ${lit(user)}@${lit(host)};`,
+        "FLUSH PRIVILEGES;",
+      ].join("\n"),
+    );
+    narrowed.push(`${user}@${host} on ${db}`);
+  }
+  settings.set("mysql.grants.narrowed", "1");
+  if (narrowed.length) audit("system", "db.grants.narrowed", { grants: narrowed });
 }
 
 /** mysqldump argv for a consistent, non-locking dump of one database. */

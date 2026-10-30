@@ -32,6 +32,7 @@ import * as wordpress from "./wordpress.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
+import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
 import * as system from "./system.ts";
@@ -57,7 +58,7 @@ const SENSITIVE = new Set([
   "realtime.install", "turn.install", "turn.tls", "import.apply", "import.cpanel.apply", "db.grant",
   // Who can sign in (listing is read-only and holds no secrets, so it needs no code).
   "admins.add", "admins.remove", "admins.reset",
-  "firewall.enable", "firewall.disable", "firewall.ports",
+  "firewall.enable", "firewall.disable", "firewall.ports", "cloudflare.lock",
   "wp.install", "wp.resetPassword",
   "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
   // A project decides which code is built and signed with its key.
@@ -558,8 +559,12 @@ export const methods: Record<string, Handler> = {
     active: await edgeActive(),
     cutover: settings.get("edge.cutover") === "1",
     settings: edgeSettings(),
+    cloudflare: cloudflare.cloudflareStatus(),
   }),
   "edge.preview": () => buildCaddyfile(),
+  "cloudflare.check": async () => ({ dns: await cloudflare.checkDns(), problems: await cloudflare.lockProblems() }),
+  "cloudflare.lock": (p, actor) => cloudflare.setLock(!!p.on, !!p.force, actor),
+  "cloudflare.refresh": () => cloudflare.refreshRanges(true),
   "edge.install": async (_p, actor) => {
     const ver = await installCaddy();
     await setupEdgeUnit();
@@ -571,6 +576,7 @@ export const methods: Record<string, Handler> = {
     // Goes into the Caddyfile as is: no braces, quotes or anything Caddy would parse.
     if (email && !/^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}$/.test(email)) throw new Error("invalid email");
     const hooksDomain = p.hooksDomain ? v.domain(p.hooksDomain) : "";
+    if (!p.behindCloudflare && cloudflare.cloudflareStatus().locked) throw new Error("ports 80 and 443 are locked to Cloudflare: unlock them first");
     settings.set("edge.email", email);
     settings.set("edge.behindCloudflare", p.behindCloudflare ? "1" : "0");
     settings.set("edge.hooksDomain", hooksDomain);

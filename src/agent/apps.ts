@@ -7,13 +7,15 @@
 // unnamed process; a monorepo (e.g. several Next.js apps and a worker) lists
 // its processes, each with its own directory, routes, ports and memory cap.
 
-import { appendFile, readdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { appendFile, open, readdir, type FileHandle } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { envSnapshot, groupList, mergeEnv, normalizeGroups } from "../shared/env.ts";
 import { normalizeEnvExclude, PREVIEW_MAX_DEFAULT, PREVIEW_TTL_DEFAULT, validatePreviewDomain } from "../shared/preview.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
+import { removeAppValkey } from "./appvalkey.ts";
 import { groupFile, readGroup } from "./envgroups.ts";
 import { reportStatus } from "./github.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
@@ -174,6 +176,7 @@ export async function deleteApp(name: string, actor: string, removeFiles: boolea
     await writeCrons({ ...app, crons: [] });
     await teardownUnits(name, removeFiles);
   }
+  await removeAppValkey(name);
   apps.remove(name);
   await applyEdge();
   audit(actor, "app.delete", { name, removeFiles });
@@ -786,7 +789,24 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
 type Plan = { install: string; build: string; start: string; pm: string };
 
 type Pkg = { scripts?: Record<string, string>; dependencies?: Record<string, string> };
-const readPkg = async (dir: string) => JSON.parse((await readText(`${dir}/package.json`)) ?? "{}") as Pkg;
+/**
+ * Read as root from a repository: a package.json that is a link (to /etc/shadow, a FIFO) is
+ * not followed, and a broken one says only that, never a piece of what it holds.
+ */
+async function readPkg(dir: string): Promise<Pkg> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await open(fsPath(`${dir}/package.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = await fh.stat();
+    if (!st.isFile() || st.size > 1024 * 1024) return {};
+    return JSON.parse(await fh.readFile("utf8")) as Pkg;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code) return {};
+    throw new Error(`${dir}/package.json is not valid JSON`);
+  } finally {
+    await fh?.close();
+  }
+}
 
 /** Fills in commands the admin left empty, based on the repository's lockfile and scripts. */
 export async function detectPlan(app: Pick<App, "install_cmd" | "build_cmd" | "start_cmd" | "runtime">, workdir: string): Promise<Plan> {

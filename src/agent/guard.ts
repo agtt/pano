@@ -5,6 +5,7 @@
 
 import { paths } from "../shared/config.ts";
 import { edgeSettings } from "./edge.ts";
+import { allSshPorts, nftPorts } from "./firewall.ts";
 import { audit, settings } from "./state.ts";
 import { run, writeAtomic } from "./sys.ts";
 
@@ -15,7 +16,8 @@ export type Guard = { ssh: boolean; http: boolean };
 
 export const guardSettings = (): Guard => ({ ssh: false, http: false, ...JSON.parse(settings.get("guard") ?? "{}") });
 
-export function renderGuard(g: Guard, sshPort: number, behindCloudflare: boolean): string {
+export function renderGuard(g: Guard, sshPort: number | number[], behindCloudflare: boolean): string {
+  const ssh = nftPorts(sshPort);
   const http = g.http && !behindCloudflare; // behind Cloudflare every visitor arrives from a few Cloudflare addresses
   const sets = (name: string, timeout: string) => [
     `\tset ${name}4 { type ipv4_addr; flags dynamic, timeout; timeout ${timeout}; }`,
@@ -32,11 +34,11 @@ export function renderGuard(g: Guard, sshPort: number, behindCloudflare: boolean
     '\t\tiifname { "lo", "pano0" } accept',
     ...(g.ssh
       ? [
-          `\t\tip saddr @ssh_ban4 tcp dport ${sshPort} drop`,
-          `\t\tip6 saddr @ssh_ban6 tcp dport ${sshPort} drop`,
+          `\t\tip saddr @ssh_ban4 tcp dport ${ssh} drop`,
+          `\t\tip6 saddr @ssh_ban6 tcp dport ${ssh} drop`,
           // 20 new connections a minute is far beyond a person (and git, scp, rsync loops).
-          `\t\ttcp dport ${sshPort} ct state new add @ssh_rate4 { ip saddr limit rate over 20/minute burst 20 packets } add @ssh_ban4 { ip saddr } drop`,
-          `\t\ttcp dport ${sshPort} ct state new add @ssh_rate6 { ip6 saddr limit rate over 20/minute burst 20 packets } add @ssh_ban6 { ip6 saddr } drop`,
+          `\t\ttcp dport ${ssh} ct state new add @ssh_rate4 { ip saddr limit rate over 20/minute burst 20 packets } add @ssh_ban4 { ip saddr } drop`,
+          `\t\ttcp dport ${ssh} ct state new add @ssh_rate6 { ip6 saddr limit rate over 20/minute burst 20 packets } add @ssh_ban6 { ip6 saddr } drop`,
         ]
       : []),
     ...(http
@@ -51,13 +53,8 @@ export function renderGuard(g: Guard, sshPort: number, behindCloudflare: boolean
   ].join("\n");
 }
 
-async function sshPort(): Promise<number> {
-  const r = await run(["sshd", "-T"], { check: false });
-  return Number(r.stdout.match(/^port (\d+)/m)?.[1] ?? 22);
-}
-
 export async function setGuard(g: Guard, actor: string) {
-  const text = renderGuard(g, await sshPort(), edgeSettings().behindCloudflare);
+  const text = renderGuard(g, await allSshPorts(), edgeSettings().behindCloudflare);
   await writeAtomic(RULES, text, 0o600);
   // Checked before it is loaded: a rule nft rejects never half-applies.
   await run(["nft", "-c", "-f", RULES]);

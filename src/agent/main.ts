@@ -23,7 +23,9 @@ import { reloadUpdatedPhp } from "./php.ts";
 import { sweepPreviews } from "./previews.ts";
 import { type App, appHosts, apps, backups, deploys, previews, procsOf, pruneAudit, settings, sites, state } from "./state.ts";
 import { ensureDir, lookupUser } from "./sys.ts";
+import { refreshRanges } from "./cloudflare.ts";
 import { startFirewall } from "./firewall.ts";
+import { narrowWildcardGrants } from "./mysql.ts";
 import { renewTlsCert } from "./turn.ts";
 import { recoverPending } from "./vpn.ts";
 
@@ -152,6 +154,13 @@ export async function startAgent() {
   cleanupAndroid().catch((e) => console.error(`[agent] android: ${e}`));
   startRunner().catch((e) => console.error(`[agent] runner: ${e}`));
   if (!DRY_RUN) applyLocalPorts().catch((e) => console.error(`[agent] local ports: ${e}`));
+  if (!DRY_RUN) narrowWildcardGrants().catch((e) => console.error(`[agent] mysql grants: ${e}`));
+  // Cloudflare's ranges, at most daily (the edge trusts them; the lock lets only them in).
+  const cfRanges = () => refreshRanges().catch((e) => console.error(`[agent] cloudflare ranges: ${e}`));
+  if (!DRY_RUN) {
+    cfRanges();
+    setInterval(cfRanges, 6 * 3600_000);
+  }
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));

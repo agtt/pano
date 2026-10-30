@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import { paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
+import { createAppValkey } from "./appvalkey.ts";
 import { ensureJob } from "./backup.ts";
 import { sizes } from "./tune.ts";
 import { attachUser as attachMysqlUser, createDatabase } from "./mysql.ts";
@@ -440,16 +441,13 @@ export async function databaseForApp(
     const r = await createDatabase({ name, user: name }, actor);
     url = `mysql://${r.user}:${r.password}@127.0.0.1:3306/${r.name}`;
   } else {
-    // One Valkey for the server; each app gets its own logical database number.
-    const n = Number(settings.get("svc.valkey.nextDb") ?? 1);
-    if (n > 15) throw new Error("all 15 Valkey databases are in use");
-    settings.set("svc.valkey.nextDb", String(n + 1));
-    url = `${await valkeyUrl()}/${n}`;
+    // An instance of its own (appvalkey.ts): a database number in a shared server would be open to every other app.
+    url = await createAppValkey(app, actor);
   }
   await env.set({ ...current, [key]: url });
   if (engine !== "valkey") ensureJob(engine === "postgres" ? "postgres" : "mysql", name, actor);
   audit(actor, "app.database", { app, engine, key });
-  return { key, engine, database: engine === "valkey" ? url.split("/").pop()! : name };
+  return { key, engine, database: engine === "valkey" ? `own instance (port ${url.split(":").pop()!.split("/")[0]})` : name };
 }
 
 /** The app's own user on an existing database: "<app>_<hash of the database>", unique per pair, at most 27 characters. */

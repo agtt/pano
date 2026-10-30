@@ -708,7 +708,7 @@ export function RuntimesPage(p: {
 
 // ---- edge ------------------------------------------------------------------
 
-export function EdgePage(p: { csrf: string; status: { installed: boolean; active: boolean; cutover: boolean; settings: { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean } }; preview: string; report?: { ok: boolean; steps: string[]; probes: { domain: string; status: string }[] } }) {
+export function EdgePage(p: { csrf: string; status: { installed: boolean; active: boolean; cutover: boolean; settings: { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean }; cloudflare?: { locked: boolean; ranges: number; updatedAt: number } }; preview: string; report?: { ok: boolean; steps: string[]; probes: { domain: string; status: string }[] } }) {
   const s = p.status;
   return (
     <div class="stack">
@@ -783,6 +783,38 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
           </div>
         </form>
       </Card>
+      {s.settings.behindCloudflare && s.cloudflare ? (
+        <Card title="Cloudflare">
+          <p class="muted small">
+            {s.cloudflare.locked
+              ? "Locked: only Cloudflare reaches ports 80 and 443, so nobody can go around its firewall, rate limits and cache by the server's address."
+              : "Open: anyone who finds the server's address reaches the sites directly, around Cloudflare. Lock it once every domain has Cloudflare's proxy on (orange cloud)."}{" "}
+            Set SSL/TLS to Full (strict) in Cloudflare. SSH, the panel and the VPN are not affected. {s.cloudflare.ranges} address ranges
+            {s.cloudflare.updatedAt ? `, fetched ${fmtTime(Math.floor(s.cloudflare.updatedAt / 1000))}` : " (built in, not fetched yet)"}.
+          </p>
+          <div class="row">
+            <form method="post" action="/edge/cloudflare/check">
+              <Csrf token={p.csrf} />
+              <button class="btn">Check DNS</button>
+            </form>
+            <form method="post" action="/edge/cloudflare/refresh">
+              <Csrf token={p.csrf} />
+              <button class="btn">Update ranges</button>
+            </form>
+          </div>
+          <form method="post" action="/edge/cloudflare/lock" class="actions">
+            <Csrf token={p.csrf} />
+            <input type="hidden" name="on" value={s.cloudflare.locked ? "0" : "1"} />
+            {s.cloudflare.locked ? null : (
+              <label class="check">
+                <input type="checkbox" name="force" value="1" /> Lock even if some domains do not come through Cloudflare
+              </label>
+            )}
+            <Otp />
+            <button class={s.cloudflare.locked ? "btn danger" : "btn primary"}>{s.cloudflare.locked ? "Unlock" : "Lock to Cloudflare"}</button>
+          </form>
+        </Card>
+      ) : null}
       <Card title={`${t("Preview")} · Caddyfile`}>
         <pre class="log">{p.preview}</pre>
       </Card>

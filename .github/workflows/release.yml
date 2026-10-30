@@ -1,4 +1,4 @@
-# Tag vX.Y.Z → tested, compiled linux binaries + SHA256SUMS on a GitHub release.
+# Tag vX.Y.Z → tested, compiled linux binaries + signed SHA256SUMS on a GitHub release.
 # The version baked into the binary (VERSION in src/shared/config.ts) is read from
 # package.json at compile time, so the tag is written there before building.
 name: release
@@ -52,10 +52,28 @@ jobs:
           sha256sum pano-linux-x64 pano-linux-arm64 > SHA256SUMS
           cat SHA256SUMS
 
+      # Ed25519 over SHA256SUMS; pano update --latest and install.sh refuse a release
+      # without it. The public half is src/shared/release-key.ts.
+      - name: Sign SHA256SUMS
+        env:
+          PANO_RELEASE_KEY: ${{ secrets.PANO_RELEASE_KEY }}
+        run: |
+          [ -n "$PANO_RELEASE_KEY" ] || { echo "the PANO_RELEASE_KEY secret is not set" >&2; exit 1; }
+          umask 077
+          printf '%s\n' "$PANO_RELEASE_KEY" > "$RUNNER_TEMP/release.key"
+          openssl pkeyutl -sign -inkey "$RUNNER_TEMP/release.key" -rawin -in release/SHA256SUMS -out release/SHA256SUMS.sig
+          rm -f "$RUNNER_TEMP/release.key"
+          bun -e '
+            const { signedBy } = await import("./src/release.ts");
+            const sums = await Bun.file("release/SHA256SUMS").bytes();
+            const sig = await Bun.file("release/SHA256SUMS.sig").bytes();
+            if (!signedBy(sums, sig)) throw new Error("the signature does not match src/shared/release-key.ts");
+          '
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" release/pano-linux-x64 release/pano-linux-arm64 release/SHA256SUMS \
+          gh release create "$TAG" release/pano-linux-x64 release/pano-linux-arm64 release/SHA256SUMS release/SHA256SUMS.sig \
             --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag --generate-notes

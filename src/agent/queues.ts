@@ -6,6 +6,7 @@
 
 import { RedisClient } from "bun";
 import { isWeb, unitName } from "./apps.ts";
+import { appValkeyUrl, appValkeys } from "./appvalkey.ts";
 import * as services from "./services.ts";
 import { apps, audit, procsOf, settings } from "./state.ts";
 import { run } from "./sys.ts";
@@ -28,11 +29,40 @@ export type Worker = { app: string; process: string; unit: string; active: strin
 const enabled = () => settings.get("queues.enabled") === "1";
 const MAX_QUEUES = 200;
 
-async function connect(): Promise<RedisClient> {
-  const url = await services.valkeyUrl();
+async function connect(url: string): Promise<RedisClient> {
   const c = new RedisClient(url, { connectionTimeout: 3000, autoReconnect: false, maxRetries: 0, enableOfflineQueue: false });
   await c.connect();
   return c;
+}
+
+/**
+ * Queues in the shared server and in every app's own Valkey; an app's queues
+ * carry its name in front. The shared server must answer (queues were turned on
+ * there); an app's instance that does not is skipped until the next look.
+ */
+async function readAll(): Promise<Queue[]> {
+  const out: Queue[] = [];
+  let c: RedisClient | null = null;
+  try {
+    c = await connect(await services.valkeyUrl());
+    out.push(...(await readQueues(c)));
+  } finally {
+    c?.close();
+  }
+  for (const { app } of appValkeys()) {
+    const url = await appValkeyUrl(app);
+    if (!url) continue;
+    c = null;
+    try {
+      c = await connect(url);
+      out.push(...(await readQueues(c)).map((q) => ({ ...q, key: `${app}/${q.key}`, name: `${app}/${q.name}` })));
+    } catch {
+      // stopped or restarting
+    } finally {
+      c?.close();
+    }
+  }
+  return out;
 }
 
 /** Every key matching a pattern, without blocking the server (SCAN, never KEYS). */
@@ -107,14 +137,10 @@ export async function queueStatus() {
   const store = (await services.status()).find((s) => s.key === "valkey")!;
   const base = { enabled: enabled(), store: { installed: store.installed, managed: store.managed, version: store.version, active: store.active }, workers: await workers() };
   if (!base.enabled) return { ...base, queues: [] as Queue[], error: "" };
-  let c: RedisClient | null = null;
   try {
-    c = await connect();
-    return { ...base, queues: await readQueues(c), error: "" };
+    return { ...base, queues: await readAll(), error: "" };
   } catch (e) {
     return { ...base, queues: [] as Queue[], error: e instanceof Error ? e.message : String(e) };
-  } finally {
-    c?.close();
   }
 }
 
@@ -149,16 +175,14 @@ export async function checkQueues(
   now = Date.now(),
 ) {
   if (!enabled()) return;
-  let c: RedisClient | null = null;
+  let queues: Queue[];
   try {
-    c = await connect();
-    await judge(await readQueues(c), problem, notify, now);
+    queues = await readAll();
   } catch (e) {
     await problem("queues:store", true, `queue store unreachable: ${e instanceof Error ? e.message : e}`);
     return;
-  } finally {
-    c?.close();
   }
+  await judge(queues, problem, notify, now);
   await problem("queues:store", false, "");
 }
 

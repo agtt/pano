@@ -116,10 +116,19 @@ export function sshPorts(sshdT: string, ss: string): number[] {
   return [...ports].sort((a, b) => a - b);
 }
 
-async function detectSsh(): Promise<number[]> {
+export async function detectSsh(): Promise<number[]> {
   const [t, ss] = await Promise.all([run(["sshd", "-T"], { check: false }), run(["ss", "-Hltnp"], { check: false })]);
   return sshPorts(t.stdout, ss.stdout);
 }
+
+/** Every SSH port sshd has (a second Port line or instance too), 22 when none is found. */
+export async function allSshPorts(): Promise<number[]> {
+  const ports = await detectSsh();
+  return ports.length ? ports : [22];
+}
+
+/** nft port expression: one port, or a set of them. */
+export const nftPorts = (p: number | number[]) => (Array.isArray(p) ? (p.length === 1 ? String(p[0]) : `{ ${p.join(", ")} }`) : String(p));
 
 const extraPorts = (): FwPort[] => parsePorts(settings.get("firewall.ports") ?? "");
 

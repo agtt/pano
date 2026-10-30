@@ -992,6 +992,24 @@ export function createWebApp() {
   app.post("/edge/settings", act("/edge", async (c, f) => {
     await call("edge.settings", { email: f.email, behindCloudflare: f.behindCloudflare === "1", hooksDomain: f.hooksDomain, localCerts: f.localCerts === "1" }, actor(c));
   }));
+  app.post("/edge/cloudflare/check", act("/edge", async () => {
+    const r = await call<{ dns: { domain: string; addrs: string[]; cloudflare: boolean }[]; problems: string[] }>("cloudflare.check");
+    const through = r.dns.filter((d) => d.cloudflare).length;
+    const silent = r.dns.filter((d) => !d.addrs.length).map((d) => d.domain);
+    return [
+      `${through} of ${r.dns.length} domains come through Cloudflare.`,
+      ...(r.problems.length ? [`Would stop working: ${r.problems.join("; ")}`] : []),
+      ...(silent.length ? [`Not resolving: ${silent.join(", ")}`] : []),
+    ].join(" ");
+  }));
+  app.post("/edge/cloudflare/lock", act("/edge", async (c, f) => {
+    await call("cloudflare.lock", { on: f.on === "1", force: f.force === "1" }, actor(c));
+    return f.on === "1" ? "Only Cloudflare reaches ports 80 and 443 now" : "Ports 80 and 443 are open to everyone again";
+  }));
+  app.post("/edge/cloudflare/refresh", act("/edge", async () => {
+    await call("cloudflare.refresh");
+    return "Cloudflare's address ranges are up to date";
+  }));
   app.post("/edge/cutover", async (c) => {
     const f = await form(c);
     try {

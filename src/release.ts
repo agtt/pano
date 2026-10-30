@@ -1,9 +1,22 @@
 // Fetching a pano release from GitHub for `pano update --latest`: the binary for
-// this CPU plus the release's SHA256SUMS. The hash comes from SHA256SUMS, so the
-// binary is checked before update() ever sees it (update() checks it again).
+// this CPU plus the release's SHA256SUMS and its signature. SHA256SUMS must be
+// signed by the release key (so a hijacked release or repository cannot ship a
+// binary), and the hash comes from it, so the binary is checked before update()
+// ever sees it (update() checks it again).
 
+import { createPublicKey, verify } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { RELEASE_PUBKEY } from "./shared/release-key.ts";
+
+/** Whether `sig` (raw Ed25519, as `openssl pkeyutl -sign -rawin` writes it) signs `data`. */
+export function signedBy(data: Uint8Array, sig: Uint8Array, pubkeyPem: string = process.env.PANO_RELEASE_PUBKEY || RELEASE_PUBKEY): boolean {
+  try {
+    return verify(null, data, createPublicKey(pubkeyPem), sig);
+  } catch {
+    return false;
+  }
+}
 
 /** `<sha256>  <file>` lines as written by sha256sum (text or binary mode marker). */
 export function parseSums(text: string): Map<string, string> {
@@ -44,7 +57,10 @@ export async function fetchLatest(): Promise<{ file: string; sha: string; tag: s
     if (!a) throw new Error(`release ${rel.tag_name} has no ${name}`);
     return gh(a.url, "application/octet-stream");
   };
-  const sha = parseSums(await (await asset("SHA256SUMS")).text()).get(bin);
+  const sums = new Uint8Array(await (await asset("SHA256SUMS")).arrayBuffer());
+  const sig = new Uint8Array(await (await asset("SHA256SUMS.sig")).arrayBuffer());
+  if (!signedBy(sums, sig)) throw new Error(`SHA256SUMS of ${rel.tag_name} is not signed by the pano release key`);
+  const sha = parseSums(new TextDecoder().decode(sums)).get(bin);
   if (!sha) throw new Error(`${bin} is not listed in SHA256SUMS of ${rel.tag_name}`);
   const dir = await mkdtemp(`${tmpdir()}/pano-update-`);
   const cleanup = () => rm(dir, { recursive: true, force: true });
