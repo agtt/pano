@@ -42,6 +42,8 @@ jobs:
           grep -m1 '"version"' package.json
 
       - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           bun run build
           bun run build:arm
@@ -49,7 +51,9 @@ jobs:
           mv dist/pano release/pano-linux-x64
           mv dist/pano-arm64 release/pano-linux-arm64
           cd release
-          sha256sum pano-linux-x64 pano-linux-arm64 > SHA256SUMS
+          # The tag inside the signed file: an old signed release cannot pass for another one.
+          printf '# pano %s\n' "$TAG" > SHA256SUMS
+          sha256sum pano-linux-x64 pano-linux-arm64 >> SHA256SUMS
           cat SHA256SUMS
 
       # Ed25519 over SHA256SUMS; pano update --latest and install.sh refuse a release

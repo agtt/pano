@@ -7,6 +7,7 @@
 #   PANO_VERSION   release to install, like 0.2.0 or v0.2.0 (default: the latest)
 #   PANO_REPO      owner/name of the repository (default: agtt/pano)
 #   PANO_RELEASE_PUBKEY  the PEM public key releases are signed with (a fork's own)
+#   PANO_INSECURE_SKIP_SIGNATURE=1  install without OpenSSL 3 (checksum only, not the signature)
 #   GITHUB_TOKEN   optional. While the repository is private, the raw script and the
 #                  release assets can only be fetched with a token that can read it:
 #                  curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -92,9 +93,16 @@ if command -v openssl >/dev/null 2>&1 && openssl pkeyutl -help 2>&1 | grep -q ra
   openssl pkeyutl -verify -pubin -inkey "$TMP/release.pub" -rawin -in "$TMP/SHA256SUMS" -sigfile "$TMP/SHA256SUMS.sig" >/dev/null 2>&1 ||
     fail "SHA256SUMS is not signed by the pano release key; nothing was installed"
   echo "signature ok"
+elif [ "${PANO_INSECURE_SKIP_SIGNATURE:-}" = "1" ]; then
+  echo "warning: PANO_INSECURE_SKIP_SIGNATURE=1, the release signature was not checked (only the checksum)"
 else
-  echo "note: OpenSSL 3 is not installed, the release signature was not checked (only the checksum)"
+  fail "checking the release signature needs OpenSSL 3 (apt install openssl / dnf install openssl), or PANO_INSECURE_SKIP_SIGNATURE=1 to skip it"
 fi
+# The signed file names its release: an old signed release cannot be served as the one asked for.
+SIGNED_TAG="$(sed -n 's/^# pano \(v[0-9][A-Za-z0-9.+-]*\)$/\1/p' "$TMP/SHA256SUMS" | head -n 1)"
+[ -n "$SIGNED_TAG" ] || fail "SHA256SUMS names no release"
+[ -z "$VERSION" ] || [ "$SIGNED_TAG" = "$VERSION" ] || fail "asked for $VERSION but the signed SHA256SUMS is for $SIGNED_TAG"
+echo "release $SIGNED_TAG"
 
 WANT="$(awk -v f="$ASSET" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS")"
 [ -n "$WANT" ] || fail "$ASSET is not listed in SHA256SUMS"

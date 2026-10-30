@@ -28,6 +28,9 @@ export function parseSums(text: string): Map<string, string> {
   return out;
 }
 
+/** The `# pano vX.Y.Z` line the release workflow writes first into SHA256SUMS. */
+export const signedTag = (sums: string) => sums.match(/^# pano (v[0-9][\w.+-]*)$/m)?.[1] ?? null;
+
 export function assetName(arch: string = process.arch): string {
   if (arch === "x64") return "pano-linux-x64";
   if (arch === "arm64") return "pano-linux-arm64";
@@ -60,7 +63,9 @@ export async function fetchLatest(): Promise<{ file: string; sha: string; tag: s
   const sums = new Uint8Array(await (await asset("SHA256SUMS")).arrayBuffer());
   const sig = new Uint8Array(await (await asset("SHA256SUMS.sig")).arrayBuffer());
   if (!signedBy(sums, sig)) throw new Error(`SHA256SUMS of ${rel.tag_name} is not signed by the pano release key`);
-  const sha = parseSums(new TextDecoder().decode(sums)).get(bin);
+  const text = new TextDecoder().decode(sums);
+  if (signedTag(text) !== rel.tag_name) throw new Error(`the signed SHA256SUMS is for ${signedTag(text) ?? "no release"}, not ${rel.tag_name}`);
+  const sha = parseSums(text).get(bin);
   if (!sha) throw new Error(`${bin} is not listed in SHA256SUMS of ${rel.tag_name}`);
   const dir = await mkdtemp(`${tmpdir()}/pano-update-`);
   const cleanup = () => rm(dir, { recursive: true, force: true });

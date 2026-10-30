@@ -5,7 +5,15 @@ import { inRanges, parseCidr, parseRangeList, renderLock } from "../src/agent/cl
 import { renderGuard } from "../src/agent/guard.ts";
 import { parseDbGrants, wildcardGrant } from "../src/agent/mysql.ts";
 import { renderLocksUnit, renderRules } from "../src/agent/vpn.ts";
-import { signedBy } from "../src/release.ts";
+import { parseSums, signedBy, signedTag } from "../src/release.ts";
+
+test("the signed SHA256SUMS names its release and still parses as checksums", () => {
+  const sums = `# pano v1.2.3\n${"a".repeat(64)}  pano-linux-x64\n`;
+  expect(signedTag(sums)).toBe("v1.2.3");
+  expect(signedTag(`${"a".repeat(64)}  pano-linux-x64\n`)).toBeNull();
+  expect(parseSums(sums).get("pano-linux-x64")).toBe("a".repeat(64));
+  expect(parseSums(sums).size).toBe(1);
+});
 
 test("every SSH port is guarded and locked", () => {
   expect(renderGuard({ ssh: true, http: false }, [22, 2222], false)).toContain("tcp dport { 22, 2222 } ct state new");
@@ -20,7 +28,7 @@ test("the VPN locks are in place before sshd starts after a reboot", () => {
 });
 
 test("each app's Valkey: own port and password, localhost only, no debug or module commands", () => {
-  const conf = renderValkeyConf({ port: 6401, password: "pw", app: "shop", maxMb: 128 });
+  const conf = renderValkeyConf({ port: 701, password: "pw", app: "shop", maxMb: 128 });
   expect(conf).toContain("bind 127.0.0.1 -::1");
   expect(conf).toContain("requirepass pw");
   expect(conf).toContain("enable-module-command no");
@@ -29,6 +37,7 @@ test("each app's Valkey: own port and password, localhost only, no debug or modu
   expect(unit).toMatch(/User=pano-vk-[0-9a-f]{12}\n/);
   expect(unit).toContain("IPAddressAllow=localhost");
   expect(unit).toContain("MemoryMax=256M");
+  expect(unit).toContain("CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n");
 });
 
 test("wildcard grants are told apart from escaped ones and read back from SHOW GRANTS", () => {

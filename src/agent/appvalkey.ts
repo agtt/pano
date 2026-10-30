@@ -9,7 +9,13 @@ import { audit, settings } from "./state.ts";
 import { ensureDir, exists, randomPassword, readText, remove, run, writeAtomic } from "./sys.ts";
 
 const CONF_DIR = `${paths.etc}/valkey`;
-const PORT_BASE = 6400;
+/**
+ * Below 1024: only a process with CAP_NET_BIND_SERVICE can listen there, so no
+ * app or site user can take an instance's port while it restarts and collect the
+ * password its app sends. Skips ports other software is known to use.
+ */
+const PORT_RANGE: [number, number] = [700, 899];
+const PORT_SKIP = new Set([749, 750, 751, 752, 753, 754, 853, 860, 873, 883, 888]);
 const MAX_MB = 128;
 
 export const valkeyUnit = (app: string) => `pano-valkey-${app}.service`;
@@ -66,7 +72,9 @@ MemoryMax=${maxMb * 2}M
 TasksMax=64
 Nice=5
 NoNewPrivileges=true
-CapabilityBoundingSet=
+# Its port is below 1024 (see PORT_RANGE); nothing else.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
@@ -102,8 +110,8 @@ async function serverBinary(): Promise<string> {
 
 async function freePort(taken: number[]): Promise<number> {
   const listening = (await run(["ss", "-Htln"], { check: false })).stdout;
-  for (let p = PORT_BASE; p < PORT_BASE + 500; p++) {
-    if (!taken.includes(p) && !new RegExp(`:${p}\\s`).test(listening)) return p;
+  for (let p = PORT_RANGE[0]; p <= PORT_RANGE[1]; p++) {
+    if (!PORT_SKIP.has(p) && !taken.includes(p) && !new RegExp(`:${p}\\s`).test(listening)) return p;
   }
   throw new Error("no free port for another Valkey");
 }
@@ -114,6 +122,8 @@ export async function createAppValkey(app: string, actor: string): Promise<strin
   if (all[app]) throw new Error(`${app} already has its own Valkey`);
   const bin = await serverBinary();
   const port = await freePort(Object.values(all));
+  const unprivileged = Number((await readText("/proc/sys/net/ipv4/ip_unprivileged_port_start"))?.trim() ?? 1024);
+  if (unprivileged <= port) throw new Error(`net.ipv4.ip_unprivileged_port_start is ${unprivileged}: any user could take port ${port}`);
   const password = randomPassword(32);
   await ensureDir(CONF_DIR, 0o700);
   await writeAtomic(confFile(app), renderValkeyConf({ port, password, app, maxMb: MAX_MB }), 0o600);
