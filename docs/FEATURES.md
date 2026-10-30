@@ -104,6 +104,12 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 **Performance defaults**
 - BBR, larger network queues and UDP buffers for HTTP/3 (one switch on the Security page, current vs pano values shown), journal size cap, opcache/realpath cache for PHP, browser caching of static files.
 
+**Android builds (optional, off until a Boat API key is added)**
+- Gradle runs on a throwaway [Boat](https://boat.dev) cloud machine per build, never on the server: APK/AAB come back with size and sha256, the newest three builds keep their files, cost per build shown.
+- The server only fetches the commit (unprivileged user, bare fetch + `git archive`: no checkout, hooks or submodules); read-only deploy key per project for private repositories.
+- Signing with the project's upload/release keystore through Android Gradle Plugin injected signing (no `build.gradle` change). The keystore is root-only on the server, write-only from the UI, sent to the machine for that build only and removed when it ends.
+- Machines start without the Boat account's secrets and without snapshots (a stop or crash erases the disk), with their own deadline, and are deleted after the build or at the next agent start. One saved image with JDK 17/21 and the Android SDK (paid Boat plans) makes builds start in seconds.
+
 **Migration**
 - From CyberPanel/OpenLiteSpeed: scans the server (vhosts, proxies, PHP versions, certificates, databases, crontabs), imports while the old panel keeps serving, moves sites one by one, cutover of ports 80/443 with one-click rollback, CyberPanel removed last.
 - From cPanel: imports `cpmove-USER.tar.gz` full backups (main, addon, sub and parked domains, files, databases).
@@ -113,5 +119,5 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Email hosting (mail server, webmail) and DNS server — intended to stay external (Cloudflare, a mail provider).
 - Multiple servers from one panel, resellers, client accounts and admin roles (all admins are equal), billing (WHMCS-style).
 - File manager and per-site SFTP users; full-page cache (Varnish-style).
-- iOS/Android build runners; staging copies of PHP sites.
+- iOS build runner (needs macOS hardware); Android builds on push; staging copies of PHP sites.
 - Long field history: young project, tested end to end in VMs; the first real server migration is next.

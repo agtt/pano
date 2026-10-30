@@ -4,6 +4,7 @@
 import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
 import { addAdmin, adminNames, checkOtp, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
+import * as android from "./android.ts";
 import * as appsOps from "./apps.ts";
 import * as envGroups from "./envgroups.ts";
 import { envPending } from "../shared/env.ts";
@@ -31,7 +32,7 @@ import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
 import * as shield from "./shield.ts";
-import { apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
+import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
 import * as system from "./system.ts";
 import * as vpn from "./vpn.ts";
 
@@ -57,6 +58,8 @@ const SENSITIVE = new Set([
   "firewall.enable", "firewall.disable", "firewall.ports",
   "wp.install", "wp.resetPassword",
   "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
+  // A project decides what runs with its signing key; the key and the Boat account are secrets.
+  "android.connect", "android.disconnect", "android.project.save", "android.project.remove", "android.signing.set", "android.signing.clear",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -242,6 +245,29 @@ export const methods: Record<string, Handler> = {
     const linked = await github.link(app, await appsOps.deployKey(app.name), actor);
     if (app.repo !== linked.sshUrl) apps.update(app.name, { repo: linked.sshUrl });
     return linked;
+  },
+
+  // ---- Android builds on Boat machines (optional, off until a key is added)
+  "android.status": () => android.androidStatus(),
+  "android.connect": (p, actor) => android.connect(p.key, actor),
+  "android.disconnect": (_p, actor) => android.disconnect(actor),
+  "android.image.prepare": (_p, actor) => android.prepareImage(actor),
+  "android.image.log": (p) => android.readLog("image", v.int(p.offset ?? 0, 0, 1e12, "offset")),
+  "android.project.get": (p) => android.projectDetail(v.appName(p.name)),
+  "android.project.save": (p, actor) => android.saveProject(p, actor),
+  "android.project.remove": (p, actor) => android.removeProject(v.appName(p.name), actor),
+  "android.signing.set": (p, actor) => android.setSigning(v.appName(p.name), p, actor),
+  "android.signing.clear": (p, actor) => android.clearSigning(v.appName(p.name), actor),
+  "android.build": async (p, actor) => ({ id: await android.startBuild(v.appName(p.name), String(p.trigger ?? "manual") === "cli" ? "cli" : "manual", actor) }),
+  "android.build.get": (p) => {
+    const b = androidBuilds.get(v.int(p.id, 1, 1e9, "id"));
+    if (!b || b.project !== p.name) throw new Error("no such build for this project");
+    return b;
+  },
+  "android.build.log": (p) => {
+    const id = v.int(p.id, 1, 1e9, "id");
+    if (androidBuilds.get(id)?.project !== p.name) throw new Error("no such build for this project");
+    return android.readLog(id, v.int(p.offset ?? 0, 0, 1e12, "offset"));
   },
 
   // ---- runtimes

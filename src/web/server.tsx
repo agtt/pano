@@ -5,7 +5,8 @@ import { Hono, type Context } from "hono";
 import { getConnInfo } from "hono/bun";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Child } from "hono/jsx";
-import { env } from "../shared/config.ts";
+import { ARTIFACT_NAME, artifactFile } from "../shared/android.ts";
+import { env, fsPath } from "../shared/config.ts";
 import { call, stepUp } from "./agent.ts";
 import { addUser, csrfOk, generatePassword, killSessions, listUsers, login, logout, prepareHash, pruneSessions, removeUser, session, setPassword, userExists, type Session } from "./auth.ts";
 import { checkUsername } from "../shared/admins.ts";
@@ -13,6 +14,7 @@ import { AdminsPage, type AdminSecret } from "./views/admins.tsx";
 import { t } from "./i18n.ts";
 import { parseRange } from "./views/charts.tsx";
 import { assets } from "./assets.ts";
+import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailView, type AndroidStatusView } from "./views/android.tsx";
 import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { HomePage, LoginPage } from "./views/home.tsx";
@@ -197,6 +199,85 @@ export function createWebApp() {
       return c.redirect(err(`/apps/${name}`, e));
     }
   });
+  // ---- Android builds on Boat machines (optional)
+  app.get("/android", async (c) =>
+    page(c, t("Android builds"), <AndroidPage v={await call<AndroidStatusView>("android.status")} csrf={c.get("s").csrf} imageLog={c.req.query("image") === "1"} />),
+  );
+  app.post("/android/connect", act("/android", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("android.connect", { key: f.key }, actor(c));
+    return "Boat connected";
+  }));
+  app.post("/android/disconnect", act("/android", async (c, f) => {
+    needOtp(c, f.otp);
+    await call("android.disconnect", {}, actor(c));
+    return "Boat disconnected";
+  }));
+  app.post("/android-image", act("/android", async (c) => {
+    await call("android.image.prepare", {}, actor(c));
+    return "/android?image=1";
+  }));
+  app.get("/android-image/log", async (c) => c.json(await call("android.image.log", { offset: Number(c.req.query("offset") ?? 0) })));
+  app.post("/android/projects", act("/android", async (c, f) => {
+    needOtp(c, f.otp);
+    const p = await call("android.project.save", f, actor(c));
+    return `/android/${p.name}`;
+  }));
+  app.get("/android/:name", async (c) => {
+    try {
+      const d = await call<AndroidDetailView>("android.project.get", { name: c.req.param("name") });
+      return page(c, `Android · ${d.project.name}`, <AndroidDetail d={d} csrf={c.get("s").csrf} buildId={Number(c.req.query("build")) || undefined} />);
+    } catch (e) {
+      return c.redirect(err("/android", e));
+    }
+  });
+  app.post("/android/:name/build", async (c) => {
+    const name = c.req.param("name");
+    try {
+      const { id } = await call("android.build", { name }, actor(c));
+      return c.redirect(`/android/${name}?build=${id}`);
+    } catch (e) {
+      return c.redirect(err(`/android/${name}`, e));
+    }
+  });
+  app.get("/android/:name/builds/:id/log", async (c) =>
+    c.json(await call("android.build.log", { name: c.req.param("name"), id: Number(c.req.param("id")), offset: Number(c.req.query("offset") ?? 0) })),
+  );
+  // Files are served from disk (root:pano, read-only here), only those the agent lists for the build.
+  app.get("/android/:name/builds/:id/:file", async (c) => {
+    const id = Number(c.req.param("id"));
+    const file = c.req.param("file");
+    if (!ARTIFACT_NAME.test(file)) return c.text("not found", 404);
+    const b = await call<AndroidBuildRow>("android.build.get", { name: c.req.param("name"), id }).catch(() => null);
+    if (!b?.artifacts.some((a) => a.name === file)) return c.text("not found", 404);
+    const f = Bun.file(fsPath(artifactFile(id, file)));
+    if (!(await f.exists())) return c.text("not found", 404);
+    return new Response(f, {
+      headers: { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${file}"`, "x-content-type-options": "nosniff" },
+    });
+  });
+  app.post("/android/:name/signing", act("/android", async (c, f) => {
+    const name = c.req.param("name")!;
+    needOtp(c, f.otp);
+    if (!(f.keystore instanceof File)) throw new Error("choose the keystore file");
+    if (f.keystore.size > 64 * 1024) throw new Error("keystore: up to 64 KB");
+    const keystore = Buffer.from(await f.keystore.arrayBuffer()).toString("base64");
+    await call("android.signing.set", { name, keystore, alias: f.alias, storePassword: f.storePassword, keyPassword: f.keyPassword }, actor(c));
+    return `/android/${name}`;
+  }));
+  app.post("/android/:name/signing/clear", act("/android", async (c, f) => {
+    const name = c.req.param("name")!;
+    needOtp(c, f.otp);
+    await call("android.signing.clear", { name }, actor(c));
+    return `/android/${name}`;
+  }));
+  app.post("/android/:name/delete", act("/android", async (c, f) => {
+    const name = c.req.param("name")!;
+    if (f.confirm !== name) throw new Error("type the name to confirm");
+    needOtp(c, f.otp);
+    await call("android.project.remove", { name }, actor(c));
+  }));
+
   app.post("/apps", act("/apps/new", async (c, f) => {
     const a = await call("apps.create", appParams(f), actor(c));
     return `/apps/${a.name}`;

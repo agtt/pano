@@ -264,6 +264,34 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
   ip TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS android_projects (
+  name TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  root_dir TEXT NOT NULL DEFAULT '',
+  gradle_dir TEXT NOT NULL DEFAULT '',
+  prepare_cmd TEXT NOT NULL DEFAULT '',
+  tasks TEXT NOT NULL,
+  machine TEXT NOT NULL DEFAULT 'default',
+  jdk INTEGER NOT NULL DEFAULT 17,
+  timeout_min INTEGER NOT NULL DEFAULT 60,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS android_builds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT NOT NULL,
+  status TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  commit_sha TEXT NOT NULL DEFAULT '',
+  machine TEXT NOT NULL,
+  sandbox TEXT NOT NULL DEFAULT '',
+  signed INTEGER NOT NULL DEFAULT 0,
+  artifacts TEXT NOT NULL DEFAULT '[]',
+  error TEXT NOT NULL DEFAULT '',
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS android_builds_project ON android_builds(project, id DESC);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL,
@@ -597,6 +625,114 @@ export const containers = {
   },
   remove(name: string) {
     state().query("DELETE FROM containers WHERE name = ?").run(name);
+  },
+};
+
+export type AndroidProject = {
+  name: string;
+  repo: string;
+  branch: string;
+  /** where prepare_cmd runs (repo root when empty) */
+  root_dir: string;
+  /** directory of gradlew under root_dir; empty: root_dir itself, or its android/ (React Native, Expo) */
+  gradle_dir: string;
+  /** e.g. "bun install" for React Native; runs on the build machine, never on this server */
+  prepare_cmd: string;
+  /** Gradle tasks, space separated */
+  tasks: string;
+  machine: string;
+  jdk: number;
+  timeout_min: number;
+  created_at: number;
+};
+
+export type AndroidArtifact = { name: string; size: number; sha256: string };
+
+export type AndroidBuild = {
+  id: number;
+  project: string;
+  status: "running" | "success" | "failed";
+  trigger: string;
+  commit_sha: string;
+  machine: string;
+  /** the Boat machine while it exists; cleared once deleted */
+  sandbox: string;
+  signed: number;
+  artifacts: AndroidArtifact[];
+  error: string;
+  started_at: number;
+  finished_at: number | null;
+};
+
+export const androidProjects = {
+  list(): AndroidProject[] {
+    return state().query("SELECT * FROM android_projects ORDER BY name").all() as AndroidProject[];
+  },
+  get(name: string): AndroidProject | null {
+    return (state().query("SELECT * FROM android_projects WHERE name = ?").get(name) as AndroidProject) ?? null;
+  },
+  upsert(p: Omit<AndroidProject, "created_at">) {
+    state()
+      .query(
+        `INSERT INTO android_projects (name, repo, branch, root_dir, gradle_dir, prepare_cmd, tasks, machine, jdk, timeout_min, created_at)
+         VALUES ($name, $repo, $branch, $root_dir, $gradle_dir, $prepare_cmd, $tasks, $machine, $jdk, $timeout_min, $created_at)
+         ON CONFLICT(name) DO UPDATE SET repo=$repo, branch=$branch, root_dir=$root_dir, gradle_dir=$gradle_dir, prepare_cmd=$prepare_cmd,
+           tasks=$tasks, machine=$machine, jdk=$jdk, timeout_min=$timeout_min`,
+      )
+      .run({ ...p, created_at: now() } as any);
+  },
+  remove(name: string) {
+    state().query("DELETE FROM android_projects WHERE name = ?").run(name);
+  },
+};
+
+const decodeBuild = (r: any): AndroidBuild => ({ ...r, artifacts: JSON.parse(r.artifacts || "[]") });
+
+export const androidBuilds = {
+  start(project: string, trigger: string, machine: string, signed: boolean): number {
+    const r = state()
+      .query("INSERT INTO android_builds (project, status, trigger, machine, signed, started_at) VALUES (?, 'running', ?, ?, ?, ?) RETURNING id")
+      .get(project, trigger, machine, signed ? 1 : 0, now()) as { id: number };
+    return r.id;
+  },
+  setCommit(id: number, sha: string) {
+    state().query("UPDATE android_builds SET commit_sha = ? WHERE id = ?").run(sha, id);
+  },
+  setSandbox(id: number, sandbox: string) {
+    state().query("UPDATE android_builds SET sandbox = ? WHERE id = ?").run(sandbox, id);
+  },
+  finish(id: number, patch: { status: "success" | "failed"; error?: string; artifacts?: AndroidArtifact[] }) {
+    state()
+      .query("UPDATE android_builds SET status = ?, error = ?, artifacts = ?, finished_at = ? WHERE id = ?")
+      .run(patch.status, patch.error ?? "", JSON.stringify(patch.artifacts ?? []), now(), id);
+  },
+  get(id: number): AndroidBuild | null {
+    const r = state().query("SELECT * FROM android_builds WHERE id = ?").get(id);
+    return r ? decodeBuild(r) : null;
+  },
+  list(project: string, limit = 20): AndroidBuild[] {
+    return state().query("SELECT * FROM android_builds WHERE project = ? ORDER BY id DESC LIMIT ?").all(project, limit).map(decodeBuild);
+  },
+  running(): AndroidBuild[] {
+    return state().query("SELECT * FROM android_builds WHERE status = 'running'").all().map(decodeBuild);
+  },
+  /** Builds whose Boat machine was not confirmed deleted. */
+  withSandbox(): AndroidBuild[] {
+    return state().query("SELECT * FROM android_builds WHERE sandbox != ''").all().map(decodeBuild);
+  },
+  dropArtifacts(id: number) {
+    state().query("UPDATE android_builds SET artifacts = '[]' WHERE id = ?").run(id);
+  },
+  /** Ids past the newest `keep` of a project (their logs and artifacts go). */
+  older(project: string, keep: number): number[] {
+    return (state().query("SELECT id FROM android_builds WHERE project = ? ORDER BY id DESC LIMIT -1 OFFSET ?").all(project, keep) as { id: number }[]).map((r) => r.id);
+  },
+  remove(ids: number[]) {
+    for (const id of ids) state().query("DELETE FROM android_builds WHERE id = ?").run(id);
+  },
+  /** Builds left 'running' by a crash or restart are marked failed at startup (their machines are deleted first). */
+  failStale() {
+    state().query("UPDATE android_builds SET status = 'failed', error = 'agent restarted', finished_at = ? WHERE status = 'running'").run(now());
   },
 };
 

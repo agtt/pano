@@ -7,6 +7,7 @@ import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { startMonitor } from "./alerts.ts";
+import { cleanupAndroid } from "./android.ts";
 import { startMetrics } from "./metrics.ts";
 import { startRealtime } from "./realtime.ts";
 import { startVulns } from "./vulns.ts";
@@ -124,6 +125,8 @@ export async function startAgent() {
   // Previews past their lifetime go (hourly; every new preview sweeps as well).
   setInterval(() => sweepPreviews().catch((e) => console.error(`[agent] previews: ${e}`)), 60 * 60_000);
   applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
+  // Builds cut off by a restart fail; Boat machines they left behind are deleted.
+  cleanupAndroid().catch((e) => console.error(`[agent] android: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));
