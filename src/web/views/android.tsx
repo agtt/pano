@@ -1,4 +1,3 @@
-import { MACHINES, buildCost } from "../../shared/android.ts";
 import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
 
@@ -8,7 +7,6 @@ export type AndroidBuildRow = {
   status: string;
   trigger: string;
   commit_sha: string;
-  machine: string;
   signed: number;
   artifacts: { name: string; size: number; sha256: string }[];
   error: string;
@@ -24,14 +22,16 @@ export type AndroidProjectRow = {
   gradle_dir: string;
   prepare_cmd: string;
   tasks: string;
-  machine: string;
+  sdk_packages: string;
   jdk: number;
+  memory_mb: number;
   timeout_min: number;
 };
 
+export type ToolchainView = { supported: boolean; installed: boolean; state: string; error: string; jdks: number[]; buildTools: string[] };
+
 export type AndroidStatusView = {
-  connected: boolean;
-  image: { name: string; status: string; current: boolean; error: string; at: number };
+  toolchain: ToolchainView;
   projects: (AndroidProjectRow & { signing: string; last: AndroidBuildRow | null })[];
 };
 
@@ -39,73 +39,48 @@ export type AndroidDetailView = { project: AndroidProjectRow; signing: string; d
 
 const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
 
-const cost = (b: AndroidBuildRow) => (b.finished_at ? `$${buildCost(b.machine, b.finished_at - b.started_at).toFixed(3)}` : "");
-
-export function AndroidPage({ v, csrf, imageLog }: { v: AndroidStatusView; csrf: string; imageLog: boolean }) {
+export function AndroidPage({ v, csrf, toolchainLog }: { v: AndroidStatusView; csrf: string; toolchainLog: boolean }) {
+  const tc = v.toolchain;
   return (
     <div class="stack">
-      <Card title={t("Android builds")} actions={v.connected ? <Badge state="active" /> : <Badge state="off" />}>
+      <Card title={t("Android builds")} actions={<Badge state={tc.installed ? "active" : tc.state || "off"} />}>
         <p class="muted small">
-          Optional. Gradle never runs on this server: each build gets a fresh{" "}
-          <a href="https://boat.dev" target="_blank" rel="noreferrer">
-            Boat
-          </a>{" "}
-          cloud machine (billed by the second to your Boat account), made without your account's secrets or snapshots and deleted when the build ends. The
-          server fetches the commit as an unprivileged user without checking it out, so nothing from the repository runs here. The signing key stays root-only
-          here and goes to the build machine only for that build.
+          Optional. Every build runs in a sandbox made for it on this server and removed when it ends: a user that exists only while it runs, an empty
+          directory of its own, nothing of pano, the apps or other builds in sight, a memory cap and low CPU priority. Afterwards only the APK/AAB is kept; the
+          source, the Gradle cache and the user are gone. Signing happens in a second throwaway sandbox without network, so the project's code never sees the
+          key.
         </p>
-        {v.connected ? (
-          <div class="cols">
-            <div>
-              <p class="small">
-                <b>Saved image</b>:{" "}
-                {v.image.status === "ready" ? (
-                  <>
-                    <code>{v.image.name}</code> <span class="muted">({fmtTime(v.image.at)}{v.image.current ? "" : ", outdated: prepare again"})</span>
-                  </>
-                ) : v.image.status === "building" ? (
-                  "being prepared…"
-                ) : (
-                  <span class="muted">none: each build installs the JDK and Android SDK first (a few minutes longer)</span>
-                )}
-              </p>
-              {v.image.status === "failed" ? <p class="small bad">Last attempt failed: {v.image.error}</p> : null}
-              <form method="post" action="/android-image" class="row">
-                <Csrf token={csrf} />
-                <button class="btn" disabled={v.image.status === "building"}>
-                  {v.image.status === "ready" ? "Prepare again" : "Prepare saved image"}
-                </button>
-                <small class="muted">About 10 minutes, once. Builds then start in seconds. Needs a paid Boat plan (the trial cannot save images).</small>
-              </form>
-            </div>
-            <form method="post" action="/android/disconnect" class="row">
+        {!tc.supported ? (
+          <p class="small">Android's build tools only run on x86-64 servers; this one is not.</p>
+        ) : tc.installed ? (
+          <div class="row">
+            <span class="small">
+              JDK {tc.jdks.join(", ")} · build-tools {tc.buildTools.join(", ") || "—"} · <code>/opt/pano/android</code>
+            </span>
+            <form method="post" action="/android-toolchain/remove" class="inline">
               <Csrf token={csrf} />
-              <Otp />
-              <button class="btn danger">Disconnect Boat</button>
-              <small class="muted">Deletes the saved image on Boat and the key here.</small>
+              <button class="btn small" title="Frees the disk; installing again takes a few minutes">
+                Remove toolchain
+              </button>
             </form>
           </div>
         ) : (
-          <form method="post" action="/android/connect" class="grid-form">
+          <form method="post" action="/android-toolchain" class="row">
             <Csrf token={csrf} />
-            <label class="field wide">
-              <span>Boat API key</span>
-              <input name="key" type="password" autocomplete="off" placeholder="boat_…" required />
-              <small class="muted">
-                Create one at boat.dev with the scopes sandbox.create, sandbox.read, sandbox.delete-own, exec, file.read, file.write, snapshot.read and
-                snapshot.write (the "ci" preset plus snapshot.write). Kept root-only on this server, never shown again.
-              </small>
-            </label>
-            <div class="actions row">
-              <Otp />
-              <button class="btn primary">Connect</button>
-            </div>
+            <button class="btn primary" disabled={tc.state === "installing"}>
+              {tc.state === "installing" ? "Installing…" : "Install Android toolchain"}
+            </button>
+            <small class="muted">
+              Eclipse Temurin JDK 17 and the Android SDK (checksums verified), about 2 GB under /opt/pano/android, a few minutes. Installing accepts the
+              Android SDK licence. Builds need a few GB of memory: 8 GB or more on the server is best.
+            </small>
           </form>
         )}
-        {imageLog ? <pre class="log small" data-deploy-log="/android-image/log"></pre> : null}
+        {tc.state === "failed" ? <p class="small">Last install failed: {tc.error}</p> : null}
+        {toolchainLog || tc.state === "installing" ? <pre class="log small" data-deploy-log="/android-toolchain/log"></pre> : null}
       </Card>
 
-      {v.connected ? (
+      {tc.installed ? (
         <>
           <Card title={t("Projects")}>
             {v.projects.length ? (
@@ -162,19 +137,10 @@ export function ProjectForm({ csrf, p }: { csrf: string; p?: AndroidProjectRow }
       <Field label="Repository" name="repo" value={p?.repo} required placeholder="git@github.com:you/app.git" hint="Private: add the project's deploy key to the repository." />
       <Field label="Branch" name="branch" value={p?.branch ?? "main"} />
       <Field label="Directory" name="root_dir" value={p?.root_dir} placeholder="(repository root)" hint="Where the prepare command runs, e.g. apps/mobile." />
-      <Field label="Prepare command" name="prepare_cmd" value={p?.prepare_cmd} placeholder="bun install" hint="Optional, e.g. bun install for React Native; bun install && bunx expo prebuild -p android for Expo." />
+      <Field label="Prepare command" name="prepare_cmd" value={p?.prepare_cmd} placeholder="bun install" hint="Optional, e.g. bun install for React Native; bun install && bunx expo prebuild -p android for Expo. Runs in the sandbox." />
       <Field label="Gradle directory" name="gradle_dir" value={p?.gradle_dir} placeholder="(auto: . or android)" hint="Where gradlew is, under the directory above." />
       <Field label="Gradle tasks" name="tasks" value={p?.tasks ?? "bundleRelease"} hint="bundleRelease (AAB for Google Play), assembleRelease (APK), assembleDebug…" />
-      <label class="field">
-        <span>Machine</span>
-        <select name="machine">
-          {Object.entries(MACHINES).map(([k, m]) => (
-            <option value={k} selected={(p?.machine ?? "default") === k}>
-              {m.label} · ${m.perHour}/h
-            </option>
-          ))}
-        </select>
-      </label>
+      <Field label="SDK packages" name="sdk_packages" value={p?.sdk_packages} placeholder="ndk;27.1.12297006" hint="Beyond platforms 35/36: the SDK is read-only in the sandbox. A build that misses one names it." />
       <label class="field">
         <span>JDK</span>
         <select name="jdk">
@@ -185,6 +151,7 @@ export function ProjectForm({ csrf, p }: { csrf: string; p?: AndroidProjectRow }
           ))}
         </select>
       </label>
+      <Field label="Memory (MB)" name="memory_mb" type="number" value={p?.memory_mb ?? 6144} hint="Cap for the build sandbox." />
       <Field label="Timeout (minutes)" name="timeout_min" type="number" value={p?.timeout_min ?? 60} />
       <div class="actions row">
         <Otp />
@@ -208,7 +175,7 @@ export function AndroidDetail({ d, csrf, buildId }: { d: AndroidDetailView; csrf
         }
       >
         <p class="small mono">
-          {p.repo} ({p.branch}) · ./gradlew {p.tasks} · {p.machine} · JDK {p.jdk}
+          {p.repo} ({p.branch}) · ./gradlew {p.tasks} · JDK {p.jdk} · {p.memory_mb} MB
         </p>
         <p class="muted small">Deploy key (read-only, for a private repository):</p>
         <pre class="log small" data-copy>
@@ -238,7 +205,7 @@ export function AndroidDetail({ d, csrf, buildId }: { d: AndroidDetailView; csrf
                 </td>
                 <td class="muted small">
                   {fmtTime(b.started_at)}
-                  {b.finished_at ? ` · ${fmtDuration(b.finished_at - b.started_at)} · ${cost(b)}` : ""}
+                  {b.finished_at ? ` · ${fmtDuration(b.finished_at - b.started_at)}` : ""}
                   {b.signed ? " · signed" : ""}
                 </td>
                 <td class="small">
@@ -258,16 +225,18 @@ export function AndroidDetail({ d, csrf, buildId }: { d: AndroidDetailView; csrf
         ) : (
           <p class="muted small">No builds yet.</p>
         )}
-        <p class="muted small">The newest 3 builds keep their files. From the server: <code>pano rpc android.build '{`{"name":"${p.name}","trigger":"cli"}`}'</code></p>
+        <p class="muted small">
+          One build at a time; the newest 3 keep their files. From the server: <code>pano rpc android.build '{`{"name":"${p.name}","trigger":"cli"}`}'</code>
+        </p>
       </Card>
 
       <Card title="Signing">
         <p class="muted small">
           {d.signing
-            ? `Release builds are signed with the key "${d.signing}" (Android Gradle Plugin injected signing: build.gradle needs no signing config).`
-            : "Not set: release builds come out unsigned unless build.gradle signs them itself. For Google Play, use the upload key."}{" "}
-          The keystore and its passwords are kept root-only here and can never be shown again; on the build machine they are removed when the build ends and
-          the machine itself is deleted.
+            ? `APK/AAB are signed with the key "${d.signing}" after the build (apksigner / jarsigner), replacing whatever key the build used.`
+            : "Not set: the files come out as the build made them (unsigned, or with the key build.gradle uses). For Google Play, use the upload key."}{" "}
+          The keystore and its passwords are kept root-only and can never be shown again. Only the signing sandbox (no network, removed afterwards) gets
+          them, as systemd credentials.
         </p>
         <form method="post" action={`/android/${p.name}/signing`} enctype="multipart/form-data" class="grid-form">
           <Csrf token={csrf} />

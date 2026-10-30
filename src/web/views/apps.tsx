@@ -27,6 +27,7 @@ export type AppRow = {
   processes: (ProcessSpec & { port_a: number; port_b: number })[];
   ask_url: string;
   auto_deploy: number;
+  build_isolated?: number;
   crons: { schedule: string; command: string }[];
   preview_domain?: string;
   preview_max?: number;
@@ -161,6 +162,14 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
       <label class="check">
         <input type="hidden" name="auto_deploy" value="0" />
         <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
+      </label>
+      <label class="check">
+        <input type="checkbox" name="build_isolated" value="1" checked={a.build_isolated === 1} /> {t("Throwaway build sandbox")}
+        <small class="muted">
+          {" "}
+          Install and build see only the new release: not the deploy key, data, env file or other releases' caches; their own caches are deleted afterwards.
+          Slower builds (no shared cache).
+        </small>
       </label>
       <Field label="Preview domain" name="preview_domain" value={a.preview_domain ?? ""} placeholder="*.preview.example.com" hint="Wildcard you own (DNS * to this server). Empty: no previews." />
       <Field label="Max previews" name="preview_max" type="number" value={a.preview_max ?? 3} hint="Oldest is removed first" />

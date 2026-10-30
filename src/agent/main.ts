@@ -125,7 +125,7 @@ export async function startAgent() {
   // Previews past their lifetime go (hourly; every new preview sweeps as well).
   setInterval(() => sweepPreviews().catch((e) => console.error(`[agent] previews: ${e}`)), 60 * 60_000);
   applyTuning().catch((e) => console.error(`[agent] tuning: ${e}`));
-  // Builds cut off by a restart fail; Boat machines they left behind are deleted.
+  // Android builds cut off by a restart fail; their sandboxes are removed.
   cleanupAndroid().catch((e) => console.error(`[agent] android: ${e}`));
   // A lock change still waiting for confirmation survives agent restarts and reboots.
   await recoverPending().catch((e) => console.error(`[agent] vpn: ${e}`));

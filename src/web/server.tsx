@@ -199,25 +199,19 @@ export function createWebApp() {
       return c.redirect(err(`/apps/${name}`, e));
     }
   });
-  // ---- Android builds on Boat machines (optional)
+  // ---- Android builds in throwaway sandboxes (optional)
   app.get("/android", async (c) =>
-    page(c, t("Android builds"), <AndroidPage v={await call<AndroidStatusView>("android.status")} csrf={c.get("s").csrf} imageLog={c.req.query("image") === "1"} />),
+    page(c, t("Android builds"), <AndroidPage v={await call<AndroidStatusView>("android.status")} csrf={c.get("s").csrf} toolchainLog={c.req.query("toolchain") === "1"} />),
   );
-  app.post("/android/connect", act("/android", async (c, f) => {
-    needOtp(c, f.otp);
-    await call("android.connect", { key: f.key }, actor(c));
-    return "Boat connected";
+  app.post("/android-toolchain", act("/android", async (c) => {
+    await call("android.toolchain.install", {}, actor(c));
+    return "/android?toolchain=1";
   }));
-  app.post("/android/disconnect", act("/android", async (c, f) => {
-    needOtp(c, f.otp);
-    await call("android.disconnect", {}, actor(c));
-    return "Boat disconnected";
+  app.post("/android-toolchain/remove", act("/android", async (c) => {
+    await call("android.toolchain.remove", {}, actor(c));
+    return "Android toolchain removed";
   }));
-  app.post("/android-image", act("/android", async (c) => {
-    await call("android.image.prepare", {}, actor(c));
-    return "/android?image=1";
-  }));
-  app.get("/android-image/log", async (c) => c.json(await call("android.image.log", { offset: Number(c.req.query("offset") ?? 0) })));
+  app.get("/android-toolchain/log", async (c) => c.json(await call("android.toolchain.log", { offset: Number(c.req.query("offset") ?? 0) })));
   app.post("/android/projects", act("/android", async (c, f) => {
     needOtp(c, f.otp);
     const p = await call("android.project.save", f, actor(c));

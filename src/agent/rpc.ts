@@ -58,15 +58,16 @@ const SENSITIVE = new Set([
   "firewall.enable", "firewall.disable", "firewall.ports",
   "wp.install", "wp.resetPassword",
   "apps.attachDatabase", "envGroups.reveal", "envGroups.save", "envGroups.remove",
-  // A project decides what runs with its signing key; the key and the Boat account are secrets.
-  "android.connect", "android.disconnect", "android.project.save", "android.project.remove", "android.signing.set", "android.signing.clear",
+  // A project decides which code is built and signed with its key.
+  "android.project.save", "android.project.remove", "android.signing.set", "android.signing.clear",
 ]);
 export const ENV_MASK = "••••••••";
 
 /** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
 // preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives;
 // env_groups hands shared secrets to the app's code.
-const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups"] as const;
+// build_isolated: turning it off lets install scripts reach the deploy key and data again.
+const CODE_FIELDS = ["repo", "branch", "root_dir", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups", "build_isolated"] as const;
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
@@ -247,12 +248,11 @@ export const methods: Record<string, Handler> = {
     return linked;
   },
 
-  // ---- Android builds on Boat machines (optional, off until a key is added)
+  // ---- Android builds in throwaway sandboxes (optional, nothing installed until asked)
   "android.status": () => android.androidStatus(),
-  "android.connect": (p, actor) => android.connect(p.key, actor),
-  "android.disconnect": (_p, actor) => android.disconnect(actor),
-  "android.image.prepare": (_p, actor) => android.prepareImage(actor),
-  "android.image.log": (p) => android.readLog("image", v.int(p.offset ?? 0, 0, 1e12, "offset")),
+  "android.toolchain.install": (_p, actor) => android.installToolchain(actor),
+  "android.toolchain.remove": (_p, actor) => android.removeToolchain(actor),
+  "android.toolchain.log": (p) => android.readLog("toolchain", v.int(p.offset ?? 0, 0, 1e12, "offset")),
   "android.project.get": (p) => android.projectDetail(v.appName(p.name)),
   "android.project.save": (p, actor) => android.saveProject(p, actor),
   "android.project.remove": (p, actor) => android.removeProject(v.appName(p.name), actor),

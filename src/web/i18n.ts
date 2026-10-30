@@ -46,6 +46,7 @@ const tr: Record<string, string> = {
   Projects: "Projeler",
   Build: "Derle",
   Builds: "Derlemeler",
+  "Throwaway build sandbox": "Kullan-at derleme sandbox'ı",
   "Sign out": "Çıkış",
   "Sign in": "Giriş",
   Username: "Kullanıcı adı",

@@ -36,6 +36,8 @@ export type App = {
   ask_url: string;
   /** 1: a push to the branch deploys (webhook); 0: only manual deploys */
   auto_deploy: number;
+  /** 1: install and build see only the new release (no deploy key, data, env file or shared caches); their caches are deleted after */
+  build_isolated: number;
   /** scheduled commands run in the live release (systemd timers) */
   crons: { schedule: string; command: string }[];
   /** preview deploys: wildcard such as *.preview.example.com ("" = off), how many at once, days to keep, variables left out */
@@ -272,8 +274,9 @@ CREATE TABLE IF NOT EXISTS android_projects (
   gradle_dir TEXT NOT NULL DEFAULT '',
   prepare_cmd TEXT NOT NULL DEFAULT '',
   tasks TEXT NOT NULL,
-  machine TEXT NOT NULL DEFAULT 'default',
+  sdk_packages TEXT NOT NULL DEFAULT '',
   jdk INTEGER NOT NULL DEFAULT 17,
+  memory_mb INTEGER NOT NULL DEFAULT 6144,
   timeout_min INTEGER NOT NULL DEFAULT 60,
   created_at INTEGER NOT NULL
 );
@@ -283,8 +286,6 @@ CREATE TABLE IF NOT EXISTS android_builds (
   status TEXT NOT NULL,
   trigger TEXT NOT NULL,
   commit_sha TEXT NOT NULL DEFAULT '',
-  machine TEXT NOT NULL,
-  sandbox TEXT NOT NULL DEFAULT '',
   signed INTEGER NOT NULL DEFAULT 0,
   artifacts TEXT NOT NULL DEFAULT '[]',
   error TEXT NOT NULL DEFAULT '',
@@ -319,6 +320,7 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "processes", "TEXT NOT NULL DEFAULT '[]'"],
   ["apps", "ask_url", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "auto_deploy", "INTEGER NOT NULL DEFAULT 1"],
+  ["apps", "build_isolated", "INTEGER NOT NULL DEFAULT 0"],
   ["apps", "crons", "TEXT NOT NULL DEFAULT '[]'"],
   ["apps", "preview_domain", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "preview_max", "INTEGER NOT NULL DEFAULT 3"],
@@ -636,12 +638,14 @@ export type AndroidProject = {
   root_dir: string;
   /** directory of gradlew under root_dir; empty: root_dir itself, or its android/ (React Native, Expo) */
   gradle_dir: string;
-  /** e.g. "bun install" for React Native; runs on the build machine, never on this server */
+  /** e.g. "bun install" for React Native; runs in the build sandbox like Gradle */
   prepare_cmd: string;
   /** Gradle tasks, space separated */
   tasks: string;
-  machine: string;
+  /** SDK packages this project needs beyond the defaults (the SDK is read-only for builds), e.g. "ndk;27.1.12297006" */
+  sdk_packages: string;
   jdk: number;
+  memory_mb: number;
   timeout_min: number;
   created_at: number;
 };
@@ -654,9 +658,6 @@ export type AndroidBuild = {
   status: "running" | "success" | "failed";
   trigger: string;
   commit_sha: string;
-  machine: string;
-  /** the Boat machine while it exists; cleared once deleted */
-  sandbox: string;
   signed: number;
   artifacts: AndroidArtifact[];
   error: string;
@@ -674,10 +675,10 @@ export const androidProjects = {
   upsert(p: Omit<AndroidProject, "created_at">) {
     state()
       .query(
-        `INSERT INTO android_projects (name, repo, branch, root_dir, gradle_dir, prepare_cmd, tasks, machine, jdk, timeout_min, created_at)
-         VALUES ($name, $repo, $branch, $root_dir, $gradle_dir, $prepare_cmd, $tasks, $machine, $jdk, $timeout_min, $created_at)
+        `INSERT INTO android_projects (name, repo, branch, root_dir, gradle_dir, prepare_cmd, tasks, sdk_packages, jdk, memory_mb, timeout_min, created_at)
+         VALUES ($name, $repo, $branch, $root_dir, $gradle_dir, $prepare_cmd, $tasks, $sdk_packages, $jdk, $memory_mb, $timeout_min, $created_at)
          ON CONFLICT(name) DO UPDATE SET repo=$repo, branch=$branch, root_dir=$root_dir, gradle_dir=$gradle_dir, prepare_cmd=$prepare_cmd,
-           tasks=$tasks, machine=$machine, jdk=$jdk, timeout_min=$timeout_min`,
+           tasks=$tasks, sdk_packages=$sdk_packages, jdk=$jdk, memory_mb=$memory_mb, timeout_min=$timeout_min`,
       )
       .run({ ...p, created_at: now() } as any);
   },
@@ -689,17 +690,14 @@ export const androidProjects = {
 const decodeBuild = (r: any): AndroidBuild => ({ ...r, artifacts: JSON.parse(r.artifacts || "[]") });
 
 export const androidBuilds = {
-  start(project: string, trigger: string, machine: string, signed: boolean): number {
+  start(project: string, trigger: string, signed: boolean): number {
     const r = state()
-      .query("INSERT INTO android_builds (project, status, trigger, machine, signed, started_at) VALUES (?, 'running', ?, ?, ?, ?) RETURNING id")
-      .get(project, trigger, machine, signed ? 1 : 0, now()) as { id: number };
+      .query("INSERT INTO android_builds (project, status, trigger, signed, started_at) VALUES (?, 'running', ?, ?, ?) RETURNING id")
+      .get(project, trigger, signed ? 1 : 0, now()) as { id: number };
     return r.id;
   },
   setCommit(id: number, sha: string) {
     state().query("UPDATE android_builds SET commit_sha = ? WHERE id = ?").run(sha, id);
-  },
-  setSandbox(id: number, sandbox: string) {
-    state().query("UPDATE android_builds SET sandbox = ? WHERE id = ?").run(sandbox, id);
   },
   finish(id: number, patch: { status: "success" | "failed"; error?: string; artifacts?: AndroidArtifact[] }) {
     state()
@@ -716,10 +714,6 @@ export const androidBuilds = {
   running(): AndroidBuild[] {
     return state().query("SELECT * FROM android_builds WHERE status = 'running'").all().map(decodeBuild);
   },
-  /** Builds whose Boat machine was not confirmed deleted. */
-  withSandbox(): AndroidBuild[] {
-    return state().query("SELECT * FROM android_builds WHERE sandbox != ''").all().map(decodeBuild);
-  },
   dropArtifacts(id: number) {
     state().query("UPDATE android_builds SET artifacts = '[]' WHERE id = ?").run(id);
   },
@@ -730,7 +724,7 @@ export const androidBuilds = {
   remove(ids: number[]) {
     for (const id of ids) state().query("DELETE FROM android_builds WHERE id = ?").run(id);
   },
-  /** Builds left 'running' by a crash or restart are marked failed at startup (their machines are deleted first). */
+  /** Builds left 'running' by a crash or restart are marked failed at startup. */
   failStale() {
     state().query("UPDATE android_builds SET status = 'failed', error = 'agent restarted', finished_at = ? WHERE status = 'running'").run(now());
   },

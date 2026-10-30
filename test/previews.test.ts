@@ -116,7 +116,7 @@ describe("preview state and edge", () => {
   const base = {
     name: "web", kind: "managed", domains: ["example.com"], runtime: "node", runtime_version: "22.0.0", repo: "https://github.com/a/b.git", branch: "main", root_dir: "",
     install_cmd: "", build_cmd: "", start_cmd: "node server.js", health_path: "/", port_a: 4100, port_b: 4101, active_slot: "a", memory_mb: 512, current_release: "r1",
-    webhook_secret: "s", upstream: "", external_unit: "", processes: [], ask_url: "", auto_deploy: 1, crons: [], preview_domain: "*.pv.example.com", preview_max: 3,
+    webhook_secret: "s", upstream: "", external_unit: "", processes: [], ask_url: "", auto_deploy: 1, build_isolated: 0, crons: [], preview_domain: "*.pv.example.com", preview_max: 3,
     preview_ttl_days: 7, preview_env_exclude: "", env_groups: "", env_running: "", env_built: "", created_at: 0, updated_at: 0,
   } as App;
 

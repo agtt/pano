@@ -15,7 +15,7 @@ for (const pre of document.querySelectorAll("[data-deploy-log]")) {
         idle = 0;
       } else idle++;
       offset = data.offset;
-      if (/(deploy|build) \d+ done|image ready|FAILED:/.test(pre.textContent)) return setTimeout(() => location.replace(location.pathname), 1500);
+      if (/(deploy|build) \d+ done|toolchain ready|FAILED:/.test(pre.textContent)) return setTimeout(() => location.replace(location.pathname), 1500);
     } catch {
       idle++;
     }

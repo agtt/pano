@@ -50,6 +50,7 @@ export type AppInput = {
   processes: ProcessSpec[];
   ask_url: string;
   auto_deploy: number;
+  build_isolated: number;
   crons: Cron[];
   preview_domain: string;
   preview_max: number;
@@ -82,6 +83,8 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     // Arrays (API callers) go through the same checks as the text form.
     crons: parseCrons(Array.isArray(x.crons) ? x.crons.map((c: any) => `${String(c?.schedule ?? "").replace(/[|\r\n]/g, " ")} | ${String(c?.command ?? "")}`).join("\n") : String(x.crons ?? "")),
     auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
+    // Off unless asked for (slower: no shared caches).
+    build_isolated: [x.build_isolated].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
     preview_domain: validatePreviewDomain(x.preview_domain),
     preview_max: v.int(x.preview_max || PREVIEW_MAX_DEFAULT, 1, 20, "max previews"),
     preview_ttl_days: v.int(x.preview_ttl_days || PREVIEW_TTL_DEFAULT, 1, 90, "preview lifetime (days)"),
@@ -620,7 +623,8 @@ async function deploy(app: App, id: number, target: DeployTarget) {
 
     const plan = await detectPlan(app, workdir);
     // One Next.js build cache per process, outside the releases: faster rebuilds, no copy per release.
-    for (const p of procs) {
+    // An isolated build cannot reach it and starts empty.
+    for (const p of app.build_isolated ? [] : procs) {
       const d = p.dir ? `${workdir}/${p.dir}` : workdir;
       if (!(await readText(`${d}/package.json`))?.includes('"next"')) continue;
       await ensureDir(`${home}/cache/next-${p.name || "main"}`, 0o750, user);
@@ -629,14 +633,16 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     }
     if (plan.install) {
       await step(plan.install);
-      await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false });
+      await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false, release: dir });
     }
     // What this build and the new processes read; compared later to tell what a restart or redeploy would change.
     builtEnv = envSnapshot(await effectiveEnv(app));
     if (plan.build) {
       await step(plan.build);
-      await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true });
+      await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true, release: dir });
     }
+    // An isolated build's caches go with it; installed packages stay (hard links).
+    if (app.build_isolated) await remove(isolatedCache(dir));
     if (!app.processes.length && plan.start !== app.start_cmd) {
       target.update({ start_cmd: plan.start });
       app = target.get()!;
@@ -696,9 +702,18 @@ async function deploy(app: App, id: number, target: DeployTarget) {
   }
 }
 
-/** Runs a deploy step as the app user inside a transient, memory-capped systemd sandbox. */
-async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: boolean }) {
+/** Caches of an isolated build, inside its release; deleted when the build is done. */
+const isolatedCache = (release: string) => `${release}/.pano-build`;
+
+/**
+ * Runs a deploy step as the app user inside a transient, memory-capped systemd sandbox.
+ * With the app's build_isolated and a release, the step can write only that release and
+ * cannot see the rest of the home (deploy key, data, env file, shared caches).
+ */
+async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: boolean; release?: string }) {
   const home = appHome(app.name);
+  const isolated = !!app.build_isolated && !!o.release;
+  const cache = isolated ? isolatedCache(o.release!) : `${home}/cache`;
   const props = [
     `User=${appUser(app.name)}`,
     `Group=${appUser(app.name)}`,
@@ -710,7 +725,9 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     "ProtectHome=yes",
-    `ReadWritePaths=${home}`,
+    ...(isolated
+      ? [`ReadWritePaths=${o.release}`, `InaccessiblePaths=-${home}/.ssh -${home}/data -${home}/shared -${home}/cache -${home}/run`]
+      : [`ReadWritePaths=${home}`]),
     "PrivateTmp=yes",
     "PrivateDevices=yes",
     "ProtectKernelTunables=yes",
@@ -735,19 +752,22 @@ async function sandbox(app: App, cmd: string[], o: RunOptions & { envFile?: bool
     // The install step runs third-party scripts (postinstall); it never sees the
     // app's secrets or data: both directories are empty there (a linked .env just
     // goes missing). Only the build gets the env (frameworks inline it).
+    // systemd reads the env files itself, so an isolated build gets them without seeing the directory.
     ...(o.envFile
       ? [...groupEnvLines(app).split("\n").filter(Boolean), `EnvironmentFile=-${home}/shared/.env`]
-      : [`TemporaryFileSystem=${home}/shared:ro ${home}/data:ro`]),
+      : isolated
+        ? []
+        : [`TemporaryFileSystem=${home}/shared:ro ${home}/data:ro`]),
   ];
   const env = {
-    HOME: home,
+    HOME: isolated ? cache : home,
     CI: "1",
     NEXT_TELEMETRY_DISABLED: "1",
-    npm_config_cache: `${home}/cache/npm`,
-    BUN_INSTALL_CACHE_DIR: `${home}/cache/bun`,
+    npm_config_cache: `${cache}/npm`,
+    BUN_INSTALL_CACHE_DIR: `${cache}/bun`,
     // bun and pnpm hard-link packages from these stores: node_modules of each release costs almost no disk.
-    npm_config_store_dir: `${home}/cache/pnpm`,
-    XDG_CACHE_HOME: `${home}/cache`,
+    npm_config_store_dir: `${cache}/pnpm`,
+    XDG_CACHE_HOME: cache,
     ...o.env,
   };
   const argv = [

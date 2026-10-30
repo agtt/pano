@@ -104,11 +104,14 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 **Performance defaults**
 - BBR, larger network queues and UDP buffers for HTTP/3 (one switch on the Security page, current vs pano values shown), journal size cap, opcache/realpath cache for PHP, browser caching of static files.
 
-**Android builds (optional, off until a Boat API key is added)**
-- Gradle runs on a throwaway [Boat](https://boat.dev) cloud machine per build, never on the server: APK/AAB come back with size and sha256, the newest three builds keep their files, cost per build shown.
-- The server only fetches the commit (unprivileged user, bare fetch + `git archive`: no checkout, hooks or submodules); read-only deploy key per project for private repositories.
-- Signing with the project's upload/release keystore through Android Gradle Plugin injected signing (no `build.gradle` change). The keystore is root-only on the server, write-only from the UI, sent to the machine for that build only and removed when it ends.
-- Machines start without the Boat account's secrets and without snapshots (a stop or crash erases the disk), with their own deadline, and are deleted after the build or at the next agent start. One saved image with JDK 17/21 and the Android SDK (paid Boat plans) makes builds start in seconds.
+**Android builds (optional, nothing installed until asked; x86-64 servers)**
+- Toolchain on demand: Eclipse Temurin JDK 17/21 and the Android SDK under `/opt/pano/android`, checksums verified, read-only for builds; SDK packages a project needs (NDK, CMake, newer platforms) installed by the agent.
+- Every build runs in a throwaway sandbox: a transient systemd unit with a user that exists only while it runs (DynamicUser), an empty directory of its own, pano's state, secrets, apps and sites out of sight, memory cap, low CPU priority, time limit. When it ends the user, the source and the Gradle cache are gone; only the APK/AAB (size, sha256) is kept, the newest three builds keep their files. One build at a time.
+- The commit is fetched by an unprivileged user (bare fetch + `git archive`: no checkout, hooks or submodules) and handed to the sandbox on stdin; read-only deploy key per project.
+- Signing with the project's upload/release keystore after the build (apksigner for APK, jarsigner for AAB) in a second throwaway sandbox without network, the key passed as systemd credentials: the project's code and dependencies never see it. Keystore root-only, write-only from the UI.
+
+**Throwaway build sandbox for apps (per app, off by default)**
+- Install and build see only the new release: not the deploy key, data, env file (systemd hands the env to the build) or the shared caches; their own caches are deleted afterwards. Slower builds, same output path.
 
 **Migration**
 - From CyberPanel/OpenLiteSpeed: scans the server (vhosts, proxies, PHP versions, certificates, databases, crontabs), imports while the old panel keeps serving, moves sites one by one, cutover of ports 80/443 with one-click rollback, CyberPanel removed last.
