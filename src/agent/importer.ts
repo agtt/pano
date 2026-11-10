@@ -186,7 +186,9 @@ async function pm2Apps(owners: Map<number, PortOwner>, warnings: string[]): Prom
   const out: ImportApp[] = [];
   for (const user of users) {
     const home = ((await readText("/etc/passwd")) ?? "").split("\n").find((l) => l.startsWith(`${user}:`))?.split(":")[5];
-    if (!home || !(await exists(`${home}/.pm2`))) continue;
+    // Only where a PM2 daemon is running: a bare ~/.pm2 (pm2 tried once) has nothing to list.
+    const daemon = home ? (await readText(`${home}/.pm2/pm2.pid`))?.trim() : "";
+    if (!daemon || !/^\d+$/.test(daemon) || !(await exists(`/proc/${daemon}`))) continue;
     const list = await pm2List(user).catch((e) => {
       warnings.push(`pm2 (${user}): ${e instanceof Error ? e.message : e}`);
       return [];
