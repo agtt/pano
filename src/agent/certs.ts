@@ -16,7 +16,7 @@ export async function siteCerts(): Promise<CertInfo[]> {
       if (!pem) throw new Error("file missing");
       const c = new X509Certificate(pem);
       const issuer = c.issuer.match(/(?:^|\n)O=([^\n]+)/)?.[1] ?? c.issuer.match(/CN=([^\n]+)/)?.[1] ?? "";
-      out.push({ site: s.name, file: s.tls_cert, notAfter: Math.floor(Date.parse(c.validTo) / 1000), issuer });
+      out.push({ site: s.name, file: s.tls_cert, notAfter: Math.floor(Date.parse(c.validTo) / 1000), issuer: issuer.replace(/\\,/g, ",") });
     } catch (e) {
       out.push({ site: s.name, file: s.tls_cert, error: e instanceof Error ? e.message : String(e) });
     }
