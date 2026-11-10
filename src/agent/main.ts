@@ -15,8 +15,8 @@ import { applyTuning } from "./tune.ts";
 import { ensureDefaultJobs } from "./recovery.ts";
 import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
-import { cliToken, checkOtp, grantValid, issueGrant, migrateFromWeb } from "./otp.ts";
-import { methods, needsOtp } from "./rpc.ts";
+import { cliToken, checkOtp, grantValid, issueGrant, issueTrust, migrateFromWeb, trustValid } from "./otp.ts";
+import { FRESH_ONLY, methods, needsOtp } from "./rpc.ts";
 import { startRunner } from "./runner.ts";
 import { applyLocalPorts } from "./localports.ts";
 import { reloadUpdatedPhp } from "./php.ts";
@@ -78,7 +78,7 @@ export async function startAgent() {
       const method = url.pathname.replace(/^\/rpc\//, "");
       const handler = Object.hasOwn(methods, method) ? methods[method] : undefined;
       if (req.method !== "POST" || !handler) return Response.json({ ok: false, error: "unknown method" }, { status: 404 });
-      let body: { params?: Record<string, unknown>; actor?: string; otp?: string; grant?: string };
+      let body: { params?: Record<string, unknown>; actor?: string; otp?: string; grant?: string; trust?: string };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -90,14 +90,19 @@ export async function startAgent() {
       // Only for methods that need it: a code sent anywhere else is ignored, so calls cannot
       // be used to burn the admin's attempts (lockout) or to mint grants.
       let grant: string | undefined;
-      if (needsOtp(method, params) && !sameSecret(req.headers.get("x-pano-cli"), cli) && !grantValid(body.grant, actor)) {
+      let trust: string | undefined;
+      const trusted = !FRESH_ONLY.has(method) && trustValid(body.trust, actor);
+      if (needsOtp(method, params) && !sameSecret(req.headers.get("x-pano-cli"), cli) && !trusted && !grantValid(body.grant, actor)) {
         if (!body.otp) return Response.json({ ok: false, error: "Authenticator code required for this action." }, { status: 403 });
         if (!checkOtp(actor, body.otp)) return Response.json({ ok: false, error: "Authenticator code wrong or already used (wait for a new code)." }, { status: 403 });
         grant = issueGrant(actor);
+        trust = issueTrust(actor);
       }
       try {
         const result = await handler(params, actor);
-        return Response.json({ ok: true, result: result ?? null, grant });
+        // Signing in with a code trusts the new session the same way.
+        if (method === "auth.otp" && result === true) trust = issueTrust(String(params.username ?? ""));
+        return Response.json({ ok: true, result: result ?? null, grant, trust });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (!(e instanceof ValidationError)) console.error(`[agent] ${method}: ${msg}`);

@@ -5,8 +5,10 @@ import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
 import { ServerCharts, type History, type Point } from "./charts.tsx";
 import type { ServerInfo } from "./home.tsx";
 import { Icon, type IconName } from "./icons.tsx";
+import { projectSlug } from "../projects.ts";
+import { projectState, type Proj } from "./projects.tsx";
 
-type AppRow = {
+export type AppRow = {
   name: string;
   kind: string;
   external_unit: string;
@@ -16,8 +18,8 @@ type AppRow = {
   runtime_version?: string;
   status: { active: string; memory: number; since: string };
 };
-type SiteRow = { name: string; kind: string; domains: string[]; enabled: number; tls_cert: string; source: string };
-type CertRow = { site: string; notAfter?: number; issuer?: string; error?: string };
+export type SiteRow = { name: string; kind: string; domains: string[]; enabled: number; tls_cert: string; source: string };
+export type CertRow = { site: string; notAfter?: number; issuer?: string; error?: string };
 type BackupJob = { id: number; name: string; enabled: number; last_run_at: number | null; last_status: string };
 type VulnInfo = { rebootNeeded: boolean; last: { at: number; findings: { severity: string }[] } | null } | null;
 type AuditRow = { id: number; at: number; actor: string; action: string };
@@ -33,6 +35,7 @@ export type DashData = {
   activity: AuditRow[];
   databases: number | null;
   admins: number;
+  projects: Proj[];
   user: string;
   now: number;
 };
@@ -54,9 +57,9 @@ export function parseSince(since: string): number {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 }
 
-const appState = (a: AppRow) => (a.status.active === "active" ? "up" : a.status.active === "unknown" ? "unknown" : a.status.active === "not deployed" ? "idle" : "down");
-const runtimeOf = (a: AppRow) => (a.kind === "managed" ? `${a.runtime ?? ""} ${a.runtime_version ?? ""}`.trim() : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit ? "systemd" : t("external"));
-const portOf = (a: AppRow) => a.upstream.split(",")[0]?.split(":").at(-1) ?? "";
+export const appState = (a: AppRow) => (a.status.active === "active" ? "up" : a.status.active === "unknown" ? "unknown" : a.status.active === "not deployed" ? "idle" : "down");
+export const runtimeOf = (a: AppRow) => (a.kind === "managed" ? `${a.runtime ?? ""} ${a.runtime_version ?? ""}`.trim() : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit ? "systemd" : t("external"));
+export const portOf = (a: AppRow) => a.upstream.split(",")[0]?.split(":").at(-1) ?? "";
 
 /** Everything that wants a decision, worst first. */
 export function notices(d: DashData): Notice[] {
@@ -96,7 +99,7 @@ export function notices(d: DashData): Notice[] {
 
 const rate = (n: number | undefined) => (n === undefined ? "—" : `${fmtBytes(n)}/s`);
 
-function Ago({ at, now }: { at: number; now: number }) {
+export function Ago({ at, now }: { at: number; now: number }) {
   if (!at) return <span class="muted">—</span>;
   return <span title={fmtTime(at)}>{fmtDuration(Math.max(0, now - at))}</span>;
 }
@@ -218,8 +221,8 @@ function Stats({ d }: { d: DashData }) {
 function Insights({ d }: { d: DashData }) {
   const up = d.apps.filter((a) => appState(a) === "up").length;
   const tiles: { href: string; icon: IconName; label: string; value: string }[] = [
-    { href: "/apps", icon: "apps", label: t("Apps"), value: d.apps.length ? `${up}/${d.apps.length}` : "0" },
-    { href: "/sites", icon: "sites", label: t("Sites"), value: String(d.sites.length) },
+    { href: "/projects", icon: "apps", label: t("Apps"), value: d.apps.length ? `${up}/${d.apps.length}` : "0" },
+    { href: "/projects", icon: "sites", label: t("Sites"), value: String(d.sites.length) },
     { href: "/databases", icon: "databases", label: t("Databases"), value: d.databases === null ? "—" : String(d.databases) },
     { href: "/services", icon: "services", label: t("Services"), value: String(d.info.services.filter((s) => s.state === "active").length) },
     { href: "/backups", icon: "backups", label: t("Backups"), value: String(d.backups.length) },
@@ -275,101 +278,53 @@ function Migration({ d }: { d: DashData }) {
   );
 }
 
-function Apps({ d }: { d: DashData }) {
+function Projects({ d }: { d: DashData }) {
+  const cm = new Map(d.certs.map((c) => [c.site, c]));
   return (
     <section class="panel">
       <header class="panel-head">
         <h2 class="with-icon">
-          <Icon name="apps" /> {t("Apps")}
+          <Icon name="apps" /> {t("Projects")}
         </h2>
-        <a class="btn small" href="/apps">
-          {t("All apps")}
+        <a class="btn small" href="/projects">
+          {t("All projects")}
         </a>
       </header>
-      {d.apps.length ? (
+      {d.projects.length ? (
         <table class="rack">
           <thead>
             <tr>
-              <th>{t("Name")}</th>
-              <th>{t("Runs on")}</th>
-              <th class="num">{t("Port")}</th>
-              <th class="num">{t("Memory")}</th>
-              <th class="num">{t("Up for")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {d.apps.map((a) => {
-              const s = appState(a);
-              return (
-                <tr class={s}>
-                  <td>
-                    <span class={`led ${s}`} title={a.status.active} />
-                    <a href={`/apps/${a.name}`}>{a.name}</a>
-                  </td>
-                  <td class="muted">{runtimeOf(a)}</td>
-                  <td class="num muted">{portOf(a)}</td>
-                  <td class="num">{a.status.memory ? fmtBytes(a.status.memory) : "—"}</td>
-                  <td class="num">{s === "up" ? <Ago at={parseSince(a.status.since)} now={d.now} /> : <span class="state">{a.status.active}</span>}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      ) : (
-        <div class="empty">
-          <p>{t("No apps yet. Import the ones already running on this server, or deploy one from git.")}</p>
-          <div class="row">
-            <a class="btn primary" href="/import">
-              {t("Import from this server")}
-            </a>
-            <a class="btn" href="/apps/new">
-              {t("New app")}
-            </a>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function Sites({ d }: { d: DashData }) {
-  const certs = new Map(d.certs.map((c) => [c.site, c]));
-  return (
-    <section class="panel">
-      <header class="panel-head">
-        <h2 class="with-icon">
-          <Icon name="sites" /> {t("Sites")}
-        </h2>
-        <a class="btn small" href="/sites">
-          {t("All sites")}
-        </a>
-      </header>
-      {d.sites.length ? (
-        <table class="rack">
-          <thead>
-            <tr>
-              <th>{t("Site")}</th>
-              <th>{t("Type")}</th>
+              <th>{t("Project")}</th>
+              <th class="num">{t("Apps")}</th>
+              <th class="num">{t("Sites")}</th>
+              <th>{t("Domains")}</th>
               <th class="num">{t("Certificate")}</th>
             </tr>
           </thead>
           <tbody>
-            {d.sites.map((s) => {
-              const c = certs.get(s.name);
-              const days = c?.notAfter ? Math.floor((c.notAfter - d.now) / DAY) : null;
-              const cls = days === null ? "" : days < 7 ? "crit" : days < 14 ? "warn" : "";
+            {d.projects.map((p) => {
+              const st = projectState(p, cm, d.now);
+              const up = p.apps.filter((a) => appState(a) === "up").length;
+              const days = p.sites
+                .filter((s) => s.enabled)
+                .map((s) => cm.get(s.name)?.notAfter)
+                .filter((n): n is number => !!n)
+                .map((n) => Math.floor((n - d.now) / DAY));
+              const minDays = days.length ? Math.min(...days) : null;
               return (
-                <tr class={s.enabled ? "" : "off"}>
+                <tr class={st === "down" ? "down" : st === "idle" ? "off" : ""}>
                   <td>
-                    <span class={`led ${s.enabled ? "up" : "idle"}`} title={s.enabled ? t("enabled") : t("suspended")} />
-                    <a href={`/sites/${s.name}`}>{s.name}</a>
-                    {s.domains.length > 1 ? <small class="muted extra">+{s.domains.length - 1}</small> : null}
+                    <span class={`led ${st}`} />
+                    <a href={`/projects/${projectSlug(p.key)}`}>{p.name}</a>
                   </td>
-                  <td>
-                    <span class={`kind ${s.kind}`}>{s.kind === "legacy" ? (s.source === "cyberpanel" ? "OpenLiteSpeed" : t("legacy")) : s.kind}</span>
+                  <td class="num">{p.apps.length ? `${up}/${p.apps.length}` : "—"}</td>
+                  <td class="num">{p.sites.length || "—"}</td>
+                  <td class="muted small dom-cell">
+                    {p.domains.slice(0, 2).map((x) => (x === "*" ? t("any domain") : x)).join(", ")}
+                    {p.domains.length > 2 ? ` +${p.domains.length - 2}` : ""}
                   </td>
-                  <td class={`num ${cls}`}>
-                    {c?.error ? <span class="crit">{t("unreadable")}</span> : days === null ? <span class="muted">{t("edge")}</span> : t("{n} days").replace("{n}", String(days))}
+                  <td class={`num ${minDays === null ? "" : minDays < 7 ? "crit" : minDays < 14 ? "warn" : ""}`}>
+                    {minDays === null ? <span class="muted">—</span> : minDays < 0 ? t("expired") : t("{n} days").replace("{n}", String(minDays))}
                   </td>
                 </tr>
               );
@@ -378,7 +333,7 @@ function Sites({ d }: { d: DashData }) {
         </table>
       ) : (
         <div class="empty">
-          <p>{t("No sites yet. Import the ones OpenLiteSpeed serves today; nothing changes for visitors.")}</p>
+          <p>{t("No projects yet. Import what already runs on this server, or start a new app or site.")}</p>
           <a class="btn primary" href="/import">
             {t("Import from this server")}
           </a>
@@ -466,8 +421,7 @@ export function Dashboard({ d }: { d: DashData }) {
       <Insights d={d} />
       <div class="dash-grid">
         <div class="main-col">
-          <Apps d={d} />
-          <Sites d={d} />
+          <Projects d={d} />
         </div>
         <Side d={d} />
       </div>

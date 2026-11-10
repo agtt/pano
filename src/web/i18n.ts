@@ -33,6 +33,23 @@ export function pickLang(cookie: string | undefined, acceptLanguage: string | un
 }
 
 const tr: Record<string, string> = {
+  "{up}/{all} apps": "{up}/{all} uygulama",
+  "All projects": "Tüm projeler",
+  "any domain": "her alan adı",
+  "Apps and sites are grouped by where traffic goes; move one if it belongs elsewhere.": "Uygulamalar ve siteler trafiğin gittiği yere göre gruplanır; başka bir projeye aitse taşı.",
+  "Each project gathers its domains, the apps that serve them and its sites. Open one to manage it.": "Her proje alan adlarını, onlara hizmet veren uygulamaları ve sitelerini bir arada tutar. Yönetmek için birini aç.",
+  "expired": "süresi doldu",
+  "Goes to": "Gittiği yer",
+  "Move": "Taşı",
+  "Move to project": "Projeye taşı",
+  "No projects yet. Import what already runs on this server, or start a new app or site.": "Henüz proje yok. Bu sunucuda çalışanları içe aktar ya da yeni bir uygulama veya site başlat.",
+  "Own project": "Ayrı proje",
+  "PHP site": "PHP sitesi",
+  "Project": "Proje",
+  "Proxy or static site": "Proxy ya da statik site",
+  "2FA verified, {n} min left": "2FA doğrulandı, {n} dk kaldı",
+  Lock: "Kilitle",
+  "Routine actions skip the code until then. Deleting, restoring and admin changes still ask.": "O zamana kadar sıradan işlemler kod istemez. Silme, geri yükleme ve yönetici değişiklikleri yine sorar.",
   "CPU usage": "CPU kullanımı",
   "Disk usage": "Disk kullanımı",
   "Import sites and apps": "Siteleri ve uygulamaları içe aktar",

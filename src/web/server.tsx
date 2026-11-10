@@ -16,9 +16,11 @@ import { parseRange } from "./views/charts.tsx";
 import { assets } from "./assets.ts";
 import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailView, type AndroidStatusView } from "./views/android.tsx";
 import { RunnerPage, type RunnerView } from "./views/runner.tsx";
-import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
+import { AppDetail, AppForm, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { Dashboard, type DashData } from "./views/dashboard.tsx";
+import { ProjectDetail, ProjectsPage, type Proj } from "./views/projects.tsx";
+import { groupProjects, projectSlug, slugKey } from "./projects.ts";
 import { LoginPage } from "./views/home.tsx";
 import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
 import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
@@ -45,7 +47,6 @@ import {
   RuntimesPage,
   SecurityPage,
   SiteForm,
-  SitesPage,
   type CpPlanView,
   type CpReportView,
 } from "./views/pages.tsx";
@@ -75,6 +76,25 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-origin",
   "Cache-Control": "no-store",
+};
+
+/** Session id -> the agent's trust token after a verified code (in memory: a restart asks again). */
+const trusts = new Map<string, { trust: string; until: number }>();
+const TRUST_MS = 15 * 60_000;
+const trustOf = (sid: string | undefined) => {
+  const tr = sid ? trusts.get(sid) : undefined;
+  if (tr && tr.until > Date.now()) return tr;
+  if (sid) trusts.delete(sid);
+  return undefined;
+};
+const keepTrust = (sid: string) => {
+  const st = stepUp.getStore();
+  if (st?.trustNew) trusts.set(sid, { trust: st.trustNew, until: Date.now() + TRUST_MS });
+};
+const dropTrust = (sid: string | undefined) => {
+  const tr = sid ? trusts.get(sid) : undefined;
+  if (tr) call("auth.trust.end", { trust: tr.trust }).catch(() => {});
+  if (sid) trusts.delete(sid);
 };
 
 export function createWebApp() {
@@ -115,6 +135,7 @@ export function createWebApp() {
     const r = await login(String(f.username ?? ""), String(f.password ?? ""), String(f.otp ?? ""), ip);
     if ("error" in r) return c.html(<Layout title={t("Sign in")} path="/login"><LoginPage error={r.error} /></Layout>, 401);
     setCookie(c, cookieName(c), r.sid, { httpOnly: true, secure: !plainHttp(c), sameSite: "Strict", path: "/" });
+    keepTrust(r.sid);
     return c.redirect("/");
   });
 
@@ -128,10 +149,23 @@ export function createWebApp() {
       if (!csrfOk(s, f._csrf)) return c.text("bad csrf token", 403);
     }
     c.set("s", s);
+    const sid = getCookie(c, cookieName(c))!;
+    const tr = trustOf(sid);
+    if (tr) stepUp.getStore()!.trust = tr.trust;
     await next();
+    keepTrust(sid);
+  });
+
+  // Ends the trusted window now: the next guarded action asks for a code again.
+  app.post("/trust/end", (c) => {
+    dropTrust(getCookie(c, cookieName(c)));
+    const back = c.req.header("referer");
+    const path = back ? new URL(back).pathname : "/";
+    return c.redirect(/^\/(?![\/\\])/.test(path) ? path : "/");
   });
 
   app.post("/logout", (c) => {
+    dropTrust(getCookie(c, cookieName(c)));
     logout(getCookie(c, cookieName(c)));
     deleteCookie(c, cookieName(c), { path: "/", secure: !plainHttp(c) });
     return c.redirect("/login");
@@ -141,7 +175,7 @@ export function createWebApp() {
     const s = c.get("s");
     const flash = { ok: c.req.query("ok"), err: c.req.query("err") };
     return c.html(
-      <Layout title={title} path={new URL(c.req.url).pathname} csrf={s.csrf} user={s.user.username} flash={flash}>
+      <Layout title={title} path={new URL(c.req.url).pathname} csrf={s.csrf} user={s.user.username} flash={flash} trustUntil={trustOf(getCookie(c, cookieName(c)))?.until}>
         {body}
       </Layout>,
       status as 200,
@@ -153,8 +187,11 @@ export function createWebApp() {
   const err = (to: string, e: unknown) => `${to}${to.includes("?") ? "&" : "?"}err=${encodeURIComponent((e instanceof Error ? e.message : String(e)).slice(0, 300))}`;
   const needOtp = (c: Context<Env>, otp: unknown) => {
     // Checked by the agent with the next call, not here: this process holds no TOTP secrets.
+    const st = stepUp.getStore()!;
+    // In a trusted window the field is hidden; the agent still asks for a code where it must.
+    if (!otp && st.trust) return;
     if (!/^\d{6}$/.test(String(otp ?? ""))) throw new Error("Authenticator code required.");
-    stepUp.getStore()!.otp = String(otp);
+    st.otp = String(otp);
   };
   /** Runs an action and redirects back with a message either way. */
   const act = (to: string, fn: (c: Context<Env>, f: Record<string, any>) => Promise<string | void>) => async (c: Context<Env>) => {
@@ -173,7 +210,7 @@ export function createWebApp() {
   app.get("/", async (c) => {
     // One slow or missing part must not take the whole overview down.
     const soft = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-    const [info, history, apps, sites, certs, backups, vulns, activity, dbCount] = await Promise.all([
+    const [info, history, apps, sites, certs, backups, vulns, activity, dbCount, moves] = await Promise.all([
       call("system.info"),
       soft(call("metrics.history", { range: parseRange(c.req.query("range")) }), null),
       soft(call("apps.list"), []),
@@ -183,17 +220,44 @@ export function createWebApp() {
       soft(call("vulns.status"), null),
       soft(call("audit.list"), []),
       soft(call<{ databases: unknown[] }>("db.list").then((r) => r.databases.length), null),
+      soft(call("projects.moves"), {}),
     ]);
     const d: DashData = {
       info, history, apps, sites, certs, backups, vulns,
       activity: activity.slice(0, 6),
       databases: dbCount,
       admins: listUsers().length,
+      projects: groupProjects(apps, sites, moves) as Proj[],
       user: c.get("s").user.username,
       now: Math.floor(Date.now() / 1000),
     };
     return page(c, t("Overview"), <Dashboard d={d} />);
   });
+
+  // ---- projects: apps and sites together
+  const loadProjects = async () => {
+    const [appList, siteList, certs, moves] = await Promise.all([call("apps.list"), call("sites.list"), call("sites.certs").catch(() => []), call("projects.moves").catch(() => ({}))]);
+    return { projects: groupProjects(appList, siteList, moves) as Proj[], certs, now: Math.floor(Date.now() / 1000) };
+  };
+  app.get("/projects", async (c) => page(c, t("Projects"), <ProjectsPage {...await loadProjects()} />));
+  app.get("/projects/:slug", async (c) => {
+    const d = await loadProjects();
+    const key = slugKey(c.req.param("slug"));
+    // A project's key is its first member: after a move it may be another member's now.
+    const p = d.projects.find((x) => x.key === key || x.apps.some((a) => `app:${a.name}` === key) || x.sites.some((s) => `site:${s.name}` === key));
+    if (!p) return c.redirect("/projects");
+    if (p.key !== key) return c.redirect(`/projects/${projectSlug(p.key)}`);
+    return page(c, p.name, <ProjectDetail p={p} projects={d.projects} certs={d.certs} now={d.now} csrf={c.get("s").csrf} />);
+  });
+  app.post("/projects/move", act("/projects", async (c, f) => {
+    const item = String(f.item ?? "");
+    const target = String(f.target ?? "");
+    const { projects } = await loadProjects();
+    const from = projects.find((x) => x.apps.some((a) => `app:${a.name}` === item) || x.sites.some((s) => `site:${s.name}` === item));
+    if (from && from.key === target) return `/projects/${projectSlug(from.key)}`;
+    await call("projects.move", { item, target }, actor(c));
+    return `/projects/${projectSlug(target || item)}`;
+  }));
 
   // ---- apps
   const runtimeList = () => call<{ runtime: string; version: string }[]>("runtimes.list");
@@ -202,7 +266,7 @@ export function createWebApp() {
     return { ...f, runtime, runtime_version };
   };
 
-  app.get("/apps", async (c) => page(c, t("Apps"), <AppsPage apps={await call("apps.list")} />));
+  app.get("/apps", (c) => c.redirect("/projects"));
   app.get("/apps/new", async (c) => {
     const [runtimes, repos] = await Promise.all([runtimeList(), call<RepoOption[]>("github.repos").catch(() => [])]);
     return page(c, t("New app"), <Card title={t("New app")}><AppForm csrf={c.get("s").csrf} runtimes={runtimes} repos={repos} action="/apps" submit="Create" /></Card>);
@@ -493,7 +557,7 @@ export function createWebApp() {
   });
 
   // ---- sites
-  app.get("/sites", async (c) => page(c, t("Sites"), <SitesPage sites={await call("sites.list")} csrf={c.get("s").csrf} />));
+  app.get("/sites", (c) => c.redirect("/projects"));
   app.get("/sites/new", (c) => page(c, t("Sites"), <SiteForm csrf={c.get("s").csrf} />));
   app.get("/sites/new-php", async (c) => page(c, t("Sites"), <PhpSiteNew csrf={c.get("s").csrf} versions={await call("php.versions")} />));
   app.get("/sites/:name", async (c) => {

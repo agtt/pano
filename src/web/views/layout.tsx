@@ -12,8 +12,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: "Hosting",
     items: [
-      ["/apps", "Apps", "apps"],
-      ["/sites", "Sites", "sites"],
+      ["/projects", "Projects", "apps"],
       ["/databases", "Databases", "databases"],
       ["/env-groups", "Shared variables", "variables"],
     ],
@@ -50,9 +49,10 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
 ];
 export const NAV: [string, string][] = NAV_GROUPS.flatMap((g) => g.items.map(([href, label]) => [href, label] as [string, string]));
 
-export type PageProps = { title: string; path: string; csrf?: string; user?: string; flash?: { ok?: string; err?: string }; children?: Child };
+export type PageProps = { title: string; path: string; csrf?: string; user?: string; flash?: { ok?: string; err?: string }; trustUntil?: number; children?: Child };
 
-const isOn = (href: string, path: string) => (href === "/" ? path === "/" : path === href || path.startsWith(`${href}/`));
+const isOn = (href: string, path: string) =>
+  href === "/" ? path === "/" : path === href || path.startsWith(`${href}/`) || (href === "/projects" && /^\/(apps|sites)\//.test(path));
 
 /** EN / TR links; the current one is plain text. */
 export function LangSwitch({ path }: { path: string }) {
@@ -74,6 +74,8 @@ export function LangSwitch({ path }: { path: string }) {
 
 /** Where the page sits in the menu: its group, for the breadcrumb. */
 function sectionOf(path: string): { group: string; item?: NavItem } {
+  // An app's or a site's own page lives under Projects.
+  if (/^\/(apps|sites)\//.test(path)) path = "/projects/x";
   for (const g of NAV_GROUPS) for (const it of g.items) if (isOn(it[0], path)) return { group: g.title, item: it };
   return { group: "" };
 }
@@ -134,6 +136,14 @@ function Topbar(p: PageProps) {
         </nav>
         <h1 class="page-title">{p.title}</h1>
       </div>
+      {p.trustUntil && p.trustUntil > Date.now() ? (
+        <form method="post" action="/trust/end" class="trust" title={t("Routine actions skip the code until then. Deleting, restoring and admin changes still ask.")}>
+          <input type="hidden" name="_csrf" value={p.csrf} />
+          <Icon name="security" size={16} />
+          <span>{t("2FA verified, {n} min left").replace("{n}", String(Math.max(1, Math.ceil((p.trustUntil - Date.now()) / 60_000))))}</span>
+          <button class="link-btn">{t("Lock")}</button>
+        </form>
+      ) : null}
       <form method="post" action="/logout" class="who">
         <input type="hidden" name="_csrf" value={p.csrf} />
         <span class="avatar" aria-hidden="true">
@@ -159,7 +169,7 @@ export function Layout(p: PageProps) {
         <script src={assets.js.url} defer></script>
       </head>
       {p.user ? (
-        <body class="with-side">
+        <body class={`with-side${p.trustUntil && p.trustUntil > Date.now() ? " trusted" : ""}`}>
           <Sidebar {...p} />
           <div class="frame">
             <Topbar {...p} />
@@ -231,7 +241,7 @@ export function DangerForm(p: { action: string; csrf: string; name: string; labe
       </label>
       <label class="field">
         <span>{t("Current authenticator code")}</span>
-        <input name="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required />
+        <input name="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required data-always />
       </label>
       {p.extra}
       <button class="btn danger">{p.label}</button>

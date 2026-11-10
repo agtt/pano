@@ -17,9 +17,9 @@ test("strings follow the request's language", () => {
   expect(t("Apps")).toBe("Apps");
   expect(withLang("tr", () => t("Apps"))).toBe("Uygulamalar");
   expect(withLang("tr", () => lang())).toBe("tr");
-  const html = withLang("tr", () => String(<Layout title="X" path="/apps" user="a" csrf="c" />));
+  const html = withLang("tr", () => String(<Layout title="X" path="/projects" user="a" csrf="c" />));
   expect(html).toContain('<html lang="tr">');
-  expect(html).toContain("Uygulamalar");
+  expect(html).toContain("Projeler");
   expect(html).toContain('aria-current="page"');
 });
 

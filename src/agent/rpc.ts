@@ -2,7 +2,7 @@
 // handler validates its own input; there is no generic "run command" method.
 
 import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
-import { addAdmin, adminNames, checkOtp, removeAdmin, resetAdmin } from "./otp.ts";
+import { addAdmin, adminNames, checkOtp, endTrust, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as android from "./android.ts";
 import * as appsOps from "./apps.ts";
@@ -76,6 +76,15 @@ const SENSITIVE = new Set([
   "pg.remote.enable", "pg.remote.disable", "pg.remote.user.add", "pg.remote.user.remove",
   "mysql.remote.enable", "mysql.remote.disable", "mysql.remote.user.add", "mysql.remote.user.remove",
 ]);
+/**
+ * Guarded actions that need a code typed for them even while the session is trusted:
+ * the ones that destroy or overwrite data, hand out the backup key, move all traffic, or change who can sign in.
+ */
+export const FRESH_ONLY = new Set([
+  "apps.delete", "sites.delete", "db.drop", "pg.drop", "containers.delete", "realtime.uninstall", "turn.uninstall", "android.project.remove",
+  "backup.restore", "backup.key.export", "recovery.kit", "recovery.rebuild", "edge.cutover", "edge.rollback",
+  "admins.add", "admins.remove", "admins.reset",
+]);
 export const ENV_MASK = "••••••••";
 
 /** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
@@ -112,6 +121,7 @@ const allDomains = () => ({ apps: apps.list(), sites: sites.list(), previews: pr
 export const methods: Record<string, Handler> = {
   // ---- login: the web checks the password, the agent checks the code
   "auth.otp": (p) => checkOtp(String(p.username ?? ""), p.code),
+  "auth.trust.end": (p) => endTrust(p.trust),
 
   // ---- admins (all equal, no roles); the web keeps the password hashes
   "admins.list": () => adminNames(),
@@ -488,6 +498,19 @@ export const methods: Record<string, Handler> = {
   "php.uninstall": (p, actor) => php.uninstallPhp(v.phpVersion(p.version), actor),
 
   // ---- sites (routing entries that are not managed apps)
+  // Manual project moves (grouping is worked out in the UI); "" puts an item in a project of its own.
+  "projects.moves": () => JSON.parse(settings.get("projects.moves") ?? "{}") as Record<string, string>,
+  "projects.move": (p, actor) => {
+    const key = /^(app|site):[A-Za-z0-9._*-]{1,253}$/;
+    const item = String(p.item ?? "");
+    const target = String(p.target ?? "");
+    if (!key.test(item) || (target && !key.test(target))) throw new Error("bad project item");
+    const moves = JSON.parse(settings.get("projects.moves") ?? "{}") as Record<string, string>;
+    moves[item] = target;
+    settings.set("projects.moves", JSON.stringify(moves));
+    audit(actor, "projects.move", { item, target });
+    return moves;
+  },
   "sites.list": () => sites.list(),
   "sites.certs": () => siteCerts(),
   "sites.createPhp": async (p, actor) => {

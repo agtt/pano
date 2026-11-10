@@ -77,3 +77,15 @@ if (navSearch) {
     }
   });
 }
+
+// Trusted window (a code was entered in the last minutes): routine forms drop the code field.
+// Forms the agent always asks a code for (delete, restore, backup key, traffic switch, admins) keep it.
+if (document.body.classList.contains("trusted")) {
+  const always = /^\/(admins(\/|$)|backups\/key|backups\/runs\/\d+\/restore|edge\/(cutover|rollback))/;
+  for (const input of document.querySelectorAll('input[name="otp"]')) {
+    const form = input.form;
+    if (input.hasAttribute("data-always") || !form || form.classList.contains("danger") || always.test(form.getAttribute("action") || "")) continue;
+    input.required = false;
+    (input.closest("label.field") || input).classList.add("otp-skip");
+  }
+}

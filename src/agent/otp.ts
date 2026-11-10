@@ -66,6 +66,30 @@ export function issueGrant(actor: string): string {
   return g;
 }
 
+/**
+ * After a verified code (sign-in or any guarded action), the session is trusted for a while:
+ * routine guarded actions go through without a new code. Deleting, restoring, revealing the
+ * backup key, switching traffic and managing admins still ask every time (FRESH_ONLY in rpc.ts).
+ */
+export const TRUST_SECONDS = 15 * 60;
+const trusts = new Map<string, { actor: string; until: number }>();
+
+export function issueTrust(actor: string): string {
+  const tk = randomBytes(24).toString("base64url");
+  trusts.set(tk, { actor, until: Date.now() + TRUST_SECONDS * 1000 });
+  for (const [k, v] of trusts) if (v.until < Date.now()) trusts.delete(k);
+  return tk;
+}
+
+export const trustValid = (tk: unknown, actor: string) => {
+  const v = typeof tk === "string" ? trusts.get(tk) : undefined;
+  return !!v && v.actor === actor && v.until > Date.now();
+};
+
+export const endTrust = (tk: unknown) => {
+  if (typeof tk === "string") trusts.delete(tk);
+};
+
 /** Spends one use of the grant. */
 export const grantValid = (grant: unknown, actor: string) => {
   const g = typeof grant === "string" ? grants.get(grant) : undefined;
@@ -109,6 +133,7 @@ export function removeAdmin(actor: string, username: string) {
   checkRemove(actor, username, adminNames());
   state().query("DELETE FROM admins WHERE username = ?").run(username);
   for (const [k, g] of grants) if (g.actor === username) grants.delete(k);
+  for (const [k, v] of trusts) if (v.actor === username) trusts.delete(k);
   audit(actor, "admins.remove", { username });
 }
 
