@@ -250,7 +250,8 @@ PANO_WEB_HOST=127.0.0.1
 PANO_WEB_PORT=7800
 # Set to 1 only when the panel is reached over plain HTTP (SSH tunnel / Tailscale).
 PANO_INSECURE_COOKIES=1
-PANO_LANG=tr
+# The UI follows the browser's language (English or Turkish); this is only the fallback.
+# PANO_LANG=en
 `;
 
 async function install() {

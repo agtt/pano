@@ -1,34 +1,79 @@
 import type { Child } from "hono/jsx";
 import { assets } from "../assets.ts";
-import { t } from "../i18n.ts";
+import { LANGS, lang, t } from "../i18n.ts";
 
-export const NAV: [string, string][] = [
-  ["/", "Home"],
-  ["/apps", "Apps"],
-  ["/env-groups", "Shared variables"],
-  ["/sites", "Sites"],
-  ["/databases", "Databases"],
-  ["/services", "Services"],
-  ["/jobs", "Jobs"],
-  ["/backups", "Backups"],
-  ["/runtimes", "Runtimes"],
-  ["/containers", "Containers"],
-  ["/android", "Android"],
-  ["/runner", "Runner"],
-  ["/edge", "Edge"],
-  ["/vpn", "Private access"],
-  ["/security", "Security"],
-  ["/admins", "Admins"],
-  ["/shield", "Shield"],
-  ["/import", "Import"],
-  ["/activity", "Activity"],
+/** The sidebar, grouped by what you came to do. Every page keeps its own URL. */
+export const NAV_GROUPS: { title: string; items: [href: string, label: string][] }[] = [
+  { title: "", items: [["/", "Home"]] },
+  {
+    title: "Hosting",
+    items: [
+      ["/apps", "Apps"],
+      ["/sites", "Sites"],
+      ["/databases", "Databases"],
+      ["/env-groups", "Shared variables"],
+    ],
+  },
+  {
+    title: "Operations",
+    items: [
+      ["/services", "Services"],
+      ["/jobs", "Jobs"],
+      ["/backups", "Backups"],
+      ["/containers", "Containers"],
+      ["/runtimes", "Runtimes"],
+    ],
+  },
+  {
+    title: "Protection",
+    items: [
+      ["/edge", "Edge"],
+      ["/security", "Security"],
+      ["/shield", "Shield"],
+      ["/vpn", "Private access"],
+      ["/admins", "Admins"],
+      ["/activity", "Activity"],
+    ],
+  },
+  {
+    title: "Tools",
+    items: [
+      ["/import", "Import"],
+      ["/android", "Android"],
+      ["/runner", "Runner"],
+    ],
+  },
 ];
+export const NAV: [string, string][] = NAV_GROUPS.flatMap((g) => g.items);
 
 export type PageProps = { title: string; path: string; csrf?: string; user?: string; flash?: { ok?: string; err?: string }; children?: Child };
 
+const isOn = (href: string, path: string) => (href === "/" ? path === "/" : path === href || path.startsWith(`${href}/`));
+
+/** EN · TR links; the current one is plain text. */
+export function LangSwitch({ path }: { path: string }) {
+  const now = lang();
+  return (
+    <span class="lang" aria-label={t("Language")}>
+      {LANGS.map((l, i) => (
+        <>
+          {i ? <span class="sep">·</span> : null}
+          {l.code === now ? (
+            <strong title={l.label}>{l.code.toUpperCase()}</strong>
+          ) : (
+            <a href={`/lang/${l.code}?next=${encodeURIComponent(path)}`} title={l.label} lang={l.code}>
+              {l.code.toUpperCase()}
+            </a>
+          )}
+        </>
+      ))}
+    </span>
+  );
+}
+
 export function Layout(p: PageProps) {
   return (
-    <html lang="tr">
+    <html lang={lang()}>
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -36,27 +81,39 @@ export function Layout(p: PageProps) {
         <link rel="stylesheet" href={assets.css.url} />
         <script src={assets.js.url} defer></script>
       </head>
-      <body>
+      <body class={p.user ? "with-side" : ""}>
         {p.user ? (
-          <header class="top">
-            <a class="brand" href="/">
-              <span class="logo">▦</span> pano
-            </a>
+          <aside class="side">
+            <div class="side-top">
+              <a class="brand" href="/">
+                <span class="logo">▦</span> pano
+              </a>
+              {/* No JavaScript needed: the checkbox opens the menu on small screens. */}
+              <input type="checkbox" id="nav-toggle" class="nav-toggle" />
+              <label for="nav-toggle" class="nav-button">{t("Menu")}</label>
+            </div>
             <nav>
-              {NAV.map(([href, label]) => (
-                <a href={href} class={href === "/" ? (p.path === "/" ? "on" : "") : p.path.startsWith(href) ? "on" : ""}>
-                  {t(label)}
-                </a>
+              {NAV_GROUPS.map((g) => (
+                <div class="nav-group">
+                  {g.title ? <div class="nav-title">{t(g.title)}</div> : null}
+                  {g.items.map(([href, label]) => (
+                    <a href={href} class={isOn(href, p.path) ? "on" : ""} aria-current={isOn(href, p.path) ? "page" : undefined}>
+                      {t(label)}
+                    </a>
+                  ))}
+                </div>
               ))}
+              <form method="post" action="/logout" class="side-foot">
+                <input type="hidden" name="_csrf" value={p.csrf} />
+                <span class="who">{p.user}</span>
+                <LangSwitch path={p.path} />
+                <button class="link">{t("Sign out")}</button>
+              </form>
             </nav>
-            <form method="post" action="/logout" class="logout">
-              <input type="hidden" name="_csrf" value={p.csrf} />
-              <span class="muted">{p.user}</span>
-              <button class="link">{t("Sign out")}</button>
-            </form>
-          </header>
+          </aside>
         ) : null}
         <main>
+          {p.user ? <h1 class="page-title">{p.title}</h1> : null}
           {p.flash?.ok ? <div class="flash ok">{p.flash.ok}</div> : null}
           {p.flash?.err ? <div class="flash err">{p.flash.err}</div> : null}
           {p.children}

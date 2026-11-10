@@ -1,9 +1,55 @@
 // UI strings are written in English; this maps them to other languages.
-// Missing entries fall back to English.
+// Missing entries fall back to English. The language is chosen per request:
+// the visitor's own choice (cookie), else the browser's Accept-Language, else PANO_LANG, else English.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { env } from "../shared/config.ts";
 
+export type Lang = "en" | "tr";
+export const LANGS: { code: Lang; label: string }[] = [
+  { code: "en", label: "English" },
+  { code: "tr", label: "Türkçe" },
+];
+export const LANG_COOKIE = "pano_lang";
+const isLang = (v: unknown): v is Lang => LANGS.some((l) => l.code === v);
+
+const current = new AsyncLocalStorage<Lang>();
+export const withLang = <T>(l: Lang, fn: () => T): T => current.run(l, fn);
+export const lang = (): Lang => current.getStore() ?? env.lang;
+
+/** Cookie first, then the browser's preferences in q order (`tr-TR,tr;q=0.9,en;q=0.8`), then the server default. */
+export function pickLang(cookie: string | undefined, acceptLanguage: string | undefined): Lang {
+  if (isLang(cookie)) return cookie;
+  const wanted = (acceptLanguage ?? "")
+    .split(",")
+    .map((part, i) => {
+      const [tag, ...params] = part.trim().split(";");
+      const q = Number(params.find((x) => x.trim().startsWith("q="))?.trim().slice(2) ?? 1);
+      return { code: (tag ?? "").trim().toLowerCase().split("-")[0], q: Number.isFinite(q) ? q : 0, i };
+    })
+    .filter((x) => x.code && x.q > 0)
+    .sort((a, b) => b.q - a.q || a.i - b.i);
+  return wanted.map((x) => x.code).find(isLang) ?? env.lang;
+}
+
 const tr: Record<string, string> = {
+  Hosting: "Barındırma",
+  Operations: "Operasyon",
+  Protection: "Koruma",
+  Tools: "Araçlar",
+  Menu: "Menü",
+  Language: "Dil",
+  "Shared variables": "Ortak değişkenler",
+  Android: "Android",
+  "Server health": "Sunucu durumu",
+  CPUs: "CPU",
+  "load average": "yük ortalaması",
+  free: "boş",
+  "Edge (Caddy)": "Edge (Caddy)",
+  "Not taken over yet: the old web server still serves :80/:443.": "Henüz devralınmadı: :80/:443'ü hâlâ eski web sunucusu sunuyor.",
+  "Serving :80/:443.": ":80/:443'ü sunuyor.",
+  "Installed, waiting for cutover.": "Kurulu, devralma bekleniyor.",
+  "Not installed.": "Kurulu değil.",
   Home: "Ana sayfa",
   Apps: "Uygulamalar",
   Sites: "Siteler",
@@ -143,7 +189,7 @@ const tr: Record<string, string> = {
 const dicts = { tr, en: {} as Record<string, string> };
 
 export function t(s: string): string {
-  return dicts[env.lang]?.[s] ?? s;
+  return dicts[lang()]?.[s] ?? s;
 }
 
 export function fmtBytes(n: number): string {

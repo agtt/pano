@@ -62,7 +62,8 @@ export const env = {
   olsBackendPort: Number(process.env.PANO_OLS_BACKEND_PORT ?? 8088),
   /** Set when the UI is reached over plain HTTP (dev, Tailscale): drops the Secure cookie flag. */
   insecureCookies: process.env.PANO_INSECURE_COOKIES === "1",
-  lang: (process.env.PANO_LANG ?? "tr") as "tr" | "en",
+  /** Fallback when neither the visitor's choice nor the browser's languages match one pano speaks. */
+  lang: (process.env.PANO_LANG === "tr" ? "tr" : "en") as "tr" | "en",
 };
 
 /** First port handed to managed apps; each app takes two (blue/green slots). */

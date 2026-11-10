@@ -11,7 +11,7 @@ import { call, stepUp } from "./agent.ts";
 import { addUser, csrfOk, generatePassword, killSessions, listUsers, login, logout, prepareHash, pruneSessions, removeUser, session, setPassword, userExists, type Session } from "./auth.ts";
 import { checkUsername } from "../shared/admins.ts";
 import { AdminsPage, type AdminSecret } from "./views/admins.tsx";
-import { t } from "./i18n.ts";
+import { LANG_COOKIE, pickLang, t, withLang } from "./i18n.ts";
 import { parseRange } from "./views/charts.tsx";
 import { assets } from "./assets.ts";
 import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailView, type AndroidStatusView } from "./views/android.tsx";
@@ -82,6 +82,7 @@ export function createWebApp() {
   // Before anything else, login page included. The hook app is separate and has its own public Host.
   app.use("*", async (c, next) => (hostAllowed(c.req.header("host"), env) ? next() : c.text("bad host", 421)));
   app.use("*", (c, next) => stepUp.run({}, next));
+  app.use("*", (c, next) => withLang(pickLang(getCookie(c, LANG_COOKIE), c.req.header("accept-language")), next));
   app.use("*", async (c, next) => {
     await next();
     // Static files keep their own Cache-Control (pages are no-store). HTML is deliberately not
@@ -93,6 +94,16 @@ export function createWebApp() {
   for (const a of Object.values(assets)) {
     app.get(a.url.split("?")[0]!, (c) => c.body(a.body, 200, { "content-type": a.type, "cache-control": "public, max-age=31536000, immutable" }));
   }
+
+  // Language switch, signed in or not: a plain link, remembered for a year.
+  app.get("/lang/:code", (c) => {
+    const code = c.req.param("code");
+    if (code === "auto") deleteCookie(c, LANG_COOKIE, { path: "/" });
+    else if (code === "en" || code === "tr") setCookie(c, LANG_COOKIE, code, { httpOnly: true, secure: !plainHttp(c), sameSite: "Lax", path: "/", maxAge: 365 * 86400 });
+    const next = c.req.query("next") ?? "/";
+    // Only a path on this panel: no scheme, no protocol-relative "//host", no backslash tricks.
+    return c.redirect(/^\/(?![\/\\])[^\s]*$/.test(next) ? next : "/");
+  });
 
   app.get("/login", (c) => c.html(<Layout title={t("Sign in")} path="/login"><LoginPage /></Layout>));
 
