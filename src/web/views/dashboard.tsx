@@ -4,6 +4,7 @@
 import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
 import { ServerCharts, type History, type Point } from "./charts.tsx";
 import type { ServerInfo } from "./home.tsx";
+import { Icon, type IconName } from "./icons.tsx";
 
 type AppRow = {
   name: string;
@@ -30,6 +31,9 @@ export type DashData = {
   backups: BackupJob[];
   vulns: VulnInfo;
   activity: AuditRow[];
+  databases: number | null;
+  admins: number;
+  user: string;
   now: number;
 };
 
@@ -90,26 +94,6 @@ export function notices(d: DashData): Notice[] {
   return out.sort((a, b) => rank[a.level] - rank[b.level]);
 }
 
-function Gauge(p: { label: string; value: number; display: string; detail: string }) {
-  const r = 30;
-  const c = 2 * Math.PI * r;
-  const v = Math.max(0, Math.min(100, p.value));
-  const level = v >= 90 ? "crit" : v >= 75 ? "warn" : "ok";
-  return (
-    <figure class={`gauge ${level}`}>
-      <svg viewBox="0 0 72 72" role="img" aria-label={`${p.label}: ${p.display}`}>
-        <circle class="gauge-track" cx="36" cy="36" r={r} />
-        <circle class="gauge-fill" cx="36" cy="36" r={r} stroke-dasharray={`${((v / 100) * c).toFixed(1)} ${c.toFixed(1)}`} transform="rotate(-90 36 36)" />
-      </svg>
-      <figcaption>
-        <strong>{p.display}</strong>
-        <span>{p.label}</span>
-        <small>{p.detail}</small>
-      </figcaption>
-    </figure>
-  );
-}
-
 const rate = (n: number | undefined) => (n === undefined ? "—" : `${fmtBytes(n)}/s`);
 
 function Ago({ at, now }: { at: number; now: number }) {
@@ -117,64 +101,176 @@ function Ago({ at, now }: { at: number; now: number }) {
   return <span title={fmtTime(at)}>{fmtDuration(Math.max(0, now - at))}</span>;
 }
 
-function Status({ d }: { d: DashData }) {
-  const list = notices(d);
+function Welcome({ d, list }: { d: DashData; list: Notice[] }) {
   const crit = list.filter((n) => n.level === "crit").length;
   const warn = list.filter((n) => n.level === "warn").length;
   const level = crit ? "crit" : warn ? "warn" : "ok";
   const headline = crit
-    ? (crit === 1 ? t("1 problem needs you now") : t("{n} problems need you now").replace("{n}", String(crit)))
+    ? crit === 1
+      ? t("1 problem needs you now")
+      : t("{n} problems need you now").replace("{n}", String(crit))
     : warn
-      ? (warn === 1 ? t("Running, 1 thing to check") : t("Running, {n} things to check").replace("{n}", String(warn)))
+      ? warn === 1
+        ? t("Running, 1 thing to check")
+        : t("Running, {n} things to check").replace("{n}", String(warn))
       : t("Everything is running");
-  const up = d.apps.filter((a) => appState(a) === "up").length;
   return (
-    <section class={`status ${level}`}>
-      <div class="status-line">
-        <span class={`led ${level === "ok" ? "up" : level === "crit" ? "down" : "warn"}`} aria-hidden="true" />
-        <h2>{headline}</h2>
-        <p class="status-meta">
-          <span>{t("{up} of {all} apps up").replace("{up}", String(up)).replace("{all}", String(d.apps.length))}</span>
-          <span>{t("{n} sites").replace("{n}", String(d.sites.length))}</span>
-          <span>
-            {d.info.hostname}, {t("up for {t}").replace("{t}", fmtDuration(d.info.uptime))}
-          </span>
-        </p>
+    <section class="welcome">
+      <div>
+        <h2>{t("Welcome back, {user}").replace("{user}", d.user)}</h2>
+        <p class="muted">{t("What would you like to do today?")}</p>
       </div>
-      {list.length ? (
-        <ul class="notices">
-          {list.map((n) => (
-            <li class={n.level}>
-              <a href={n.href}>{n.text}</a>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      <a class={`pill ${level}`} href={list.length ? "#attention" : "/"}>
+        <span class={`led ${level === "ok" ? "up" : level === "crit" ? "down" : "warn"}`} aria-hidden="true" />
+        {headline}
+      </a>
     </section>
   );
 }
 
-function Gauges({ d }: { d: DashData }) {
+const QUICK: { href: string; icon: IconName; title: string; sub: string }[] = [
+  { href: "/apps/new", icon: "git", title: "New app", sub: "Deploy from git" },
+  { href: "/sites/new-php", icon: "sites", title: "New site", sub: "PHP or static" },
+  { href: "/databases", icon: "databases", title: "Database", sub: "Create or manage" },
+  { href: "/backups", icon: "backups", title: "Back up", sub: "Protect your data" },
+  { href: "/import", icon: "import", title: "Import", sub: "From CyberPanel" },
+];
+
+function Quick() {
+  return (
+    <section class="quick" aria-label={t("Quick actions")}>
+      {QUICK.map((q) => (
+        <a class="qa" href={q.href}>
+          <span class="qa-icon">
+            <Icon name={q.icon} size={20} />
+          </span>
+          <span class="qa-text">
+            <strong>{t(q.title)}</strong>
+            <small>{t(q.sub)}</small>
+          </span>
+        </a>
+      ))}
+    </section>
+  );
+}
+
+function Attention({ list }: { list: Notice[] }) {
+  if (!list.length) return null;
+  return (
+    <section class="panel attention" id="attention">
+      <header class="panel-head">
+        <h2>
+          <Icon name="alert" /> {t("Needs attention")}
+        </h2>
+      </header>
+      <ul class="notices">
+        {list.map((n) => (
+          <li class={n.level}>
+            <a href={n.href}>{n.text}</a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Meter2({ value }: { value: number }) {
+  const v = Math.max(0, Math.min(100, Math.round(value)));
+  const level = v >= 90 ? "crit" : v >= 75 ? "warn" : "ok";
+  // A native <meter> styled per level: no inline width, so the strict CSP holds.
+  return <meter class={`bar ${level}`} min={0} max={100} low={75} high={90} optimum={0} value={v} />;
+}
+
+function StatCard(p: { icon: IconName; title: string; value: string; percent?: number; sub: string; tone: string }) {
+  return (
+    <div class={`stat-card ${p.tone}`}>
+      <div class="stat-top">
+        <span class="stat-icon">
+          <Icon name={p.icon} />
+        </span>
+        <span class="stat-title">{p.title}</span>
+      </div>
+      <strong class="stat-value">{p.value}</strong>
+      {p.percent !== undefined ? <Meter2 value={p.percent} /> : null}
+      <small class="muted">{p.sub}</small>
+    </div>
+  );
+}
+
+function Stats({ d }: { d: DashData }) {
   const s = d.history?.series ?? {};
   const cpu = lastOf(s.cpu);
   const memUsed = d.info.memory.total - d.info.memory.available;
+  const memPct = pct(memUsed, d.info.memory.total);
+  const diskPct = pct(d.info.disk.used, d.info.disk.size);
   const load = d.info.load[0] ?? 0;
   return (
-    <section class="gauges" aria-label={t("Server health")}>
-      <Gauge label="CPU" value={cpu ?? (load / Math.max(1, d.info.cpus)) * 100} display={cpu === undefined ? "—" : `${Math.round(cpu)}%`} detail={t("{n} cores").replace("{n}", String(d.info.cpus))} />
-      <Gauge label={t("Memory")} value={pct(memUsed, d.info.memory.total)} display={`${pct(memUsed, d.info.memory.total)}%`} detail={`${fmtBytes(memUsed)} / ${fmtBytes(d.info.memory.total)}`} />
-      <Gauge label={t("Disk")} value={pct(d.info.disk.used, d.info.disk.size)} display={`${pct(d.info.disk.used, d.info.disk.size)}%`} detail={`${fmtBytes(d.info.disk.avail)} ${t("free")}`} />
-      <Gauge label={t("Load")} value={(load / Math.max(1, d.info.cpus)) * 100} display={load.toFixed(2)} detail={d.info.load.map((l) => l.toFixed(2)).join(" / ")} />
-      <div class="netbox">
-        <span class="muted">{t("Network")}</span>
-        <p>
-          <span class="arrow" aria-label={t("in")}>↓</span> <strong>{rate(lastOf(s.rx))}</strong>
-        </p>
-        <p>
-          <span class="arrow" aria-label={t("out")}>↑</span> <strong>{rate(lastOf(s.tx))}</strong>
-        </p>
-        <small class="muted">{d.info.os}</small>
-      </div>
+    <section class="stats" aria-label={t("Server health")}>
+      <StatCard icon="runtimes" tone="t1" title={t("CPU usage")} value={cpu === undefined ? "—" : `${Math.round(cpu)}%`} percent={cpu} sub={t("{n} cores").replace("{n}", String(d.info.cpus))} />
+      <StatCard icon="memory" tone="t2" title={t("Memory usage")} value={`${memPct}%`} percent={memPct} sub={`${fmtBytes(memUsed)} / ${fmtBytes(d.info.memory.total)}`} />
+      <StatCard icon="disk" tone="t3" title={t("Disk usage")} value={`${diskPct}%`} percent={diskPct} sub={`${fmtBytes(d.info.disk.avail)} ${t("free")}`} />
+      <StatCard icon="load" tone="t4" title={t("Load")} value={load.toFixed(2)} percent={(load / Math.max(1, d.info.cpus)) * 100} sub={d.info.load.map((l) => l.toFixed(2)).join(" / ")} />
+      <StatCard icon="network" tone="t5" title={t("Network")} value={`↓ ${rate(lastOf(s.rx))}`} sub={`↑ ${rate(lastOf(s.tx))}`} />
+    </section>
+  );
+}
+
+function Insights({ d }: { d: DashData }) {
+  const up = d.apps.filter((a) => appState(a) === "up").length;
+  const tiles: { href: string; icon: IconName; label: string; value: string }[] = [
+    { href: "/apps", icon: "apps", label: t("Apps"), value: d.apps.length ? `${up}/${d.apps.length}` : "0" },
+    { href: "/sites", icon: "sites", label: t("Sites"), value: String(d.sites.length) },
+    { href: "/databases", icon: "databases", label: t("Databases"), value: d.databases === null ? "—" : String(d.databases) },
+    { href: "/services", icon: "services", label: t("Services"), value: String(d.info.services.filter((s) => s.state === "active").length) },
+    { href: "/backups", icon: "backups", label: t("Backups"), value: String(d.backups.length) },
+    { href: "/admins", icon: "admins", label: t("Admins"), value: String(d.admins) },
+  ];
+  return (
+    <section class="insights" aria-label={t("Insights")}>
+      {tiles.map((x) => (
+        <a class="insight" href={x.href}>
+          <Icon name={x.icon} />
+          <span>{x.label}</span>
+          <strong>{x.value}</strong>
+        </a>
+      ))}
+    </section>
+  );
+}
+
+/** Steps off CyberPanel, shown only while there is a CyberPanel to leave. */
+function Migration({ d }: { d: DashData }) {
+  const fromCp = d.sites.some((s) => s.source === "cyberpanel") || d.info.services.some((s) => s.unit === "lscpd");
+  if (!fromCp) return null;
+  const steps = [
+    { done: d.sites.length > 0 || d.apps.length > 0, text: t("Import sites and apps"), href: "/import" },
+    { done: d.backups.length > 0, text: t("Set up backups"), href: "/backups" },
+    { done: d.info.edge.active, text: t("Install the edge (Caddy)"), href: "/edge" },
+    { done: d.info.edge.cutover, text: t("Switch traffic to the edge"), href: "/edge" },
+    { done: !d.sites.some((s) => s.source === "cyberpanel" && s.kind === "legacy" && s.enabled), text: t("Move PHP sites to pano"), href: "/sites" },
+    { done: !d.info.services.some((s) => s.unit === "lscpd" || s.unit === "lshttpd"), text: t("Remove CyberPanel"), href: "/services" },
+  ];
+  const done = steps.filter((x) => x.done).length;
+  if (done === steps.length) return null;
+  return (
+    <section class="panel">
+      <header class="panel-head">
+        <h2>{t("Moving off CyberPanel")}</h2>
+        <span class="muted small">
+          {done}/{steps.length}
+        </span>
+      </header>
+      <meter class="bar ok steps-bar" min={0} max={steps.length} value={done} />
+      <ol class="steps">
+        {steps.map((x) => (
+          <li class={x.done ? "done" : ""}>
+            <span class="step-mark" aria-hidden="true">
+              {x.done ? <Icon name="check" size={14} /> : null}
+            </span>
+            <a href={x.href}>{x.text}</a>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -183,7 +279,9 @@ function Apps({ d }: { d: DashData }) {
   return (
     <section class="panel">
       <header class="panel-head">
-        <h2>{t("Apps")}</h2>
+        <h2 class="with-icon">
+          <Icon name="apps" /> {t("Apps")}
+        </h2>
         <a class="btn small" href="/apps">
           {t("All apps")}
         </a>
@@ -239,7 +337,9 @@ function Sites({ d }: { d: DashData }) {
   return (
     <section class="panel">
       <header class="panel-head">
-        <h2>{t("Sites")}</h2>
+        <h2 class="with-icon">
+          <Icon name="sites" /> {t("Sites")}
+        </h2>
         <a class="btn small" href="/sites">
           {t("All sites")}
         </a>
@@ -292,9 +392,12 @@ function Side({ d }: { d: DashData }) {
   const lastBackup = Math.max(0, ...d.backups.map((j) => j.last_run_at ?? 0));
   return (
     <div class="side-col">
+      <Migration d={d} />
       <section class="panel">
         <header class="panel-head">
-          <h2>{t("Services")}</h2>
+          <h2 class="with-icon">
+          <Icon name="services" /> {t("Services")}
+        </h2>
           <a class="btn small" href="/services">
             {t("Manage")}
           </a>
@@ -311,7 +414,9 @@ function Side({ d }: { d: DashData }) {
       </section>
       <section class="panel">
         <header class="panel-head">
-          <h2>{t("Protection")}</h2>
+          <h2 class="with-icon">
+          <Icon name="security" /> {t("Protection")}
+        </h2>
         </header>
         <dl class="facts">
           <dt>{t("Edge")}</dt>
@@ -324,7 +429,9 @@ function Side({ d }: { d: DashData }) {
       </section>
       <section class="panel">
         <header class="panel-head">
-          <h2>{t("Activity")}</h2>
+          <h2 class="with-icon">
+          <Icon name="activity" /> {t("Activity")}
+        </h2>
           <a class="btn small" href="/activity">
             {t("All")}
           </a>
@@ -349,10 +456,14 @@ function Side({ d }: { d: DashData }) {
 }
 
 export function Dashboard({ d }: { d: DashData }) {
+  const list = notices(d);
   return (
     <div class="dash">
-      <Status d={d} />
-      <Gauges d={d} />
+      <Welcome d={d} list={list} />
+      <Quick />
+      <Attention list={list} />
+      <Stats d={d} />
+      <Insights d={d} />
       <div class="dash-grid">
         <div class="main-col">
           <Apps d={d} />

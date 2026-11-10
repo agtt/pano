@@ -38,3 +38,42 @@ for (const el of document.querySelectorAll("[data-copy]")) {
 
 // Keep log panes scrolled to the newest lines.
 for (const pre of document.querySelectorAll("pre.log")) pre.scrollTop = pre.scrollHeight;
+
+// Menu search: filters the sidebar as you type; Cmd/Ctrl+K jumps here, Enter opens the first match.
+const navSearch = document.getElementById("nav-search");
+if (navSearch) {
+  const links = [...document.querySelectorAll(".side nav a[data-nav]")];
+  const groups = [...document.querySelectorAll(".side .nav-group")];
+  const empty = document.querySelector(".side .nav-empty");
+  const filter = () => {
+    const q = navSearch.value.trim().toLowerCase();
+    let shown = 0;
+    for (const a of links) {
+      const hit = !q || a.dataset.nav.includes(q);
+      a.hidden = !hit;
+      if (hit) shown++;
+    }
+    for (const g of groups) g.hidden = ![...g.querySelectorAll("a[data-nav]")].some((a) => !a.hidden);
+    if (empty) empty.hidden = shown > 0;
+  };
+  navSearch.addEventListener("input", filter);
+  navSearch.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const first = links.find((a) => !a.hidden);
+      if (first) location.href = first.href;
+    } else if (e.key === "Escape") {
+      navSearch.value = "";
+      filter();
+      navSearch.blur();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      const toggle = document.getElementById("nav-toggle");
+      if (toggle && getComputedStyle(document.querySelector(".nav-button")).display !== "none") toggle.checked = true;
+      navSearch.focus();
+      navSearch.select();
+    }
+  });
+}

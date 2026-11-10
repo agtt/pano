@@ -173,7 +173,7 @@ export function createWebApp() {
   app.get("/", async (c) => {
     // One slow or missing part must not take the whole overview down.
     const soft = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-    const [info, history, apps, sites, certs, backups, vulns, activity] = await Promise.all([
+    const [info, history, apps, sites, certs, backups, vulns, activity, dbCount] = await Promise.all([
       call("system.info"),
       soft(call("metrics.history", { range: parseRange(c.req.query("range")) }), null),
       soft(call("apps.list"), []),
@@ -182,8 +182,16 @@ export function createWebApp() {
       soft(call("backup.jobs"), []),
       soft(call("vulns.status"), null),
       soft(call("audit.list"), []),
+      soft(call<{ databases: unknown[] }>("db.list").then((r) => r.databases.length), null),
     ]);
-    const d: DashData = { info, history, apps, sites, certs, backups, vulns, activity: activity.slice(0, 6), now: Math.floor(Date.now() / 1000) };
+    const d: DashData = {
+      info, history, apps, sites, certs, backups, vulns,
+      activity: activity.slice(0, 6),
+      databases: dbCount,
+      admins: listUsers().length,
+      user: c.get("s").user.username,
+      now: Math.floor(Date.now() / 1000),
+    };
     return page(c, t("Overview"), <Dashboard d={d} />);
   });
 
