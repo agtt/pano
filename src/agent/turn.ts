@@ -27,6 +27,19 @@ export const TLS_PORT = 5349;
 const TLS_DIR = "/etc/coturn/tls";
 export const RELAY = { min: 49160, max: 49200 };
 
+/**
+ * The relay range coturn actually uses: an adopted (foreign) config may declare its own
+ * min-port/max-port; pano's rules must follow it or relays between two callers on this host break.
+ */
+export function relayRange(conf: string | null): { min: number; max: number } {
+  const num = (k: string) => Number(conf?.match(new RegExp(`^\\s*${k}\\s*=\\s*(\\d+)\\s*$`, "m"))?.[1] ?? NaN);
+  const min = num("min-port");
+  const max = num("max-port");
+  return Number.isInteger(min) && Number.isInteger(max) && min >= 1024 && max <= 65535 && min <= max ? { min, max } : RELAY;
+}
+
+export const currentRelay = async () => relayRange(await readText(CONF));
+
 /** Peers the relay must never reach: this host, private networks, CGNAT (Tailscale), multicast. */
 export const DENIED_PEERS = [
   "0.0.0.0-0.255.255.255",

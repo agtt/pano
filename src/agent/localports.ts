@@ -8,7 +8,7 @@
 import { env, paths } from "../shared/config.ts";
 import { EDGE_USER } from "./edge.ts";
 import { lookupUser, run, writeAtomic } from "./sys.ts";
-import { RELAY } from "./turn.ts";
+import { currentRelay } from "./turn.ts";
 
 const UNIT = "pano-local.service";
 const RULES = `${paths.etc}/local.nft`;
@@ -43,7 +43,7 @@ export async function applyLocalPorts() {
   }
   // coturn's user: "coturn" in EPEL/Fedora, "turnserver" on Debian/Ubuntu.
   const turnUser = (await lookupUser("coturn")) ?? (await lookupUser("turnserver"));
-  const turn = turnUser ? { uid: turnUser.uid, ...RELAY } : undefined;
+  const turn = turnUser ? { uid: turnUser.uid, ...(await currentRelay()) } : undefined;
   await writeAtomic(`${RULES}.new`, renderLocalPorts(uids, [env.webPort, env.askPort, env.hookPort], turn), 0o600);
   await run(["nft", "-c", "-f", `${RULES}.new`]);
   await run(["mv", "-f", `${RULES}.new`, RULES]);

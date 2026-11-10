@@ -49,3 +49,17 @@ test("restored SQLite copies never land through a planted symlink", async () => 
   expect(readFileSync(join(real, "db/app.db")).equals(sqlite)).toBe(true);
   expect(existsSync(join(real, ".pano-sqlite"))).toBe(false);
 });
+
+test("local ports follow the relay range an adopted coturn config declares", async () => {
+  const { relayRange, RELAY } = await import("../src/agent/turn.ts");
+  expect(relayRange("listening-port=3478\nmin-port=49160\nmax-port=49260\n")).toEqual({ min: 49160, max: 49260 });
+  expect(relayRange(null)).toEqual(RELAY);
+  expect(relayRange("min-port=70000\nmax-port=80000")).toEqual(RELAY);
+  expect(relayRange("#min-port=1\nmax-port=50000")).toEqual(RELAY);
+});
+
+test("OpenLiteSpeed keys match case-insensitively (CyberPanel writes virtualHost)", async () => {
+  const { readServerConfig } = await import("../src/agent/ols.ts");
+  const r = readServerConfig("virtualHost a.com {\n  vhRoot /home/$VH_NAME\n  configFile $SERVER_ROOT/conf/vhosts/$VH_NAME/vhost.conf\n}\nlistener SSL {\n  map a.com a.com\n}\n");
+  expect(r.vhosts).toEqual([{ name: "a.com", vhRoot: "/home/$VH_NAME", configFile: "$SERVER_ROOT/conf/vhosts/$VH_NAME/vhost.conf" }]);
+});

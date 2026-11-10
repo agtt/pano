@@ -58,10 +58,13 @@ export function serializeOls(node: OlsBlock): string {
   return out.join("\n");
 }
 
-export const blocks = (b: OlsBlock, key?: string) =>
-  b.children.filter((c): c is OlsBlock => c.type === "block" && (key === undefined || c.key === key));
+// OpenLiteSpeed keys are case-insensitive: CyberPanel writes `virtualHost`, the docs `virtualhost`.
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-export const lines = (b: OlsBlock, key: string) => b.children.filter((c): c is OlsLine => c.type === "line" && c.key === key);
+export const blocks = (b: OlsBlock, key?: string) =>
+  b.children.filter((c): c is OlsBlock => c.type === "block" && (key === undefined || same(c.key, key)));
+
+export const lines = (b: OlsBlock, key: string) => b.children.filter((c): c is OlsLine => c.type === "line" && same(c.key, key));
 
 export const value = (b: OlsBlock, key: string) => lines(b, key)[0]?.value;
 
