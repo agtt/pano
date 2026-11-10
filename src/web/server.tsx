@@ -18,7 +18,8 @@ import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailVie
 import { RunnerPage, type RunnerView } from "./views/runner.tsx";
 import { AppDetail, AppForm, AppsPage, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
-import { HomePage, LoginPage } from "./views/home.tsx";
+import { Dashboard, type DashData } from "./views/dashboard.tsx";
+import { LoginPage } from "./views/home.tsx";
 import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
 import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
 import { ShieldPage, type ShieldView } from "./views/shield.tsx";
@@ -170,8 +171,20 @@ export function createWebApp() {
 
   // ---- home
   app.get("/", async (c) => {
-    const [info, history] = await Promise.all([call("system.info"), call("metrics.history", { range: parseRange(c.req.query("range")) }).catch(() => null)]);
-    return page(c, t("Home"), <HomePage info={info} history={history} />);
+    // One slow or missing part must not take the whole overview down.
+    const soft = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
+    const [info, history, apps, sites, certs, backups, vulns, activity] = await Promise.all([
+      call("system.info"),
+      soft(call("metrics.history", { range: parseRange(c.req.query("range")) }), null),
+      soft(call("apps.list"), []),
+      soft(call("sites.list"), []),
+      soft(call("sites.certs"), []),
+      soft(call("backup.jobs"), []),
+      soft(call("vulns.status"), null),
+      soft(call("audit.list"), []),
+    ]);
+    const d: DashData = { info, history, apps, sites, certs, backups, vulns, activity: activity.slice(0, 6), now: Math.floor(Date.now() / 1000) };
+    return page(c, t("Overview"), <Dashboard d={d} />);
   });
 
   // ---- apps

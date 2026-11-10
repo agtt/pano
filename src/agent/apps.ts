@@ -18,6 +18,7 @@ import { notify } from "./alerts.ts";
 import { removeAppValkey } from "./appvalkey.ts";
 import { groupFile, readGroup } from "./envgroups.ts";
 import { reportStatus } from "./github.ts";
+import { parsePm2Ref, pm2App, pm2Logs, pm2Reload } from "./pm2.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
@@ -332,7 +333,7 @@ export async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: M
 
 export const activeUnits = (app: App): string[] =>
   app.kind === "external"
-    ? (app.external_unit ? [app.external_unit] : [])
+    ? (app.external_unit && !parsePm2Ref(app.external_unit) ? [app.external_unit] : [])
     : app.active_slot
       ? procsOf(app).map((p) => unitName(app.name, p, app.active_slot as "a" | "b"))
       : [];
@@ -454,6 +455,14 @@ export async function cronLogs(app: App, lines = 100): Promise<string> {
 
 export async function appAction(name: string, action: "start" | "stop" | "restart", actor: string) {
   const app = mustGet(name);
+  const pm2 = parsePm2Ref(app.external_unit);
+  if (pm2) {
+    // A stop here would take the site down with no way back from pano: only the safe reload.
+    if (action !== "restart") throw new Error("PM2 runs this app: pano only reloads it (zero downtime); start and stop it with pm2");
+    await pm2Reload(pm2);
+    audit(actor, "app.reload", { name, pm2: true });
+    return;
+  }
   const units = activeUnits(app);
   if (!units.length) throw new Error(app.kind === "external" ? "this app has no service unit to control" : "deploy the app first");
   await run(["systemctl", action, ...units]);
@@ -469,7 +478,18 @@ type AppStatus = UnitStatus & { procs: (UnitStatus & { name: string })[] };
 /** Status of many apps from one `systemctl show` for all their units. */
 export async function appStatuses(list: App[]): Promise<AppStatus[]> {
   const shown = await showUnits(list.flatMap(activeUnits), ["ActiveState", "MemoryCurrent", "ActiveEnterTimestamp"]);
-  return list.map((app) => {
+  const pm2 = await Promise.all(list.map((app) => {
+    const ref = parsePm2Ref(app.external_unit);
+    return ref ? pm2App(ref) : null;
+  }));
+  return list.map((app, i) => {
+    if (parsePm2Ref(app.external_unit)) {
+      const p = pm2[i];
+      if (!p) return { active: "unknown", memory: 0, since: "", procs: [] };
+      const since = p.since ? new Date(p.since).toISOString() : "";
+      const active = p.online === p.total && p.total > 0 ? "active" : p.online ? "degraded" : "failed";
+      return { active, memory: p.memory, since, procs: [{ name: `${p.name} (pm2 ${p.online}/${p.total})`, active, memory: p.memory, since }] };
+    }
     const units = activeUnits(app);
     if (!units.length) return { active: app.kind === "external" ? "unknown" : "not deployed", memory: 0, since: "", procs: [] };
     const names = app.kind === "external" ? [app.name] : procsOf(app).map((p) => p.name || app.name);
@@ -487,9 +507,11 @@ export const appStatus = async (app: App): Promise<AppStatus> => (await appStatu
 
 export async function appLogs(name: string, lines = 200): Promise<string> {
   const app = mustGet(name);
+  const n = v.int(lines, 10, 5000, "lines");
+  const pm2 = parsePm2Ref(app.external_unit);
+  if (pm2) return pm2Logs(pm2, n);
   const units = activeUnits(app);
   if (!units.length) return "";
-  const n = v.int(lines, 10, 5000, "lines");
   const r = await run(["journalctl", ...units.flatMap((u) => ["-u", u]), "-n", String(n), "--no-pager", "-o", "short-iso"], { check: false });
   return r.stdout;
 }

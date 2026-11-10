@@ -4,7 +4,7 @@ import { LANGS, lang, t } from "../i18n.ts";
 
 /** The sidebar, grouped by what you came to do. Every page keeps its own URL. */
 export const NAV_GROUPS: { title: string; items: [href: string, label: string][] }[] = [
-  { title: "", items: [["/", "Home"]] },
+  { title: "", items: [["/", "Overview"]] },
   {
     title: "Hosting",
     items: [
@@ -57,7 +57,6 @@ export function LangSwitch({ path }: { path: string }) {
     <span class="lang" aria-label={t("Language")}>
       {LANGS.map((l, i) => (
         <>
-          {i ? <span class="sep">·</span> : null}
           {l.code === now ? (
             <strong title={l.label}>{l.code.toUpperCase()}</strong>
           ) : (

@@ -5,6 +5,7 @@
 import { paths } from "../shared/config.ts";
 import { readServerConfig, readVhost, type OlsVhost } from "./ols.ts";
 import { apps, audit, sites, type App, type Route, type Site } from "./state.ts";
+import { pm2List, pm2Ref } from "./pm2.ts";
 import { exists, readText, run } from "./sys.ts";
 
 export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
@@ -42,8 +43,12 @@ function classify(vh: OlsVhost): { kind: Site["kind"]; routes: Route[]; php: str
 const hasCustomRewrites = (vh: OlsVhost) => /^\s*RewriteRule\b/m.test(vh.rewriteRules);
 
 /** Maps listening ports to the process and systemd unit behind them. */
-async function portOwners(): Promise<Map<number, { process: string; unit: string }>> {
-  const out = new Map<number, { process: string; unit: string }>();
+type PortOwner = { process: string; unit: string; pid: number; user: string };
+
+async function portOwners(): Promise<Map<number, PortOwner>> {
+  const out = new Map<number, PortOwner>();
+  const passwd = (await readText("/etc/passwd")) ?? "";
+  const userOf = (uid: string) => passwd.split("\n").find((l) => l.split(":")[2] === uid)?.split(":")[0] ?? "";
   const r = await run(["ss", "-Htlnp"], { check: false });
   for (const line of r.stdout.split("\n")) {
     const port = Number(line.split(/\s+/)[3]?.split(":").pop());
@@ -51,7 +56,8 @@ async function portOwners(): Promise<Map<number, { process: string; unit: string
     if (!port || !m || out.has(port)) continue;
     const cgroup = (await readText(`/proc/${m[2]}/cgroup`)) ?? "";
     const unit = cgroup.match(/\/([^/\n]+\.service)/)?.[1] ?? "";
-    out.set(port, { process: m[1]!, unit });
+    const uid = ((await readText(`/proc/${m[2]}/status`)) ?? "").match(/^Uid:\s+(\d+)/m)?.[1] ?? "";
+    out.set(port, { process: m[1]!, unit, pid: Number(m[2]), user: userOf(uid) });
   }
   return out;
 }
@@ -166,8 +172,33 @@ export async function scan(): Promise<ImportPlan> {
       byUnit.set(owner.unit, entry);
     }
   }
-  plan.apps = [...byUnit.values()];
+  plan.apps = [...byUnit.values(), ...(await pm2Apps(owners, warnings))];
   return plan;
+}
+
+/**
+ * Apps PM2 runs (often outside any systemd unit, so the unit scan above misses them): one
+ * external app per PM2 app name, for every user that owns a listening port and has a PM2 home.
+ * The port comes from the start arguments, or from the socket its process holds (fork mode).
+ */
+async function pm2Apps(owners: Map<number, PortOwner>, warnings: string[]): Promise<ImportApp[]> {
+  const users = [...new Set([...owners.values()].map((o) => o.user).filter(Boolean))];
+  const out: ImportApp[] = [];
+  for (const user of users) {
+    const home = ((await readText("/etc/passwd")) ?? "").split("\n").find((l) => l.startsWith(`${user}:`))?.split(":")[5];
+    if (!home || !(await exists(`${home}/.pm2`))) continue;
+    const list = await pm2List(user).catch((e) => {
+      warnings.push(`pm2 (${user}): ${e instanceof Error ? e.message : e}`);
+      return [];
+    });
+    for (const a of list) {
+      const ports = a.port ? [a.port] : [...owners].filter(([, o]) => a.pids.includes(o.pid)).map(([p]) => p);
+      const name = a.name.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 24).replace(/-+$/, "");
+      if (!name) continue;
+      out.push({ name, external_unit: pm2Ref({ user, name: a.name }), upstream: ports[0] ? `127.0.0.1:${ports[0]}` : "", ports, process: "pm2" });
+    }
+  }
+  return out;
 }
 
 /** Re-scans (never trusts a plan sent by the client) and stores the selected items. */

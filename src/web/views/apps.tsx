@@ -87,7 +87,7 @@ export function AppsPage({ apps }: { apps: AppRow[] }) {
                     ? [...new Set(a.processes.flatMap((p) => p.routes.map((r) => r.split("/")[0])))].join(", ")
                     : a.domains.join(", ") || (a.kind === "external" ? a.upstream : "—")}
                 </td>
-                <td>{a.kind === "managed" ? `${a.runtime} ${a.runtime_version}` : a.external_unit}</td>
+                <td>{a.kind === "managed" ? `${a.runtime} ${a.runtime_version}` : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit}</td>
                 <td>
                   <Badge state={a.status.active} />
                 </td>
@@ -254,11 +254,11 @@ export function AppDetail(p: {
                 <button class="btn">↶ Rollback</button>
               </form>
             ) : null}
-            {(["restart", "stop", "start"] as const).map((act) => (
+            {(a.external_unit.startsWith("pm2:") ? (["restart"] as const) : (["restart", "stop", "start"] as const)).map((act) => (
               <form method="post" action={`/apps/${a.name}/action`}>
                 <Csrf token={p.csrf} />
                 <input type="hidden" name="action" value={act} />
-                <button class="btn">{t(act[0]!.toUpperCase() + act.slice(1))}</button>
+                <button class="btn">{a.external_unit.startsWith("pm2:") ? t("Reload") : t(act[0]!.toUpperCase() + act.slice(1))}</button>
               </form>
             ))}
           </div>

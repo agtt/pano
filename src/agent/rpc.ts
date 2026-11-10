@@ -18,6 +18,7 @@ import * as guard from "./guard.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
 import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
+import { siteCerts } from "./certs.ts";
 import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
 import { RANGES, metricsHistory, type Range } from "./metrics.ts";
@@ -488,6 +489,7 @@ export const methods: Record<string, Handler> = {
 
   // ---- sites (routing entries that are not managed apps)
   "sites.list": () => sites.list(),
+  "sites.certs": () => siteCerts(),
   "sites.createPhp": async (p, actor) => {
     const domains = parseDomains(p.domains);
     appsOps.assertDomainsFree(domains, { site: v.siteName(p.name) }, allDomains());
