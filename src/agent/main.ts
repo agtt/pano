@@ -27,6 +27,7 @@ import { refreshRanges } from "./cloudflare.ts";
 import { startFirewall } from "./firewall.ts";
 import { narrowWildcardGrants } from "./mysql.ts";
 import { renewTlsCert } from "./turn.ts";
+import { renew as renewPgRemote } from "./pgremote.ts";
 import { recoverPending } from "./vpn.ts";
 
 const sameSecret = (given: string | null, secret: string) =>
@@ -168,6 +169,8 @@ export async function startAgent() {
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
   // coturn reads its certificate at start: pick up the edge's renewals (only does anything when TURN over TLS is on).
   setInterval(() => renewTlsCert().catch((e) => console.error(`[agent] turn cert: ${e}`)), 6 * 3600_000);
+  // The same for PostgreSQL remote access; also sets it up again after a recovery or an address change.
+  setInterval(() => renewPgRemote().catch((e) => console.error(`[agent] pg remote: ${e}`)), 6 * 3600_000);
   pruneAudit();
   setInterval(() => pruneAudit(), 24 * 3600_000);
   console.log(`[agent] ready on ${paths.agentSocket}${DRY_RUN ? " (dry-run)" : ""}`);

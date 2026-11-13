@@ -48,6 +48,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 **Databases and services (on demand)**
 - MariaDB: databases, users, grants, sizes, password reset; PostgreSQL (latest major); Valkey (Redis-compatible); SQLite per app.
 - "+ Database" creates DB + user and writes `DATABASE_URL`/`REDIS_URL` into the app env; the password never reaches the browser.
+- PostgreSQL remote access for apps hosted elsewhere (Vercel, Netlify, …), off by default: TLS 1.2+ only with the edge's certificate for a name of its own (`sslmode=verify-full`), remote-only users (one database each, SCRAM, 40-character password, 20 connections) in a managed `pg_hba.conf` block, every other role refused from outside, optional source networks (e.g. Vercel Static IPs) enforced by pg_hba and every firewall pano runs (firewalld, its own, the VPN services lock). Certificate renewals are picked up automatically.
 - "Connect existing" gives an app its own user on a database that already exists (imported from cPanel/CyberPanel, or another app's), under any variable name; PostgreSQL roles join the database's owner so migrations work. Recovery brings these users back.
 - Memory of each service sized to the server's RAM.
 

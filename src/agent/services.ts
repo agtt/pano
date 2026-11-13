@@ -27,10 +27,24 @@ export const SERVICES: Record<ServiceKey, { label: string; port: number; note: s
 
 const VALKEY_PASS = `${paths.secrets}/valkey.pass`;
 const PG_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
-const RESERVED_PG = new Set(["postgres", "template0", "template1"]);
+export const RESERVED_PG = new Set(["postgres", "template0", "template1"]);
 
 const rec = (k: ServiceKey): Record_ | null => JSON.parse(settings.get(`svc.${k}`) || "null");
 const save = (k: ServiceKey, r: Record_) => settings.set(`svc.${k}`, JSON.stringify(r));
+
+/**
+ * Where pano's PostgreSQL settings live (Debian: conf.d of the cluster, root-owned; EL: next to
+ * the data, owned by postgres) and a directory postgres can read for its TLS files. null: not
+ * installed by pano (an existing server's configuration is never rewritten).
+ */
+export function pgPaths(): { conf: string; confMode: number; confOwner?: string; tlsDir: string; unit: string } | null {
+  const r = rec("postgres");
+  if (!r?.managed) return null;
+  // Under the data directory on EL: SELinux lets postgres read its own files there.
+  if (r.dataDir) return { conf: `${r.dataDir}/pano.conf`, confMode: 0o600, confOwner: "postgres", tlsDir: `${r.dataDir}/pano-tls`, unit: r.unit };
+  const base = `/etc/postgresql/${r.version}/main`;
+  return { conf: `${base}/conf.d/90-pano.conf`, confMode: 0o644, tlsDir: `${base}/pano-tls`, unit: r.unit };
+}
 const debian = async () => /^(ID|ID_LIKE)=.*\b(debian|ubuntu)\b/m.test((await readText("/etc/os-release")) ?? "");
 const elMajor = async () => (await readText("/etc/os-release"))?.match(/^VERSION_ID="?(\d+)/m)?.[1] ?? "9";
 const unitExists = async (unit: string) => (await run(["systemctl", "cat", unit], { check: false, quiet: true })).code === 0;
@@ -168,9 +182,13 @@ async function installPostgres(): Promise<Record_> {
   return { unit: `postgresql-${version}.service`, version, managed: true, psql: `/usr/pgsql-${version}/bin/psql`, dataDir };
 }
 
-const pgConf = () => `# Written by pano. Localhost only; memory sized to this server.
-listen_addresses = 'localhost'
-password_encryption = 'scram-sha-256'
+/**
+ * remote: PostgreSQL remote access (pgremote.ts) is on and its certificate is in place: it also
+ * listens on these addresses, with TLS 1.2+ only. Who may log in from there is pg_hba's business.
+ */
+export const pgConf = (remote?: { listen: string[]; cert: string; key: string }) => `# Written by pano. ${remote ? "Localhost and remote access over TLS" : "Localhost only"}; memory sized to this server.
+listen_addresses = '${["localhost", ...(remote?.listen ?? [])].join(", ")}'
+${remote ? `ssl = on\nssl_cert_file = '${remote.cert}'\nssl_key_file = '${remote.key}'\nssl_min_protocol_version = 'TLSv1.2'\n` : ""}password_encryption = 'scram-sha-256'
 max_connections = 50
 shared_buffers = ${sizes().pgSharedMb}MB
 effective_cache_size = ${sizes().pgEffectiveCacheMb}MB
@@ -263,7 +281,7 @@ export async function existingRedisUrl(): Promise<string | null> {
 
 // ---- PostgreSQL databases --------------------------------------------------------
 
-async function psql(query: string, db = "postgres"): Promise<string[][]> {
+export async function psql(query: string, db = "postgres"): Promise<string[][]> {
   const r = rec("postgres");
   if (!r?.psql) throw new Error("PostgreSQL is not installed");
   const out = await run([r.psql, "-X", "-q", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-d", db], { user: "postgres", cwd: "/", input: query, timeoutMs: 120_000 });
@@ -273,8 +291,8 @@ async function psql(query: string, db = "postgres"): Promise<string[][]> {
     .map((l) => l.split("\t"));
 }
 
-const pgIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
-const pgLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+export const pgIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
+export const pgLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 export async function pgList() {
   const rows = await psql("SELECT datname, pg_database_size(datname), pg_get_userbyid(datdba) FROM pg_database WHERE NOT datistemplate ORDER BY 1;");
@@ -346,7 +364,7 @@ export async function pgRestoreCommand(db: string): Promise<string[]> {
   return ["/usr/sbin/runuser", "-u", "postgres", "--", pgBin("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-d", pgName(db), ...asOwner];
 }
 
-async function pgOwner(db: string): Promise<{ name: string; superuser: boolean } | null> {
+export async function pgOwner(db: string): Promise<{ name: string; superuser: boolean } | null> {
   const row = (await psql(`SELECT r.rolname, r.rolsuper FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = ${pgLit(db)};`))[0];
   return row ? { name: row[0]!, superuser: row[1] === "t" } : null;
 }

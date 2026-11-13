@@ -10,10 +10,9 @@
 // with its secret, so clients that already use it keep working.
 
 import { createHmac } from "node:crypto";
-import { readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { fsPath, paths } from "../shared/config.ts";
-import { applyEdge, edgeInstalled } from "./edge.ts";
+import { applyEdge, edgeCert, edgeInstalled } from "./edge.ts";
 import { applyLocalPorts } from "./localports.ts";
 import { audit, settings } from "./state.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -156,21 +155,6 @@ async function firewall(open: boolean) {
 async function tlsFirewall(open: boolean) {
   if (!(await firewalld())) return;
   await run(["firewall-cmd", "--permanent", `${open ? "--add-port" : "--remove-port"}=${TLS_PORT}/tcp`], { check: false });
-}
-
-/** Caddy's certificate for the domain (its storage layout: certificates/<issuer>/<domain>/<domain>.crt). */
-async function edgeCert(domain: string): Promise<{ cert: string; key: string } | null> {
-  const base = `${paths.edgeData}/caddy/certificates`;
-  let issuers: string[] = [];
-  try {
-    issuers = await readdir(fsPath(base));
-  } catch {}
-  for (const i of issuers) {
-    const cert = await readText(`${base}/${i}/${domain}/${domain}.crt`);
-    const key = await readText(`${base}/${i}/${domain}/${domain}.key`);
-    if (cert?.includes("-----BEGIN CERTIFICATE-----") && key && /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key)) return { cert, key };
-  }
-  return null;
 }
 
 /** Copies the edge's certificate where coturn (group coturn, no other access to the edge's data) can read it. null: none yet; else whether it changed. */

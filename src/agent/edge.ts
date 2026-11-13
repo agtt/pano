@@ -4,24 +4,46 @@
 // CAP_NET_BIND_SERVICE; the Caddyfile is rendered from state and validated
 // before every reload, so a bad change never replaces a working config.
 
+import { readdir } from "node:fs/promises";
 import { env, fsPath, paths } from "../shared/config.ts";
+import { pgRemoteConfig } from "./pgremote-config.ts";
 import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { cloudflareRanges } from "./cloudflare.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
 
 export const EDGE_USER = "pano-edge";
 
-/** turnDomain: only set while TURN over TLS is on; the edge then holds a certificate for it (see turn.ts). */
-export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean; turnDomain?: string };
+/**
+ * turnDomain: only set while TURN over TLS is on; dbDomain: only while PostgreSQL remote access is on.
+ * The edge then holds a certificate for them (see turn.ts, pgremote.ts).
+ */
+export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean; turnDomain?: string; dbDomain?: string };
 
 export function edgeSettings(): EdgeSettings {
+  const pg = pgRemoteConfig();
   return {
     email: settings.get("edge.email") ?? "",
     behindCloudflare: settings.get("edge.behindCloudflare") === "1",
     hooksDomain: settings.get("edge.hooksDomain") ?? "",
     localCerts: settings.get("edge.localCerts") === "1",
     turnDomain: settings.get("turn.tls") === "1" ? settings.get("turn.domain") ?? "" : "",
+    dbDomain: pg.on ? pg.domain : "",
   };
+}
+
+/** Caddy's certificate for the domain (its storage layout: certificates/<issuer>/<domain>/<domain>.crt). */
+export async function edgeCert(domain: string): Promise<{ cert: string; key: string } | null> {
+  const base = `${paths.edgeData}/caddy/certificates`;
+  let issuers: string[] = [];
+  try {
+    issuers = await readdir(fsPath(base));
+  } catch {}
+  for (const i of issuers) {
+    const cert = await readText(`${base}/${i}/${domain}/${domain}.crt`);
+    const key = await readText(`${base}/${i}/${domain}/${domain}.key`);
+    if (cert?.includes("-----BEGIN CERTIFICATE-----") && key && /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key)) return { cert, key };
+  }
+  return null;
 }
 
 const certDir = (name: string) => `${paths.certs}/${name}`;
@@ -164,9 +186,10 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     );
   }
 
-  if (s.turnDomain) {
-    // Nothing is served here; the block makes Caddy obtain and renew the certificate that coturn uses for turns:.
-    out.push(`${s.turnDomain} {`, "\timport pano_common", "\trespond 404", "}", "");
+  // Nothing is served here; the blocks make Caddy obtain and renew the certificates that coturn
+  // (turns:) and PostgreSQL (remote access over TLS) use. One block per name, even when both share it.
+  for (const d of new Set([s.turnDomain, s.dbDomain].filter((x): x is string => !!x))) {
+    out.push(`${d} {`, "\timport pano_common", "\trespond 404", "}", "");
   }
 
   for (const a of input.apps) {

@@ -16,9 +16,104 @@ export type ServiceRow = {
   enabled: boolean;
 };
 export type PgDb = { name: string; sizeMb: number; owner: string; system: boolean };
+export type PgRemoteView = {
+  available: boolean;
+  on: boolean;
+  domain: string;
+  allow: string[];
+  port: number;
+  ip: string;
+  listening: boolean;
+  connLimit: number;
+  users: { user: string; database: string; created_at: number }[];
+};
 type Secret = { title: string; lines: [string, string][] };
 
-export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; secret?: Secret; realtime?: RealtimeView; turn?: TurnView; appNames?: string[] }) {
+const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required autocomplete="one-time-code" />;
+
+/** Remote access for apps hosted elsewhere (Vercel, Netlify…): TLS, remote-only users, optional source networks. */
+export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) {
+  const { v } = p;
+  const dbs = p.dbs.filter((d) => !d.system);
+  return (
+    <div class="stack">
+      <h3>Remote access (Vercel and other hosts)</h3>
+      <p class="muted small">
+        For apps that do not run on this server. PostgreSQL then also answers on {v.port} over TLS only, with the edge's certificate for the name below (clients
+        verify it: <code>sslmode=verify-full</code>). Only remote users can log in from outside, each limited to one database and {v.connLimit} connections; the
+        apps' own users stay local. Leave the networks empty to allow any address (the password and TLS still protect it), or list fixed egress addresses such as
+        Vercel Static IPs.
+      </p>
+      {v.on ? (
+        <p class="small">
+          <Badge state={v.listening ? "active" : "failed"} /> {v.domain}:{v.port}
+          {v.ip ? ` (${v.ip})` : ""} · {v.allow.length ? `only from ${v.allow.join(", ")}` : "from any address"}
+        </p>
+      ) : null}
+      <form method="post" action="/services/postgres/remote" class="row">
+        <Csrf token={p.csrf} />
+        <Field label="Domain" name="domain" value={v.domain} placeholder="db.example.com" required hint="A DNS-only (grey cloud) record to this server; the edge gets its certificate." />
+        <Field label="Allowed networks (optional)" name="allow" value={v.allow.join(" ")} placeholder="203.0.113.7 198.51.100.0/24" />
+        <Otp />
+        <button class="btn primary small">{v.on ? "Save" : "Turn on"}</button>
+      </form>
+      {v.on ? (
+        <>
+          <table>
+            <thead>
+              <tr>
+                <th>Remote user</th>
+                <th>{t("Database")}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {v.users.map((u) => (
+                <tr>
+                  <td>
+                    <code>{u.user}</code>
+                  </td>
+                  <td>{u.database}</td>
+                  <td>
+                    <form method="post" action="/services/postgres/remote/users/remove" class="row">
+                      <Csrf token={p.csrf} />
+                      <input type="hidden" name="user" value={u.user} />
+                      <Otp />
+                      <button class="btn small">{t("Remove")}</button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {dbs.length ? (
+            <form method="post" action="/services/postgres/remote/users" class="row">
+              <Csrf token={p.csrf} />
+              <label class="field">
+                <span>{t("Database")}</span>
+                <select name="database">
+                  {dbs.map((d) => (
+                    <option value={d.name}>{d.name}</option>
+                  ))}
+                </select>
+              </label>
+              <Otp />
+              <button class="btn small">New remote user (shows DATABASE_URL once)</button>
+            </form>
+          ) : null}
+          <form method="post" action="/services/postgres/remote/off" class="row">
+            <Csrf token={p.csrf} />
+            <Otp />
+            <button class="btn small">Turn off</button>
+            <span class="muted small">Back to localhost only; remote users stay and work again when turned on.</span>
+          </form>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; pgRemote?: PgRemoteView; secret?: Secret; realtime?: RealtimeView; turn?: TurnView; appNames?: string[] }) {
   const pg = p.list.find((s) => s.key === "postgres");
   return (
     <div class="stack">
@@ -186,6 +281,7 @@ export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; 
               />
             </details>
           ) : null}
+          {p.pgRemote?.available ? <PgRemoteCard v={p.pgRemote} dbs={p.pg} csrf={p.csrf} /> : null}
         </Card>
       ) : null}
     </div>

@@ -32,6 +32,7 @@ import * as wordpress from "./wordpress.ts";
 import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
+import * as pgRemote from "./pgremote.ts";
 import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
@@ -69,6 +70,8 @@ const SENSITIVE = new Set([
   "android.project.save", "android.project.remove", "android.signing.set", "android.signing.clear",
   // A runner key runs any command here (sandboxed).
   "runner.enable", "runner.key.add",
+  // PostgreSQL facing the internet, and a password for it shown once.
+  "pg.remote.enable", "pg.remote.disable", "pg.remote.user.add", "pg.remote.user.remove",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -342,7 +345,15 @@ export const methods: Record<string, Handler> = {
   "pg.names": () => services.pgNames(),
   "db.names": () => mysql.databaseNames(),
   "pg.create": (p, actor) => services.pgCreate({ name: p.name, user: p.user }, actor),
-  "pg.drop": (p, actor) => services.pgDrop(p.name, p.confirm, actor),
+  "pg.drop": async (p, actor) => {
+    await services.pgDrop(p.name, p.confirm, actor);
+    await pgRemote.forgetDatabase(String(p.name), actor);
+  },
+  "pg.remote.status": () => pgRemote.status(),
+  "pg.remote.enable": (p, actor) => pgRemote.enable({ domain: p.domain, allow: p.allow }, actor),
+  "pg.remote.disable": (_p, actor) => pgRemote.disable(actor),
+  "pg.remote.user.add": (p, actor) => pgRemote.addUser({ database: p.database }, actor),
+  "pg.remote.user.remove": (p, actor) => pgRemote.removeUser({ user: p.user }, actor),
 
   // ---- shield (malware scan, IP reputation, login brute force)
   // ---- vulnerabilities and automatic patching
