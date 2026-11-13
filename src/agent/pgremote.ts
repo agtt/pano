@@ -12,25 +12,22 @@
 // A server pano did not install is never reconfigured.
 
 import { createHash } from "node:crypto";
-import { applyEdge, edgeCert, edgeInstalled } from "./edge.ts";
-import { followSettings as followFirewall } from "./firewall.ts";
-import { cidr, PG_REMOTE_PORT, pgRemoteConfig, type PgRemote } from "./pgremote-config.ts";
+import { applyEdge } from "./edge.ts";
+import { copyCert, listening, localIp, obtainCert, parseAllow, REMOTE_CONN_LIMIT, remoteDomain, syncNetwork } from "./remotedb.ts";
+import { REMOTE_PORT, remoteConfig, saveRemoteConfig } from "./remotedb-config.ts";
 import { pgConf, pgGrantAccess, pgIdent, pgLit, pgName, pgOwner, pgPaths, psql, RESERVED_PG } from "./services.ts";
 import { audit, settings } from "./state.ts";
-import { ensureDir, exists, randomPassword, readText, remove, run, writeAtomic } from "./sys.ts";
-import { followPgRemote as followVpn } from "./vpn.ts";
+import { exists, randomPassword, readText, remove, run, writeAtomic } from "./sys.ts";
 
 export type RemoteUser = { user: string; database: string; created_at: number };
 
-/** Connections one remote user may hold: serverless functions open many; local apps keep the rest of max_connections. */
-export const REMOTE_CONN_LIMIT = 20;
+const PORT = REMOTE_PORT.postgres;
 const BEGIN = "# pano remote access: begin (written by pano, edits are replaced)";
 const END = "# pano remote access: end";
-const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
 const users = (): RemoteUser[] => JSON.parse(settings.get("pg.remote.users") || "[]");
 const saveUsers = (list: RemoteUser[]) => settings.set("pg.remote.users", JSON.stringify(list));
-const saveConfig = (c: PgRemote) => settings.set("pg.remote", JSON.stringify(c));
+const config = () => remoteConfig("postgres");
 
 // ---- rendering ---------------------------------------------------------------
 
@@ -51,46 +48,15 @@ export function mergeHba(current: string, block: string[]): string {
   return block.length ? [...block, ...rest].join("\n") : rest.join("\n");
 }
 
-/** Parses the allowed networks (spaces, commas or new lines between them); throws on the first that is not one. */
-export function parseAllow(input: unknown): string[] {
-  const out = new Set<string>();
-  for (const part of String(input ?? "").split(/[\s,]+/).filter(Boolean)) {
-    const c = cidr(part);
-    if (!c) throw new Error(`not an IP address or network: ${part} (e.g. 203.0.113.7 or 203.0.113.0/24)`);
-    out.add(c);
-  }
-  if (out.size > 64) throw new Error("at most 64 networks");
-  return [...out];
-}
-
 export const remoteUrl = (u: { user: string; database: string }, password: string, domain: string) =>
-  `postgres://${u.user}:${password}@${domain}:${PG_REMOTE_PORT}/${u.database}?sslmode=verify-full`;
+  `postgres://${u.user}:${password}@${domain}:${PORT}/${u.database}?sslmode=verify-full`;
 
 // ---- applying ----------------------------------------------------------------
-
-/** The address PostgreSQL listens on for remote clients: the one the default route leaves from (behind 1:1 NAT, the private one). */
-async function localIp(): Promise<string> {
-  const r = await run(["ip", "-4", "route", "get", "1.1.1.1"], { check: false });
-  return r.stdout.match(/\bsrc (\S+)/)?.[1] ?? "";
-}
 
 function paths() {
   const p = pgPaths();
   if (!p) throw new Error("remote access works with a PostgreSQL that pano installed (Services → PostgreSQL → Install)");
   return p;
-}
-
-/** Copies the edge's certificate where only postgres can read it. null: none yet; else whether it changed. */
-async function copyCert(domain: string): Promise<boolean | null> {
-  const p = paths();
-  const c = await edgeCert(domain);
-  if (!c) return null;
-  const same = (await readText(`${p.tlsDir}/server.crt`)) === c.cert && (await readText(`${p.tlsDir}/server.key`)) === c.key;
-  if (same) return false;
-  await ensureDir(p.tlsDir, 0o700, "postgres");
-  await writeAtomic(`${p.tlsDir}/server.crt`, c.cert, 0o600, "postgres");
-  await writeAtomic(`${p.tlsDir}/server.key`, c.key, 0o600, "postgres");
-  return true;
 }
 
 /**
@@ -100,7 +66,7 @@ async function copyCert(domain: string): Promise<boolean | null> {
  */
 async function apply() {
   const p = paths();
-  const c = pgRemoteConfig();
+  const c = config();
   const ip = c.on ? await localIp() : "";
   const tls = c.on && ip && (await exists(`${p.tlsDir}/server.crt`)) && (await exists(`${p.tlsDir}/server.key`));
   const conf = pgConf(tls ? { listen: [ip], cert: `${p.tlsDir}/server.crt`, key: `${p.tlsDir}/server.key` } : undefined);
@@ -134,43 +100,23 @@ async function restartPg(unit: string) {
   throw new Error(`PostgreSQL did not come back: ${log.split("\n").at(-1) ?? ""}`);
 }
 
-const firewalld = async () => (await run(["firewall-cmd", "--state"], { check: false })).stdout.trim() === "running";
-
-/** firewalld (EL): the port for everyone, or one rich rule per allowed network; what was added is remembered and taken back exactly. */
-async function syncFirewalld() {
-  const c = pgRemoteConfig();
-  const want = !c.on
-    ? []
-    : !c.allow.length
-      ? [`--add-port=${PG_REMOTE_PORT}/tcp`]
-      : c.allow.map((n) => `--add-rich-rule=rule family="${n.includes(":") ? "ipv6" : "ipv4"}" source address="${n}" port port="${PG_REMOTE_PORT}" protocol="tcp" accept`);
-  const had: string[] = JSON.parse(settings.get("pg.remote.firewalld") || "[]");
-  if (!(await firewalld())) {
-    settings.set("pg.remote.firewalld", "[]");
-    return;
-  }
-  if (JSON.stringify(had) === JSON.stringify(want)) return;
-  for (const a of had) if (!want.includes(a)) await run(["firewall-cmd", "--permanent", a.replace(/^--add-/, "--remove-")], { check: false });
-  for (const a of want) if (!had.includes(a)) await run(["firewall-cmd", "--permanent", a]);
-  await run(["firewall-cmd", "--reload"], { check: false });
-  settings.set("pg.remote.firewalld", JSON.stringify(want));
-}
-
-/** Every firewall pano knows about follows the saved state. */
-async function syncNetwork() {
-  await syncFirewalld();
-  await followFirewall();
-  await followVpn();
-}
-
 // ---- operations --------------------------------------------------------------
 
 export async function status() {
-  const c = pgRemoteConfig();
-  const p = pgPaths();
+  const c = config();
   const ip = c.on ? await localIp() : "";
-  const listening = c.on && !!ip && (await run(["ss", "-Htln", `sport = :${PG_REMOTE_PORT}`], { check: false })).stdout.includes(`${ip}:`);
-  return { available: !!p, on: c.on, domain: c.domain, allow: c.allow, port: PG_REMOTE_PORT, ip, listening, connLimit: REMOTE_CONN_LIMIT, users: users() };
+  return {
+    engine: "postgres" as const,
+    available: !!pgPaths(),
+    on: c.on,
+    domain: c.domain,
+    allow: c.allow,
+    port: PORT,
+    ip,
+    listening: c.on && (await listening(PORT, ip)),
+    connLimit: REMOTE_CONN_LIMIT,
+    users: users(),
+  };
 }
 
 /**
@@ -179,28 +125,21 @@ export async function status() {
  * previous state back.
  */
 export async function enable(input: { domain?: unknown; allow?: unknown }, actor: string) {
-  paths();
-  const domain = String(input.domain ?? "").trim().toLowerCase();
-  if (!DOMAIN.test(domain)) throw new Error("domain: a name of its own for the database, e.g. db.example.com");
+  const p = paths();
+  const domain = remoteDomain(input.domain);
   const allow = parseAllow(input.allow);
-  if (!(await edgeInstalled())) throw new Error("remote access uses the edge's certificate: install the edge first");
-  const previous = pgRemoteConfig();
-  saveConfig({ on: true, domain, allow });
+  const previous = config();
+  saveRemoteConfig("postgres", { on: true, domain, allow });
   try {
-    await applyEdge();
-    let got = false;
-    for (let i = 0; i < 45 && !got; i++) {
-      got = (await copyCert(domain)) !== null;
-      if (!got) await Bun.sleep(2000);
-    }
-    if (!got) throw new Error(`no certificate for ${domain} yet: its DNS record must point to this server (DNS only, no proxy) and ports 80/443 must reach the edge`);
+    await obtainCert(domain, p.tlsDir, "postgres");
     const r = await apply();
     if (!r.listening) throw new Error("no IPv4 address to listen on");
-    await syncNetwork();
+    await syncNetwork("postgres");
   } catch (e) {
-    saveConfig(previous);
+    saveRemoteConfig("postgres", previous);
+    if (previous.on) await copyCert(previous.domain, p.tlsDir, "postgres").catch(() => {});
     await apply().catch(() => {});
-    await syncNetwork().catch(() => {});
+    await syncNetwork("postgres").catch(() => {});
     await applyEdge().catch(() => {});
     throw e;
   }
@@ -211,10 +150,9 @@ export async function enable(input: { domain?: unknown; allow?: unknown }, actor
 /** Back to localhost only. Remote users stay (without a way in) and work again when it is turned on. */
 export async function disable(actor: string) {
   const p = paths();
-  const c = pgRemoteConfig();
-  saveConfig({ ...c, on: false });
+  saveRemoteConfig("postgres", { ...config(), on: false });
   await apply();
-  await syncNetwork();
+  await syncNetwork("postgres");
   await remove(p.tlsDir);
   await applyEdge().catch(() => {});
   audit(actor, "pg.remote.disable", {});
@@ -222,7 +160,7 @@ export async function disable(actor: string) {
 
 /** A remote user for one database; the URL (with the password) is returned once and not stored. */
 export async function addUser(input: { database?: unknown }, actor: string) {
-  const c = pgRemoteConfig();
+  const c = config();
   if (!c.on) throw new Error("turn remote access on first");
   const database = pgName(input.database);
   if (RESERVED_PG.has(database)) throw new Error("reserved database");
@@ -272,13 +210,14 @@ export async function forgetDatabase(database: string, actor: string) {
  * renewals are copied over; a changed address or a restored server (recovery) is set up again.
  */
 export async function renew() {
-  const c = pgRemoteConfig();
-  if (!c.on || !pgPaths()) return;
-  const changed = await copyCert(c.domain);
+  const c = config();
+  const p = pgPaths();
+  if (!c.on || !p) return;
+  const changed = await copyCert(c.domain, p.tlsDir, "postgres");
   if (changed === null) return;
-  const conf = (await readText(pgPaths()!.conf)) ?? "";
+  const conf = (await readText(p.conf)) ?? "";
   const ip = await localIp();
   if (!changed && ip && conf.includes(`'localhost, ${ip}'`)) return;
   await apply();
-  await syncNetwork();
+  await syncNetwork("postgres");
 }

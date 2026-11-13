@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { renderRules as fwRules } from "../src/agent/firewall.ts";
-import { cidr, nftAccept } from "../src/agent/pgremote-config.ts";
-import { mergeHba, parseAllow, remoteUrl, renderHbaBlock } from "../src/agent/pgremote.ts";
+import { accountHosts, bindFor, hostSpec, remoteUrls, renderDropin } from "../src/agent/mysqlremote.ts";
+import { mergeHba, remoteUrl, renderHbaBlock } from "../src/agent/pgremote.ts";
+import { parseAllow } from "../src/agent/remotedb.ts";
+import { cidr, nftAccept } from "../src/agent/remotedb-config.ts";
 import { pgConf } from "../src/agent/services.ts";
 import { renderRules as vpnRules } from "../src/agent/vpn.ts";
 
@@ -54,21 +56,46 @@ test("firewalls: the port for everyone or per family from the list; the VPN serv
 
   const base = { ssh: [22], turn: false, extra: [] };
   expect(fwRules(base)).not.toContain("5432");
-  expect(fwRules({ ...base, pgRemote: { port: 5432, allow: ["1.2.3.4/32"] } })).toContain("ip saddr { 1.2.3.4/32 } tcp dport 5432 accept");
+  const both = fwRules({ ...base, remoteDb: [{ port: 5432, allow: ["1.2.3.4/32"] }, { port: 3306, allow: [] }] });
+  expect(both).toContain("ip saddr { 1.2.3.4/32 } tcp dport 5432 accept");
+  expect(both).toContain("tcp dport 3306 accept");
 
   const locks = { panel: false, ssh: false, services: true, databases: false };
-  const open = vpnRules(locks, 22, { port: 5432, allow: [] });
-  expect(open.indexOf("tcp dport 5432 accept")).toBeLessThan(open.indexOf("3306, 5432"));
-  expect(vpnRules(locks, 22)).not.toContain("tcp dport 5432 accept");
+  const open = vpnRules(locks, 22, [{ port: 3306, allow: [] }]);
+  expect(open.indexOf("tcp dport 3306 accept")).toBeLessThan(open.indexOf("{ 3306, 5432"));
+  expect(vpnRules(locks, 22)).not.toContain("tcp dport 3306 accept");
   // Without the services lock nothing changes.
-  expect(vpnRules({ ...locks, services: false }, 22, { port: 5432, allow: [] })).toBe(vpnRules({ ...locks, services: false }, 22));
+  expect(vpnRules({ ...locks, services: false }, 22, [{ port: 5432, allow: [] }])).toBe(vpnRules({ ...locks, services: false }, 22));
 });
 
-test("edge: one certificate-only block per name, shared with TURN", () => {
-  const caddy = (s: { turnDomain?: string; dbDomain?: string }) =>
+test("edge: one certificate-only block per name, shared with TURN and between engines", () => {
+  const caddy = (s: { turnDomain?: string; dbDomains?: string[] }) =>
     renderCaddyfile({ apps: [], sites: [], settings: { email: "", behindCloudflare: false, hooksDomain: "", ...s }, certs: new Set() });
-  expect(caddy({ dbDomain: "db.example.com" })).toContain("db.example.com {");
-  expect(caddy({ dbDomain: "x.example.com", turnDomain: "x.example.com" }).match(/x\.example\.com \{/g)?.length).toBe(1);
+  expect(caddy({ dbDomains: ["db.example.com"] })).toContain("db.example.com {");
+  expect(caddy({ dbDomains: ["x.example.com", "x.example.com"], turnDomain: "x.example.com" }).match(/x\.example\.com \{/g)?.length).toBe(1);
+});
+
+test("MariaDB: drop-in, listen list, account hosts", () => {
+  const d = renderDropin({ bind: "127.0.0.1,203.0.113.7", cert: "/t/server.crt", key: "/t/server.key" });
+  expect(d).toContain("[mysqld]\nbind-address = 127.0.0.1,203.0.113.7\nssl_cert = /t/server.crt\nssl_key = /t/server.key\ntls_version = TLSv1.2,TLSv1.3");
+  expect(renderDropin({ cert: "/c", key: "/k" })).not.toContain("bind-address");
+
+  expect(bindFor("127.0.0.1", "203.0.113.7")).toBe("127.0.0.1,203.0.113.7");
+  expect(bindFor("127.0.0.1,203.0.113.7", "203.0.113.7")).toBe("127.0.0.1,203.0.113.7");
+  // Already everywhere: nothing to add (and no 10.11 list syntax needed).
+  for (const w of ["", "*", "0.0.0.0", "::"]) expect(bindFor(w, "203.0.113.7")).toBeUndefined();
+
+  expect(hostSpec("203.0.113.7/32")).toBe("203.0.113.7");
+  expect(hostSpec("198.51.100.0/24")).toBe("198.51.100.0/255.255.255.0");
+  expect(hostSpec("10.0.0.0/8")).toBe("10.0.0.0/255.0.0.0");
+  expect(hostSpec("2001:db8::1/128")).toBe("2001:db8::1");
+  expect(() => hostSpec("2001:db8::/48")).toThrow("IPv6");
+  expect(accountHosts([])).toEqual(["%"]);
+  expect(accountHosts(["203.0.113.7/32", "198.51.100.0/24"])).toEqual(["203.0.113.7", "198.51.100.0/255.255.255.0"]);
+
+  const u = remoteUrls({ user: "shop_r_ab12cd", database: "shop" }, "pw", "db.example.com");
+  expect(u.prisma).toBe("mysql://shop_r_ab12cd:pw@db.example.com:3306/shop?sslaccept=strict");
+  expect(JSON.parse(new URL(u.mysql2).searchParams.get("ssl")!)).toEqual({ rejectUnauthorized: true });
 });
 
 test("URL verifies the certificate", () => {

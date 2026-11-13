@@ -6,7 +6,7 @@
 
 import { readdir } from "node:fs/promises";
 import { env, fsPath, paths } from "../shared/config.ts";
-import { pgRemoteConfig } from "./pgremote-config.ts";
+import { remoteDomains } from "./remotedb-config.ts";
 import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { cloudflareRanges } from "./cloudflare.ts";
 import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -14,20 +14,19 @@ import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts"
 export const EDGE_USER = "pano-edge";
 
 /**
- * turnDomain: only set while TURN over TLS is on; dbDomain: only while PostgreSQL remote access is on.
- * The edge then holds a certificate for them (see turn.ts, pgremote.ts).
+ * turnDomain: only set while TURN over TLS is on; dbDomains: the names of database remote access
+ * that is on. The edge then holds a certificate for them (see turn.ts, remotedb.ts).
  */
-export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean; turnDomain?: string; dbDomain?: string };
+export type EdgeSettings = { email: string; behindCloudflare: boolean; hooksDomain: string; localCerts?: boolean; turnDomain?: string; dbDomains?: string[] };
 
 export function edgeSettings(): EdgeSettings {
-  const pg = pgRemoteConfig();
   return {
     email: settings.get("edge.email") ?? "",
     behindCloudflare: settings.get("edge.behindCloudflare") === "1",
     hooksDomain: settings.get("edge.hooksDomain") ?? "",
     localCerts: settings.get("edge.localCerts") === "1",
     turnDomain: settings.get("turn.tls") === "1" ? settings.get("turn.domain") ?? "" : "",
-    dbDomain: pg.on ? pg.domain : "",
+    dbDomains: remoteDomains(),
   };
 }
 
@@ -187,8 +186,8 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
   }
 
   // Nothing is served here; the blocks make Caddy obtain and renew the certificates that coturn
-  // (turns:) and PostgreSQL (remote access over TLS) use. One block per name, even when both share it.
-  for (const d of new Set([s.turnDomain, s.dbDomain].filter((x): x is string => !!x))) {
+  // (turns:) and the databases (remote access over TLS) use. One block per name, even when they share it.
+  for (const d of new Set([s.turnDomain, ...(s.dbDomains ?? [])].filter((x): x is string => !!x))) {
     out.push(`${d} {`, "\timport pano_common", "\trespond 404", "}", "");
   }
 

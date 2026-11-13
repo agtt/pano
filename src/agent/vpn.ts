@@ -9,7 +9,7 @@
 import { DRY_RUN, env, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
 import { allSshPorts, nftPorts } from "./firewall.ts";
-import { nftAccept, pgRemoteOpen } from "./pgremote-config.ts";
+import { nftAccept, remoteOpen, type RemoteOpen } from "./remotedb-config.ts";
 import { audit, settings, state } from "./state.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 
@@ -46,11 +46,11 @@ export function renderConf(privateKey: string, port: number, list: Pick<Peer, "p
   return out.join("\n");
 }
 
-/** pgRemote: PostgreSQL remote access is on; its port stays open (to its allowed networks) through the services lock. */
-export function renderRules(l: Locks, sshPort: number | number[], pgRemote?: { port: number; allow: string[] } | null): string {
+/** remoteDb: database remote access that is on; those ports stay open (to their allowed networks) through the services lock. */
+export function renderRules(l: Locks, sshPort: number | number[], remoteDb: RemoteOpen[] = []): string {
   const drops = [
     ...(l.ssh ? [`\t\ttcp dport ${nftPorts(sshPort)} drop`] : []),
-    ...(l.services && pgRemote ? nftAccept(pgRemote) : []),
+    ...(l.services ? remoteDb.flatMap(nftAccept) : []),
     ...(l.services ? [`\t\ttcp dport { ${SERVICE_PORTS.join(", ")} } drop`] : []),
   ];
   // Own table, created and replaced atomically; a drop here wins over any accept elsewhere.
@@ -194,7 +194,7 @@ async function sync() {
   const port = Number(settings.get("vpn.port") ?? 51820);
   await ensureDir(paths.vpn, 0o700);
   await writeAtomic(CONF, renderConf(privateKey, port, peers()), 0o600);
-  await writeAtomic(RULES, renderRules(locks(), await allSshPorts(), pgRemoteOpen()), 0o600);
+  await writeAtomic(RULES, renderRules(locks(), await allSshPorts(), remoteOpen()), 0o600);
   if (await active()) await run(["systemctl", "reload", UNIT]);
   const on = settings.get("vpn.enabled") === "1";
   await syncDbForward(on && locks().databases);
@@ -317,10 +317,10 @@ export async function enable(input: { port?: unknown; endpoint?: unknown }, acto
   audit(actor, "vpn.enable", { port, endpoint });
 }
 
-/** PostgreSQL remote access changed: the services lock lets its port through (or no longer does) right away. */
-export async function followPgRemote() {
+/** Database remote access changed: the services lock lets its port through (or no longer does) right away. */
+export async function followRemoteDb() {
   if (settings.get("vpn.enabled") !== "1" || !(await exists(RULES))) return;
-  await writeAtomic(RULES, renderRules(locks(), await allSshPorts(), pgRemoteOpen()), 0o600);
+  await writeAtomic(RULES, renderRules(locks(), await allSshPorts(), remoteOpen()), 0o600);
   if (await active()) await run(["systemctl", "reload", UNIT]);
 }
 

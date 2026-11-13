@@ -1,24 +1,35 @@
-// PostgreSQL remote access settings, read by the edge (certificate), the firewalls and the
-// VPN locks (the port they open). A leaf module so none of them import pgremote.ts.
+// Database remote access settings (PostgreSQL and MariaDB), read by the edge (certificates), the
+// firewalls and the VPN locks (the ports they open). A leaf module so none of them import the
+// engine modules (pgremote.ts, mysqlremote.ts).
 
 import { isIP } from "node:net";
 import { settings } from "./state.ts";
 
-export const PG_REMOTE_PORT = 5432;
+export type RemoteEngine = "postgres" | "mariadb";
+export const REMOTE_ENGINES: RemoteEngine[] = ["postgres", "mariadb"];
+export const REMOTE_PORT: Record<RemoteEngine, number> = { postgres: 5432, mariadb: 3306 };
+const KEY: Record<RemoteEngine, string> = { postgres: "pg.remote", mariadb: "mysql.remote" };
 
 /** on: listening beyond localhost; allow: source networks (empty = any address). */
-export type PgRemote = { on: boolean; domain: string; allow: string[] };
+export type RemoteConfig = { on: boolean; domain: string; allow: string[] };
+export type RemoteOpen = { port: number; allow: string[] };
 
-export function pgRemoteConfig(): PgRemote {
-  const raw = JSON.parse(settings.get("pg.remote") || "null") ?? {};
+export function remoteConfig(e: RemoteEngine): RemoteConfig {
+  const raw = JSON.parse(settings.get(KEY[e]) || "null") ?? {};
   return { on: raw.on === true, domain: typeof raw.domain === "string" ? raw.domain : "", allow: Array.isArray(raw.allow) ? raw.allow.filter((c: unknown) => typeof c === "string" && !!cidr(c)) : [] };
 }
 
-/** The port and sources the firewalls must let in, or null while remote access is off. */
-export function pgRemoteOpen(): { port: number; allow: string[] } | null {
-  const c = pgRemoteConfig();
-  return c.on ? { port: PG_REMOTE_PORT, allow: c.allow } : null;
+export const saveRemoteConfig = (e: RemoteEngine, c: RemoteConfig) => settings.set(KEY[e], JSON.stringify(c));
+
+/** The ports and sources the firewalls must let in: one entry per engine with remote access on. */
+export function remoteOpen(): RemoteOpen[] {
+  return REMOTE_ENGINES.map((e) => ({ e, c: remoteConfig(e) }))
+    .filter((x) => x.c.on)
+    .map((x) => ({ port: REMOTE_PORT[x.e], allow: x.c.allow }));
 }
+
+/** Names the edge keeps a certificate for (the engines may share one). */
+export const remoteDomains = (): string[] => REMOTE_ENGINES.map(remoteConfig).flatMap((c) => (c.on && c.domain ? [c.domain] : []));
 
 /** "203.0.113.7" or "203.0.113.0/24" (IPv4 or IPv6) in canonical "addr/prefix" form; null when it is not one. */
 export function cidr(input: string): string | null {
@@ -30,7 +41,7 @@ export function cidr(input: string): string | null {
   const bits = m[2] === undefined ? max : Number(m[2]);
   // A /0 is "anywhere": that is what an empty list means, written out it is only a mistake waiting to happen.
   if (!Number.isInteger(bits) || bits < 1 || bits > max) return null;
-  // Host bits cleared (203.0.113.7/24 → 203.0.113.0/24): nft and pg_hba then agree on what is meant.
+  // Host bits cleared (203.0.113.7/24 → 203.0.113.0/24): nft, pg_hba and MariaDB then agree on what is meant.
   return `${fam === 4 ? network4(m[1]!, bits) : network6(m[1]!, bits)}/${bits}`;
 }
 
@@ -71,8 +82,8 @@ function network6(addr: string, bits: number): string {
   return `${out.slice(0, best[0]).join(":")}::${out.slice(best[0]! + best[1]!).join(":")}`;
 }
 
-/** nft accept rules for the remote port: one per address family, or the port for everyone when the list is empty. */
-export function nftAccept(open: { port: number; allow: string[] }): string[] {
+/** nft accept rules for one remote port: one per address family, or the port for everyone when the list is empty. */
+export function nftAccept(open: RemoteOpen): string[] {
   if (!open.allow.length) return [`\t\ttcp dport ${open.port} accept`];
   const v4 = open.allow.filter((c) => !c.includes(":"));
   const v6 = open.allow.filter((c) => c.includes(":"));

@@ -16,7 +16,8 @@ export type ServiceRow = {
   enabled: boolean;
 };
 export type PgDb = { name: string; sizeMb: number; owner: string; system: boolean };
-export type PgRemoteView = {
+export type RemoteView = {
+  engine: "postgres" | "mariadb";
   available: boolean;
   on: boolean;
   domain: string;
@@ -32,17 +33,19 @@ type Secret = { title: string; lines: [string, string][] };
 const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required autocomplete="one-time-code" />;
 
 /** Remote access for apps hosted elsewhere (Vercel, Netlify…): TLS, remote-only users, optional source networks. */
-export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) {
-  const { v } = p;
-  const dbs = p.dbs.filter((d) => !d.system);
+export function RemoteCard(p: { v: RemoteView; dbs: string[]; csrf: string }) {
+  const { v, dbs } = p;
+  const base = `/services/${v.engine}/remote`;
+  const pg = v.engine === "postgres";
   return (
     <div class="stack">
       <h3>Remote access (Vercel and other hosts)</h3>
       <p class="muted small">
-        For apps that do not run on this server. PostgreSQL then also answers on {v.port} over TLS only, with the edge's certificate for the name below (clients
-        verify it: <code>sslmode=verify-full</code>). Only remote users can log in from outside, each limited to one database and {v.connLimit} connections; the
-        apps' own users stay local. Leave the networks empty to allow any address (the password and TLS still protect it), or list fixed egress addresses such as
-        Vercel Static IPs.
+        For apps that do not run on this server. {pg ? "PostgreSQL" : "MariaDB"} then also answers on {v.port} over TLS, with the edge's certificate for the name
+        below (clients verify it: {pg ? <code>sslmode=verify-full</code> : <code>sslaccept=strict</code>}). Only remote users can log in from outside, each limited
+        to one database, TLS and {v.connLimit} connections; the apps' own users stay local. Leave the networks empty to allow any address (the password and TLS
+        still protect it), or list fixed egress addresses such as Vercel Static IPs{pg ? "" : " (IPv6: single addresses only)"}. Turning it on or off restarts{" "}
+        {pg ? "PostgreSQL" : "MariaDB"} once.
       </p>
       {v.on ? (
         <p class="small">
@@ -50,7 +53,7 @@ export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) 
           {v.ip ? ` (${v.ip})` : ""} · {v.allow.length ? `only from ${v.allow.join(", ")}` : "from any address"}
         </p>
       ) : null}
-      <form method="post" action="/services/postgres/remote" class="row">
+      <form method="post" action={base} class="row">
         <Csrf token={p.csrf} />
         <Field label="Domain" name="domain" value={v.domain} placeholder="db.example.com" required hint="A DNS-only (grey cloud) record to this server; the edge gets its certificate." />
         <Field label="Allowed networks (optional)" name="allow" value={v.allow.join(" ")} placeholder="203.0.113.7 198.51.100.0/24" />
@@ -75,7 +78,7 @@ export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) 
                   </td>
                   <td>{u.database}</td>
                   <td>
-                    <form method="post" action="/services/postgres/remote/users/remove" class="row">
+                    <form method="post" action={`${base}/users/remove`} class="row">
                       <Csrf token={p.csrf} />
                       <input type="hidden" name="user" value={u.user} />
                       <Otp />
@@ -87,13 +90,13 @@ export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) 
             </tbody>
           </table>
           {dbs.length ? (
-            <form method="post" action="/services/postgres/remote/users" class="row">
+            <form method="post" action={`${base}/users`} class="row">
               <Csrf token={p.csrf} />
               <label class="field">
                 <span>{t("Database")}</span>
                 <select name="database">
                   {dbs.map((d) => (
-                    <option value={d.name}>{d.name}</option>
+                    <option value={d}>{d}</option>
                   ))}
                 </select>
               </label>
@@ -101,11 +104,11 @@ export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) 
               <button class="btn small">New remote user (shows DATABASE_URL once)</button>
             </form>
           ) : null}
-          <form method="post" action="/services/postgres/remote/off" class="row">
+          <form method="post" action={`${base}/off`} class="row">
             <Csrf token={p.csrf} />
             <Otp />
             <button class="btn small">Turn off</button>
-            <span class="muted small">Back to localhost only; remote users stay and work again when turned on.</span>
+            <span class="muted small">Back to how it was before; remote users stay (unable to log in) and work again when turned on.</span>
           </form>
         </>
       ) : null}
@@ -113,7 +116,18 @@ export function PgRemoteCard(p: { v: PgRemoteView; dbs: PgDb[]; csrf: string }) 
   );
 }
 
-export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; pgRemote?: PgRemoteView; secret?: Secret; realtime?: RealtimeView; turn?: TurnView; appNames?: string[] }) {
+export function ServicesPage(p: {
+  csrf: string;
+  list: ServiceRow[];
+  pg: PgDb[];
+  pgRemote?: RemoteView;
+  mysqlRemote?: RemoteView;
+  mysqlDbs?: string[];
+  secret?: Secret;
+  realtime?: RealtimeView;
+  turn?: TurnView;
+  appNames?: string[];
+}) {
   const pg = p.list.find((s) => s.key === "postgres");
   return (
     <div class="stack">
@@ -226,6 +240,11 @@ export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; 
           </Card>
         ) : null}
       </div>
+      {p.list.find((s) => s.key === "mariadb")?.installed && p.mysqlRemote?.available ? (
+        <Card title="MariaDB">
+          <RemoteCard v={p.mysqlRemote} dbs={p.mysqlDbs ?? []} csrf={p.csrf} />
+        </Card>
+      ) : null}
 
       <h2 class="section">Optional extensions</h2>
       <p class="muted small">Nothing of these is on disk or running until installed.</p>
@@ -281,7 +300,7 @@ export function ServicesPage(p: { csrf: string; list: ServiceRow[]; pg: PgDb[]; 
               />
             </details>
           ) : null}
-          {p.pgRemote?.available ? <PgRemoteCard v={p.pgRemote} dbs={p.pg} csrf={p.csrf} /> : null}
+          {p.pgRemote?.available ? <RemoteCard v={p.pgRemote} dbs={p.pg.filter((d) => !d.system).map((d) => d.name)} csrf={p.csrf} /> : null}
         </Card>
       ) : null}
     </div>

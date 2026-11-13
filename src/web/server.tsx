@@ -23,7 +23,7 @@ import { VpnPage, type VpnStatus } from "./views/vpn.tsx";
 import { ProtectCards, type AlertsView, type GuardView } from "./views/protect.tsx";
 import { ShieldPage, type ShieldView } from "./views/shield.tsx";
 import { JobsPage, type JobsView, type QueuesView } from "./views/jobs.tsx";
-import { ServicesPage, type PgDb, type PgRemoteView, type ServiceRow } from "./views/services.tsx";
+import { ServicesPage, type PgDb, type RemoteView, type ServiceRow } from "./views/services.tsx";
 import type { RealtimeView } from "./views/realtime.tsx";
 import type { TurnView } from "./views/turn.tsx";
 import { VulnsCard, type VulnView } from "./views/vulns.tsx";
@@ -649,16 +649,22 @@ export function createWebApp() {
 
   // ---- database and cache servers
   const servicesPage = async (c: Context<Env>, secret?: { title: string; lines: [string, string][] }) => {
-    const [list, realtime, turn, apps, pg, pgRemote] = await Promise.all([
+    const [list, realtime, turn, apps, pg, pgRemote, myRemote, myDbs] = await Promise.all([
       call<ServiceRow[]>("services.status"),
       call<RealtimeView>("realtime.status"),
       call<TurnView>("turn.status"),
       call<{ name: string; kind: string }[]>("apps.names"),
       call<PgDb[]>("pg.list").catch(() => [] as PgDb[]), // fails fast when PostgreSQL is not installed
-      call<PgRemoteView>("pg.remote.status").catch(() => undefined),
+      call<RemoteView>("pg.remote.status").catch(() => undefined),
+      call<RemoteView>("mysql.remote.status").catch(() => undefined),
+      call<string[]>("db.names").catch(() => [] as string[]),
     ]);
     const appNames = apps.filter((a) => a.kind === "managed").map((a) => a.name);
-    return page(c, t("Services"), <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} pgRemote={pgRemote} secret={secret} realtime={realtime} turn={turn} appNames={appNames} />);
+    return page(
+      c,
+      t("Services"),
+      <ServicesPage csrf={c.get("s").csrf} list={list} pg={pg} pgRemote={pgRemote} mysqlRemote={myRemote} mysqlDbs={myDbs} secret={secret} realtime={realtime} turn={turn} appNames={appNames} />,
+    );
   };
   // ---- realtime
   app.post("/services/realtime/install", act("/services", async (c) => `Realtime ${(await call("realtime.install", {}, actor(c))).version} installed`));
@@ -771,30 +777,43 @@ export function createWebApp() {
     needOtp(c, f.otp);
     await call("pg.drop", { name: f.name, confirm: f.confirm }, actor(c));
   }));
-  // ---- PostgreSQL remote access (apps on Vercel and other hosts)
-  app.post("/services/postgres/remote", act("/services", async (c, f) => {
+  // ---- database remote access (apps on Vercel and other hosts)
+  const REMOTE = { postgres: { rpc: "pg", label: "PostgreSQL" }, mariadb: { rpc: "mysql", label: "MariaDB" } } as const;
+  const remoteOf = (c: Context<Env>) => {
+    const e = c.req.param("engine");
+    if (e !== "postgres" && e !== "mariadb") throw new Error("unknown engine");
+    return REMOTE[e];
+  };
+  app.post("/services/:engine/remote", act("/services", async (c, f) => {
+    const r = remoteOf(c);
     needOtp(c, f.otp);
-    await call("pg.remote.enable", { domain: f.domain, allow: f.allow }, actor(c));
-    return "PostgreSQL remote access is on";
+    await call(`${r.rpc}.remote.enable`, { domain: f.domain, allow: f.allow }, actor(c));
+    return `${r.label} remote access is on`;
   }));
-  app.post("/services/postgres/remote/off", act("/services", async (c, f) => {
+  app.post("/services/:engine/remote/off", act("/services", async (c, f) => {
+    const r = remoteOf(c);
     needOtp(c, f.otp);
-    await call("pg.remote.disable", {}, actor(c));
-    return "PostgreSQL remote access is off";
+    await call(`${r.rpc}.remote.disable`, {}, actor(c));
+    return `${r.label} remote access is off`;
   }));
-  app.post("/services/postgres/remote/users", async (c) => {
+  app.post("/services/:engine/remote/users", async (c) => {
     const f = await form(c);
     try {
+      const e = remoteOf(c);
       needOtp(c, f.otp);
-      const r = await call<{ user: string; database: string; url: string }>("pg.remote.user.add", { database: f.database }, actor(c));
-      return servicesPage(c, { title: `PostgreSQL remote · ${r.database}`, lines: [["User", r.user], ["DATABASE_URL", r.url]] });
+      const r = await call<{ user: string; database: string; url?: string; prisma?: string; mysql2?: string }>(`${e.rpc}.remote.user.add`, { database: f.database }, actor(c));
+      const lines: [string, string][] = r.url
+        ? [["User", r.user], ["DATABASE_URL", r.url]]
+        : [["User", r.user], ["DATABASE_URL (Prisma)", r.prisma ?? ""], ["DATABASE_URL (mysql2, Drizzle)", r.mysql2 ?? ""]];
+      return servicesPage(c, { title: `${e.label} remote · ${r.database}`, lines });
     } catch (e) {
       return c.redirect(err("/services", e));
     }
   });
-  app.post("/services/postgres/remote/users/remove", act("/services", async (c, f) => {
+  app.post("/services/:engine/remote/users/remove", act("/services", async (c, f) => {
+    const r = remoteOf(c);
     needOtp(c, f.otp);
-    await call("pg.remote.user.remove", { user: f.user }, actor(c));
+    await call(`${r.rpc}.remote.user.remove`, { user: f.user }, actor(c));
     return `Remote user ${f.user} removed`;
   }));
 

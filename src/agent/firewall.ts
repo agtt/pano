@@ -10,7 +10,7 @@ import { readlink } from "node:fs/promises";
 import { env, paths } from "../shared/config.ts";
 import { type FwPort, formatPorts, parsePorts } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
-import { nftAccept, pgRemoteOpen } from "./pgremote-config.ts";
+import { nftAccept, remoteOpen, type RemoteOpen } from "./remotedb-config.ts";
 import { audit, settings } from "./state.ts";
 import { PORT as TURN_PORT, RELAY as TURN_RELAY } from "./turn.ts";
 import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
@@ -30,8 +30,8 @@ export type FwOpts = {
   wg?: number;
   turn: boolean;
   extra: FwPort[];
-  /** PostgreSQL remote access: its port, from these networks only (empty: any). */
-  pgRemote?: { port: number; allow: string[] } | null;
+  /** Database remote access (PostgreSQL, MariaDB): each port, from its networks only (empty: any). */
+  remoteDb?: RemoteOpen[];
 };
 
 /** Sorted, with overlapping and touching ranges merged (nft rejects overlapping elements in one set). */
@@ -74,7 +74,7 @@ export function renderRules(o: FwOpts): string {
     "\t\tudp sport 67 udp dport 68 accept",
     "\t\tudp sport 547 udp dport 546 accept",
     `\t\ttcp dport { ${setOf(tcp)} } accept`,
-    ...(o.pgRemote ? nftAccept(o.pgRemote) : []),
+    ...(o.remoteDb ?? []).flatMap(nftAccept),
     `\t\tudp dport { ${setOf(udp)} } accept`,
     "\t}",
     "}",
@@ -160,7 +160,7 @@ async function currentOpts(ssh: number[]): Promise<FwOpts> {
     wg: settings.get("vpn.enabled") === "1" ? Number(settings.get("vpn.port") ?? 51820) : undefined,
     turn: settings.get("turn.installed") === "1",
     extra: extraPorts(),
-    pgRemote: pgRemoteOpen(),
+    remoteDb: remoteOpen(),
   };
 }
 
@@ -272,7 +272,7 @@ async function refresh() {
   await apply(rules);
 }
 
-/** A setting the rules depend on changed (PostgreSQL remote access): a confirmed firewall follows now, not in five minutes. */
+/** A setting the rules depend on changed (database remote access): a confirmed firewall follows now, not in five minutes. */
 export async function followSettings() {
   if (on() && !deadline()) await refresh();
 }

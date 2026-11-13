@@ -33,6 +33,7 @@ import * as mysql from "./mysql.ts";
 import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
 import * as pgRemote from "./pgremote.ts";
+import * as mysqlRemote from "./mysqlremote.ts";
 import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
@@ -72,6 +73,7 @@ const SENSITIVE = new Set([
   "runner.enable", "runner.key.add",
   // PostgreSQL facing the internet, and a password for it shown once.
   "pg.remote.enable", "pg.remote.disable", "pg.remote.user.add", "pg.remote.user.remove",
+  "mysql.remote.enable", "mysql.remote.disable", "mysql.remote.user.add", "mysql.remote.user.remove",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -613,7 +615,15 @@ export const methods: Record<string, Handler> = {
     backup.ensureJob("mysql", r.name, actor);
     return r;
   },
-  "db.drop": (p, actor) => mysql.dropDatabase(p.name, p.confirm, actor),
+  "db.drop": async (p, actor) => {
+    await mysql.dropDatabase(p.name, p.confirm, actor);
+    await mysqlRemote.forgetDatabase(String(p.name), actor);
+  },
+  "mysql.remote.status": () => mysqlRemote.status(),
+  "mysql.remote.enable": (p, actor) => mysqlRemote.enable({ domain: p.domain, allow: p.allow }, actor),
+  "mysql.remote.disable": (_p, actor) => mysqlRemote.disable(actor),
+  "mysql.remote.user.add": (p, actor) => mysqlRemote.addUser({ database: p.database }, actor),
+  "mysql.remote.user.remove": (p, actor) => mysqlRemote.removeUser({ user: p.user }, actor),
   "db.password": (p, actor) => mysql.setPassword(p.user, p.host, p.password, actor),
   "db.grant": (p, actor) => mysql.grant(p.db, p.user, actor),
 
