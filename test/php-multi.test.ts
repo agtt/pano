@@ -71,7 +71,7 @@ describe("edge: multi-process apps and php sites", () => {
     const st = { ...php, name: "files", kind: "static", domains: ["files.example.org"], root: "/var/www/files" } as Site;
     const viewed = renderCaddyfile({ apps: [], sites: [php, st], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView: true });
     expect(viewed).toContain("root * /srv/pano/edgeview/blog.example.org/public");
-    expect(viewed).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock {\n\t\troot /srv/pano/sites/blog.example.org/public\n\t}");
+    expect(viewed).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock {\n\t\ttry_files {path} {path}/index.php {path}/index.html {path}/index.htm index.php\n\t\troot /srv/pano/sites/blog.example.org/public\n\t}");
     expect(viewed).not.toContain("root * /srv/pano/sites/");
     // A root outside the sites directory is served as it is.
     expect(viewed).toContain("root * /var/www/files");

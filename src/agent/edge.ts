@@ -180,6 +180,8 @@ export function viewPath(root: string): string | null {
   return root.startsWith(`${paths.sites}/`) ? EDGE_VIEW + root.slice(paths.sites.length) : null;
 }
 
+const PHP_TRY_FILES = "{path} {path}/index.php {path}/index.html {path}/index.htm index.php";
+
 function phpLines(site: Site, view: boolean): string[] {
   const served = view ? viewPath(site.root) : null;
   const out = [`\troot * ${served ?? site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${PHP_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404"];
@@ -188,8 +190,11 @@ function phpLines(site: Site, view: boolean): string[] {
   }
   // Static files and php_fastcgi's file matchers (try_files, index.php) use the root above, the view;
   // PHP-FPM gets the real paths (SCRIPT_FILENAME, DOCUMENT_ROOT) through the transport's own root.
-  if (served) out.push(`\tphp_fastcgi unix/${phpSocket(site.name)} {`, `\t\troot ${site.root}`, "\t}");
-  else out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`);
+  // A directory with only an index.html (sites brought over from OpenLiteSpeed) serves it; Caddy's
+  // default goes from {path} straight to index.php and answers "/" with PHP's "No input file specified".
+  out.push(`\tphp_fastcgi unix/${phpSocket(site.name)} {`, `\t\ttry_files ${PHP_TRY_FILES}`);
+  if (served) out.push(`\t\troot ${site.root}`);
+  out.push("\t}");
   out.push(...ASSET_CACHE, "\tfile_server");
   return out;
 }
