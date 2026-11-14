@@ -95,6 +95,8 @@ const SUSPENDED_SNIPPET = [
 ];
 const SUSPENDED_BODY = ["\timport pano_suspended"];
 
+const WWW_APEX = ["\t@pano_www header_regexp pano_www Host ^www\\.([^:]+)", "\tredir @pano_www https://{re.pano_www.1}{uri} 301"];
+
 function logBlock(name: string): string[] {
   return [
     "\tlog {",
@@ -136,13 +138,16 @@ export function appRoutes(a: App): Map<string, Route[]> {
 function routeLines(routes: Route[], notFound = false): string[] {
   const sorted = [...routes].sort((x, y) => y.path.length - x.path.length);
   const out: string[] = [];
+  // A redirect route answers itself; the target was checked by parseSiteRoutes (no spaces, quotes or braces but {uri}).
+  // The "*" matcher is needed: Caddy would read a target starting with "/" as a path matcher.
+  const action = (r: Route) => (r.redirect ? `\t\tredir * ${r.redirect} ${r.code ?? 301}` : `\t\treverse_proxy ${r.upstream}`);
   sorted.forEach((r, i) => {
     if (r.path === "/") return;
     const prefix = r.path.replace(/\/$/, "");
-    out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, `\t\treverse_proxy ${r.upstream}`, "\t}");
+    out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, action(r), "\t}");
   });
   const root = sorted.find((r) => r.path === "/");
-  if (root) out.push("\thandle {", `\t\treverse_proxy ${root.upstream}`, "\t}");
+  if (root) out.push("\thandle {", action(root), "\t}");
   else if (notFound) out.push("\thandle {", "\t\trespond 404", "\t}");
   return out;
 }
@@ -314,6 +319,8 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     } else {
       body = routeLines(site.routes);
     }
+    // www.<host> -> https://<host>, same path and query (redir runs before the site's handlers).
+    if (site.enabled && site.www_apex && site.kind !== "legacy") body = [...WWW_APEX, ...body];
     const hasCert = input.certs.has(`site-${site.name}`);
     const named = site.domains.filter((d) => d !== "*");
     if (hasCert && named.length < site.domains.length) {

@@ -64,7 +64,8 @@ export type AppInput = {
 };
 
 /** A form's hidden "0" plus a checkbox's "1", or an API caller's value; left out: `missing`. */
-const flag = (x: unknown, missing: 0 | 1): number => (x === undefined ? missing : [x].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0);
+/** A form checkbox (hidden "0" + checkbox "1"), a boolean or a number; missing: the default. */
+export const flag = (x: unknown, missing: 0 | 1): number => (x === undefined ? missing : [x].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0);
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
   const processes = Array.isArray(x.processes) ? parseProcesses(x.processes.join("\n")) : parseProcesses(String(x.processes ?? ""));

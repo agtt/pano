@@ -359,6 +359,10 @@ const tr: Record<string, string> = {
   // HTTP -> HTTPS
   "Redirect HTTP to HTTPS": "HTTP'yi HTTPS'e yönlendir",
   "Turn off only if Cloudflare SSL is “Flexible” or the app redirects itself.": "Yalnızca Cloudflare SSL “Flexible” ise ya da uygulama yönlendirmeyi kendisi yapıyorsa kapat.",
+  "Send www to the bare domain": "www'yi çıplak alan adına gönder",
+  "www.example.com answers with a permanent redirect to example.com.": "www.example.com kalıcı yönlendirmeyle example.com'a gider.",
+  "One per line: a path and a local port, or a path, “redirect”, the target and the code. {uri} keeps the path and query.":
+    "Her satıra bir tane: yol ve yerel port, ya da yol, “redirect”, hedef ve kod. {uri} yolu ve sorguyu korur.",
 };
 
 // An entry already in `tr` wins over the backup/database texts.

@@ -164,6 +164,7 @@ export async function scan(): Promise<ImportPlan> {
       ...(suspended.has(ref.name) ? { suspended_reason: "suspended in CyberPanel" } : {}),
       // OpenLiteSpeed keeps deciding about plain HTTP (as before the edge): no redirect that could loop behind Cloudflare "Flexible".
       http_redirect: kind === "legacy" ? 0 : 1,
+      www_apex: 0,
       on_demand_tls: domains.includes("*") ? 1 : 0,
       wordpress: wpConfig !== null,
       wpProxyReady: !!wpConfig && /HTTP_X_FORWARDED_PROTO/.test(wpConfig),

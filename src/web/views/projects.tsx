@@ -5,6 +5,7 @@ import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
 import { appKey, projectSlug, siteKey, type Project } from "../projects.ts";
 import { Ago, appState, parseSince, portOf, runtimeOf, type AppRow, type CertRow, type SiteRow } from "./dashboard.tsx";
 import { Icon } from "./icons.tsx";
+import { routeLabel, type SiteRoute } from "../../shared/validate.ts";
 import { Csrf, SuspendControl } from "./layout.tsx";
 
 export type ProjAppRow = AppRow & {
@@ -14,7 +15,7 @@ export type ProjAppRow = AppRow & {
   build_cmd?: string;
   start_cmd?: string;
 };
-export type ProjSiteRow = SiteRow & { routes: { path: string; upstream: string }[] };
+export type ProjSiteRow = SiteRow & { routes: SiteRoute[] };
 export type Proj = Project<ProjAppRow, ProjSiteRow>;
 /** An app's latest deploy, as the agent keeps it. */
 export type LastDeploy = { status: string; started_at: number; finished_at: number | null };
@@ -506,7 +507,7 @@ export function ProjectDetail({ p, projects, certs, now, csrf }: { p: Proj; proj
                       <td>
                         <span class={`kind ${s.kind}`}>{siteKind(s)}</span>
                       </td>
-                      <td class="muted small">{s.routes.length ? s.routes.map((r) => `${r.path} → ${r.upstream}`).join(", ") : "—"}</td>
+                      <td class="muted small">{s.routes.length ? s.routes.map(routeLabel).join(", ") : "—"}</td>
                       <td class={`num ${days === null ? "" : days < 7 ? "crit" : days < 14 ? "warn" : ""}`}>
                         {c?.error ? <span class="crit">{t("unreadable")}</span> : days === null ? <span class="muted">{t("edge")}</span> : days < 0 ? t("expired") : t("{n} days").replace("{n}", String(days))}
                       </td>

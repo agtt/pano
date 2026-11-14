@@ -152,6 +152,40 @@ export const PHP_EOL: Record<string, string> = {
 };
 export const DEFAULT_PHP = "8.5";
 
+export type SiteRoute = { path: string; upstream: string; redirect?: string; code?: number };
+
+// A redirect target: an absolute https/http URL or a path on the same host, optionally ending in Caddy's
+// {uri} (the request's path and query). No spaces, quotes or other braces: it is written into the Caddyfile.
+const REDIRECT_TARGET = /^(?:https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/[A-Za-z0-9._~%&=+,:@\/?-]*)?|\/[A-Za-z0-9._~%&=+,:@\/?-]*)(?:\{uri\})?$/;
+const REDIRECT_CODES = [301, 302, 307, 308];
+
+/**
+ * A proxy site's routes, one per line: `/path 127.0.0.1:PORT`, or `/path redirect TARGET [301|302|307|308]`
+ * (TARGET may end in {uri}: `/old redirect https://example.com{uri}`).
+ */
+export function parseSiteRoutes(text: unknown): SiteRoute[] {
+  return String(text ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [path = "", up = "", to = "", code = "", ...rest] = l.split(/\s+/);
+      check(path.startsWith("/") && HTTP_PATH.test(path), `route "${l}": the path must start with /`);
+      if (up === "redirect") {
+        const n = code ? Number(code) : 301;
+        check(REDIRECT_TARGET.test(to) && REDIRECT_CODES.includes(n) && !rest.length, `route "${l}": use "/path redirect https://host/path [301|302|307|308]"`);
+        return { path, upstream: "", redirect: to, code: n };
+      }
+      check(/^127\.0\.0\.1:\d{2,5}$/.test(up) && !to, `route "${l}": use "/path 127.0.0.1:PORT"`);
+      return { path, upstream: up };
+    });
+}
+
+/** One route as the routes textarea shows it (parseSiteRoutes reads it back). */
+export const routeText = (r: SiteRoute) => (r.redirect ? `${r.path} redirect ${r.redirect} ${r.code ?? 301}` : `${r.path} ${r.upstream}`);
+/** Short form for lists: "/api → 127.0.0.1:3001", "/old → 301 https://…". */
+export const routeLabel = (r: SiteRoute) => `${r.path} → ${r.redirect ? `${r.code ?? 301} ${r.redirect}` : r.upstream}`;
+
 export type ProcessSpec = { name: string; dir: string; routes: string[]; memory_mb: number; start: string };
 
 const PROC_NAME = /^[a-z][a-z0-9-]{0,15}$/;

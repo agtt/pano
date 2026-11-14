@@ -1,7 +1,7 @@
 // The complete list of things the web UI can ask the root agent to do. Each
 // handler validates its own input; there is no generic "run command" method.
 
-import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, v } from "../shared/validate.ts";
+import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, parseSiteRoutes, v } from "../shared/validate.ts";
 import { addAdmin, adminNames, checkOtp, endTrust, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as android from "./android.ts";
@@ -616,14 +616,14 @@ export const methods: Record<string, Handler> = {
     const kind = p.kind as Site["kind"];
     if (!["legacy", "static", "proxy", "php"].includes(kind)) throw new Error("invalid kind");
     const clean = parseDomains(p.domains);
-    appsOps.assertDomainsFree(clean, { site: name }, allDomains());
-    const routes = kind === "proxy"
-      ? String(p.routes ?? "").split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-          const [path, up] = l.split(/\s+/);
-          if (!path?.startsWith("/") || !/^127\.0\.0\.1:\d{2,5}$/.test(up ?? "")) throw new Error(`route "${l}": use "/path 127.0.0.1:PORT"`);
-          return { path: v.httpPath(path), upstream: up! };
-        })
-      : [];
+    const routes = kind === "proxy" ? parseSiteRoutes(p.routes) : [];
+    // move: the domains leave the other sites in the same edge change (no moment where nobody serves them).
+    const moving = p.move ? sites.list().filter((s) => s.name !== name && s.domains.some((d) => clean.includes(d))) : [];
+    const taken = allDomains();
+    appsOps.assertDomainsFree(clean, { site: name }, { ...taken, sites: taken.sites.filter((s) => !moving.some((m) => m.name === s.name)) });
+    // cert_from: another site's imported certificate files (one wildcard for several sites).
+    const certFrom = p.cert_from ? sites.get(v.siteName(p.cert_from)) : null;
+    if (p.cert_from && !certFrom?.tls_cert) throw new Error(`site ${p.cert_from} has no imported certificate`);
     const askUrl = String(p.ask_url ?? "").trim();
     if (askUrl && !/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(askUrl)) throw new Error("ask URL must be http://127.0.0.1:PORT/path");
     const prev = sites.get(name);
@@ -640,17 +640,20 @@ export const methods: Record<string, Handler> = {
       routes,
       ask_url: askUrl,
       php_version: prev?.php_version ?? "",
-      tls_cert: p.autoTls ? "" : (prev?.tls_cert ?? ""),
-      tls_key: p.autoTls ? "" : (prev?.tls_key ?? ""),
+      tls_cert: p.autoTls ? "" : (certFrom?.tls_cert ?? prev?.tls_cert ?? ""),
+      tls_key: p.autoTls ? "" : (certFrom?.tls_key ?? prev?.tls_key ?? ""),
       source: prev?.source ?? "pano",
       // Suspension changes only through sites.suspend / sites.resume (they stop and start what runs).
       enabled: prev ? prev.enabled : p.enabled === false ? 0 : 1,
       on_demand_tls: p.on_demand_tls || clean.includes("*") ? 1 : 0,
       // Left out (API callers): unchanged, on for a new site.
-      ...(p.http_redirect === undefined ? {} : { http_redirect: [p.http_redirect].flat().some((x) => x === true || x === 1 || x === "1") ? 1 : 0 }),
+      ...(p.http_redirect === undefined ? {} : { http_redirect: appsOps.flag(p.http_redirect, 1) }),
+      ...(p.www_apex === undefined ? {} : { www_apex: appsOps.flag(p.www_apex, 0) }),
     });
+    for (const m of moving) sites.upsert({ ...m, domains: m.domains.filter((d) => !clean.includes(d)) });
     await applyEdge();
-    audit(actor, "site.save", { name, http_redirect: sites.get(name)?.http_redirect });
+    const saved = sites.get(name);
+    audit(actor, "site.save", { name, http_redirect: saved?.http_redirect, www_apex: saved?.www_apex, moved_from: moving.map((m) => m.name) });
   },
   "sites.suspend": (p, actor) => suspend.suspendSite(p.name, p.reason, actor),
   "sites.resume": (p, actor) => suspend.resumeSite(p.name, actor),

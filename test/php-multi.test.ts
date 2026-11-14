@@ -45,7 +45,7 @@ describe("edge: multi-process apps and php sites", () => {
   const php = {
     name: "blog.example.org", kind: "php", domains: ["blog.example.org"], routes: [], crons: [], enabled: 1, on_demand_tls: 0, tls_cert: "", tls_key: "",
     root: "/srv/pano/sites/blog.example.org/public", ask_url: "", php_version: "8.5", source: "pano", deny_paths: ["/private", "/wp-content/uploads/wc-logs"],
-    converted_from: null, created_at: 0, suspended_reason: "", suspended_at: 0, http_redirect: 1,
+    converted_from: null, created_at: 0, suspended_reason: "", suspended_at: 0, http_redirect: 1, www_apex: 0,
   } as Site;
   const out = renderCaddyfile({ apps: [app], sites: [php], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set() });
 

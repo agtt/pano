@@ -1,6 +1,7 @@
 import type { Child } from "hono/jsx";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Icon } from "./icons.tsx";
+import { routeLabel, routeText, type SiteRoute } from "../../shared/validate.ts";
 import type { ProviderSpec } from "../../shared/backup-providers.ts";
 import { BackupBanner, BackupSummary, DestCards, type BackupHealth, type Dest } from "./backups.tsx";
 import { Badge, Card, Csrf, DangerForm, Field, HttpRedirectCheck, PageHead, SuspendControl, SuspendedBanner, TabPanes, alwaysAttr } from "./layout.tsx";
@@ -14,7 +15,7 @@ export type SiteRow = {
   kind: string;
   domains: string[];
   root: string;
-  routes: { path: string; upstream: string }[];
+  routes: SiteRoute[];
   ask_url: string;
   php_version: string;
   tls_cert: string;
@@ -24,6 +25,7 @@ export type SiteRow = {
   suspended_reason?: string;
   suspended_at?: number;
   http_redirect?: number;
+  www_apex?: number;
   on_demand_tls: number;
   deny_paths?: string[];
   converted_from?: { kind: string; root: string; php_version: string } | null;
@@ -282,9 +284,10 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
           <Field label="Root directory" name="root" value={s?.root} placeholder="/srv/www/example (static)" />
           <label class="field wide">
             <span>{t("Routes")} (proxy)</span>
-            <textarea name="routes" rows={4} class="mono" placeholder={"/ 127.0.0.1:3000\n/api 127.0.0.1:3001"}>
-              {(s?.routes ?? []).map((r) => `${r.path} ${r.upstream}`).join("\n")}
+            <textarea name="routes" rows={4} class="mono" placeholder={"/ 127.0.0.1:3000\n/api 127.0.0.1:3001\n/old redirect https://example.com{uri} 301"}>
+              {(s?.routes ?? []).map(routeText).join("\n")}
             </textarea>
+            <small class="muted">{t("One per line: a path and a local port, or a path, “redirect”, the target and the code. {uri} keeps the path and query.")}</small>
           </label>
           <Field label="Ask URL (catch-all TLS)" name="ask_url" value={s?.ask_url} placeholder="http://127.0.0.1:3000/api/tls-ask" />
           {s?.tls_cert ? (
@@ -293,6 +296,11 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
             </label>
           ) : null}
           <HttpRedirectCheck on={s?.http_redirect !== 0} />
+          <label class="check">
+            <input type="hidden" name="www_apex" value="0" />
+            <input type="checkbox" name="www_apex" value="1" checked={s?.www_apex === 1} /> {t("Send www to the bare domain")}
+            <small class="muted"> {t("www.example.com answers with a permanent redirect to example.com.")}</small>
+          </label>
           <div class="actions">
             <Otp />
             <button class="btn primary">{t("Save")}</button>
@@ -325,7 +333,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
           {s.routes.length ? (
             <>
               <dt>{t("Routes")}</dt>
-              <dd>{s.routes.map((r) => `${r.path} → ${r.upstream}`).join(", ")}</dd>
+              <dd>{s.routes.map(routeLabel).join(", ")}</dd>
             </>
           ) : null}
           <dt>TLS</dt>
@@ -1154,7 +1162,7 @@ export function ImportPage(p: {
                     </td>
                     <td>
                       {s.kind} {s.php_version}
-                      {s.routes.length ? <div class="small muted">{s.routes.map((r) => `${r.path} → ${r.upstream}`).join(" · ")}</div> : null}
+                      {s.routes.length ? <div class="small muted">{s.routes.map(routeLabel).join(" · ")}</div> : null}
                     </td>
                     <td class="small">{s.domains.join(", ")}</td>
                     <td class="small muted">{s.tls_cert || "—"}</td>

@@ -6,7 +6,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { APP_PORT_BASE, fsPath, paths } from "../shared/config.ts";
 import { pvName } from "../shared/preview.ts";
-import type { ProcessSpec } from "../shared/validate.ts";
+import type { ProcessSpec, SiteRoute } from "../shared/validate.ts";
 
 export type App = {
   name: string;
@@ -68,7 +68,8 @@ export type SuspendedUnit = { unit: string; active: boolean; enabled: boolean };
 /** A process of a multi-process app. Workers have no routes and port 0. */
 export type Process = ProcessSpec & { port_a: number; port_b: number };
 
-export type Route = { path: string; upstream: string };
+/** A path prefix sent to a local port, or (redirect set, upstream "") answered with a redirect. */
+export type Route = SiteRoute;
 
 export type Site = {
   name: string;
@@ -95,6 +96,8 @@ export type Site = {
   suspended_at: number;
   /** 1: plain HTTP is redirected to HTTPS; 0: also served on plain HTTP (legacy imports: the backend decides) */
   http_redirect: number;
+  /** 1: www.<host> answers with a 301 to https://<host> (same path and query) */
+  www_apex: number;
   on_demand_tls: number;
   /** php sites: path prefixes answered with 404 (from "deny from all" .htaccess files) */
   deny_paths: string[];
@@ -357,6 +360,7 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["sites", "suspended_reason", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "suspended_at", "INTEGER NOT NULL DEFAULT 0"],
   ["sites", "http_redirect", "INTEGER NOT NULL DEFAULT 1"],
+  ["sites", "www_apex", "INTEGER NOT NULL DEFAULT 0"],
   ["containers", "digest", "TEXT NOT NULL DEFAULT ''"],
   ["containers", "read_only", "INTEGER NOT NULL DEFAULT 0"],
   ["backup_runs", "dest", "TEXT NOT NULL DEFAULT 'a'"],
@@ -524,8 +528,8 @@ export const sites = {
     return row ? decodeSite(row) : null;
   },
   upsert(
-    input: Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect"> &
-      Partial<Pick<Site, "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect">>,
+    input: Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect" | "www_apex"> &
+      Partial<Pick<Site, "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect" | "www_apex">>,
   ) {
     // Cron jobs change only through setCrons.
     const { crons: _crons, ...s } = input;
@@ -537,12 +541,12 @@ export const sites = {
     state()
       .query(
         `INSERT INTO sites (name, kind, domains, root, routes, ask_url, php_version, tls_cert, tls_key, source, enabled, on_demand_tls, deny_paths, converted_from,
-           suspended_reason, suspended_at, http_redirect, created_at)
+           suspended_reason, suspended_at, http_redirect, www_apex, created_at)
          VALUES ($name, $kind, $domains, $root, $routes, $ask_url, $php_version, $tls_cert, $tls_key, $source, $enabled, $on_demand_tls, $deny_paths, $converted_from,
-           $suspended_reason, $suspended_at, $http_redirect, $created_at)
+           $suspended_reason, $suspended_at, $http_redirect, $www_apex, $created_at)
          ON CONFLICT(name) DO UPDATE SET kind=$kind, domains=$domains, root=$root, routes=$routes, ask_url=$ask_url, php_version=$php_version,
            tls_cert=$tls_cert, tls_key=$tls_key, source=$source, enabled=$enabled, on_demand_tls=$on_demand_tls, deny_paths=$deny_paths, converted_from=$converted_from,
-           suspended_reason=$suspended_reason, suspended_at=$suspended_at, http_redirect=$http_redirect`,
+           suspended_reason=$suspended_reason, suspended_at=$suspended_at, http_redirect=$http_redirect, www_apex=$www_apex`,
       )
       .run({
         ...s,
@@ -553,6 +557,7 @@ export const sites = {
         suspended_reason: suspended ? (s.suspended_reason ?? prev?.suspended_reason ?? "") : "",
         suspended_at: suspended ? (s.suspended_at ?? prev?.suspended_at ?? 0) : 0,
         http_redirect: s.http_redirect ?? prev?.http_redirect ?? 1,
+        www_apex: s.www_apex ?? prev?.www_apex ?? 0,
         created_at: now(),
       } as any);
   },
