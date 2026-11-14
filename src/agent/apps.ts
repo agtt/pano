@@ -22,7 +22,7 @@ import { parsePm2Ref, pm2App, pm2Logs, pm2Reload } from "./pm2.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
-import { ensureDir, exists, randomToken, readText, remove, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
+import { ensureDir, exists, randomToken, readText, remove, removeAs, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
 
 export const appUser = (name: string) => `app-${name}`;
 export const appHome = (name: string) => `${paths.apps}/${name}`;
@@ -192,6 +192,9 @@ export async function teardownUnits(name: string, removeFiles: boolean) {
   }
   await run(["systemctl", "daemon-reload"], { check: false });
   if (removeFiles) {
+    // What the app could write goes first, as the app's user (see removeAs); root then removes only its
+    // own layout (run/, shared/, slot links) and whatever the user could not.
+    for (const d of ["releases", "cache", "data", ".ssh"]) await removeAs(`${appHome(name)}/${d}`, appUser(name));
     await remove(appHome(name));
     await run(["userdel", appUser(name)], { check: false });
   }
@@ -655,7 +658,8 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     for (const p of app.build_isolated ? [] : procs) {
       const d = p.dir ? `${workdir}/${p.dir}` : workdir;
       if (!(await readText(`${d}/package.json`))?.includes('"next"')) continue;
-      await ensureDir(`${home}/cache/next-${p.name || "main"}`, 0o750, user);
+      // cache/ is the app's: created as the app, never chmod'ed by root through a path it can swap.
+      await run(["install", "-d", "-m", "0750", fsPath(`${home}/cache/next-${p.name || "main"}`)], { user });
       await run(["mkdir", "-p", "-m", "0750", fsPath(`${d}/.next`)], { user }); // inside the repo: as the app, never as root
       await run(["ln", "-sfn", fsPath(`${home}/cache/next-${p.name || "main"}`), fsPath(`${d}/.next/cache`)], { user, check: false });
     }
@@ -670,7 +674,7 @@ async function deploy(app: App, id: number, target: DeployTarget) {
       await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true, release: dir });
     }
     // An isolated build's caches go with it; installed packages stay (hard links).
-    if (app.build_isolated) await remove(isolatedCache(dir));
+    if (app.build_isolated) await removeAs(isolatedCache(dir), user);
     if (!app.processes.length && plan.start !== app.start_cmd) {
       target.update({ start_cmd: plan.start });
       app = target.get()!;
@@ -722,11 +726,13 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     if (target.get()?.active_slot !== slot) {
       await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
       // A release that never went live is only disk space.
-      await remove(dir).catch(() => {});
+      await removeAs(dir, user).catch(() => {});
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
     if (!target.quiet) void notify(`🔴 deploy of ${app.name} failed: ${msg.slice(0, 300)}`);
-    if (commit) target.report(app, commit, "failure", msg);
+    // Fixed text only: the error carries build output (it may print env values), and a commit status
+    // is visible to everyone who can see the commit (anyone, on a public repository).
+    if (commit) target.report(app, commit, "failure", `Deploy ${id} failed (log in pano)`);
   }
 }
 
@@ -911,7 +917,8 @@ async function pruneReleases(name: string, keepAlso: string[], keep = 2) {
     const target = r.stdout.trim().split("/").pop();
     if (target) linked.add(target);
   }
-  for (const rel of all.slice(keep)) if (!linked.has(rel)) await remove(`${dir}/${rel}`);
+  // releases/ is the app's: deleted as its user.
+  for (const rel of all.slice(keep)) if (!linked.has(rel)) await removeAs(`${dir}/${rel}`, appUser(name));
 }
 
 export async function readDeployLog(id: number, offset = 0): Promise<{ text: string; offset: number }> {

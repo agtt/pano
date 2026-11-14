@@ -5,11 +5,11 @@
 // before every reload, so a bad change never replaces a working config.
 
 import { readdir } from "node:fs/promises";
-import { env, fsPath, paths } from "../shared/config.ts";
+import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { remoteDomains } from "./remotedb-config.ts";
 import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { cloudflareRanges } from "./cloudflare.ts";
-import { ensureDir, exists, readText, remove, run, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, readRootOwned, readText, remove, run, writeAtomic } from "./sys.ts";
 
 export const EDGE_USER = "pano-edge";
 
@@ -115,12 +115,40 @@ function routeLines(routes: Route[], notFound = false): string[] {
 // php_fastcgi splits into the script x.php and a path info).
 const PHP_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp|ini|log|sh|env|dist|config)$|/composer\.(json|lock)$|/wp-content/uploads/.*\.(php\d?|phtml|phar)(/|$))`;
 
-function phpLines(site: Site): string[] {
-  const out = [`\troot * ${site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${PHP_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404"];
+/**
+ * Where the edge reads site files: a read-only bind of the sites directory mounted nosymfollow
+ * (Linux 5.10+), so a link a site plants (to a TLS key, another site's wp-config.php) is never
+ * followed. Without it (older kernel) the edge reads the real paths and a daily sweep removes links
+ * that lead out of a site (shield.ts).
+ */
+export const EDGE_VIEW = "/srv/pano/edgeview";
+
+/** systemd's unit name for a mount at a path (as `systemd-escape --path --suffix=mount`). */
+export function mountUnitName(path: string): string {
+  const p = path.replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  if (!p) return "-.mount";
+  const esc = [...p].map((c, i) => (c === "/" ? "-" : /[A-Za-z0-9:_]/.test(c) || (c === "." && i > 0) ? c : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`));
+  return `${esc.join("")}.mount`;
+}
+
+export const EDGE_VIEW_UNIT = mountUnitName(EDGE_VIEW);
+
+/** The view's path for a root under the sites directory; null for roots elsewhere (served as they are). */
+export function viewPath(root: string): string | null {
+  return root.startsWith(`${paths.sites}/`) ? EDGE_VIEW + root.slice(paths.sites.length) : null;
+}
+
+function phpLines(site: Site, view: boolean): string[] {
+  const served = view ? viewPath(site.root) : null;
+  const out = [`\troot * ${served ?? site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${PHP_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404"];
   if (site.deny_paths.length) {
     out.push(`\t@pano_deny_dirs path ${site.deny_paths.flatMap((p) => (p === "/" ? ["*"] : [p, `${p}/*`])).join(" ")}`, "\trespond @pano_deny_dirs 404");
   }
-  out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`, ...ASSET_CACHE, "\tfile_server");
+  // Static files and php_fastcgi's file matchers (try_files, index.php) use the root above, the view;
+  // PHP-FPM gets the real paths (SCRIPT_FILENAME, DOCUMENT_ROOT) through the transport's own root.
+  if (served) out.push(`\tphp_fastcgi unix/${phpSocket(site.name)} {`, `\t\troot ${site.root}`, "\t}");
+  else out.push(`\tphp_fastcgi unix/${phpSocket(site.name)}`);
+  out.push(...ASSET_CACHE, "\tfile_server");
   return out;
 }
 
@@ -134,8 +162,10 @@ const ASSET_CACHE = [
 /** A live preview, as the synthetic app the deploy code built (see previewApp), and the app it belongs to. */
 export type EdgePreview = { parent: string; app: App };
 
-export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[]; previews?: EdgePreview[] }): string {
+/** edgeView: the no-symlink view of the sites directory is mounted (see EDGE_VIEW). */
+export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[]; previews?: EdgePreview[]; edgeView?: boolean }): string {
   const { settings: s } = input;
+  const view = !!input.edgeView;
   const out: string[] = [
     "# Managed by pano. Every change here is overwritten; edit through the panel.",
     "{",
@@ -242,9 +272,9 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
       // Caddy adds X-Forwarded-For/-Proto/-Host and keeps the Host header.
       out.push(`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`);
     } else if (site.kind === "static") {
-      out.push(`\troot * ${site.root}`, ...ASSET_CACHE, "\tfile_server");
+      out.push(`\troot * ${(view && viewPath(site.root)) || site.root}`, ...ASSET_CACHE, "\tfile_server");
     } else if (site.kind === "php") {
-      out.push(...phpLines(site));
+      out.push(...phpLines(site, view));
     } else {
       out.push(...routeLines(site.routes));
     }
@@ -261,9 +291,10 @@ async function syncCerts(): Promise<Set<string>> {
     .filter((s) => s.enabled && s.tls_cert && s.tls_key)
     .map((s) => ({ id: `site-${s.name}`, cert: s.tls_cert, key: s.tls_key }));
   for (const w of want) {
-    const cert = await readText(w.cert);
-    const key = await readText(w.key);
-    // Only PEM goes to the edge: a path that now leads to some other file (symlink) is skipped.
+    // Only files root put there (owner of the file, every directory and link on the way), so a path under a
+    // tenant's home can never be pointed at another key; and only PEM goes to the edge.
+    const cert = await readRootOwned(w.cert);
+    const key = await readRootOwned(w.key);
     if (!cert?.includes("-----BEGIN CERTIFICATE-----") || !key || !/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key)) continue;
     await ensureDir(certDir(w.id), 0o750);
     await writeAtomic(`${certDir(w.id)}/cert.pem`, cert, 0o640);
@@ -281,7 +312,24 @@ export async function buildCaddyfile(): Promise<string> {
     const parent = appStore.get(pv.app);
     return parent ? [{ parent: parent.name, app: previewApp(parent, pv) }] : [];
   });
-  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned, previews });
+  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned, previews, edgeView: await edgeViewMounted() });
+}
+
+/**
+ * The view is mounted, read-only and nosymfollow, as the host sees it (the agent's own mount namespace
+ * gets it by propagation too). Checked on the mount itself: an old libmount may accept the option and
+ * silently drop it. `pid`: the view as that process sees it (the running edge, in its own namespace).
+ */
+export async function edgeViewMounted(pid = "1"): Promise<boolean> {
+  const info = (await readText(`/proc/${pid}/mountinfo`)) ?? (pid === "1" ? await readText("/proc/self/mountinfo") : null) ?? "";
+  // Fields: id parent major:minor root mount-point options ...; the last mount on a point is the visible one.
+  const opts = info
+    .split("\n")
+    .map((l) => l.split(" "))
+    .filter((f) => f[4] === EDGE_VIEW)
+    .at(-1)?.[5]
+    ?.split(",") ?? [];
+  return opts.includes("ro") && opts.includes("nosymfollow");
 }
 
 export async function edgeInstalled() {
@@ -357,11 +405,13 @@ export async function installCaddy(version?: string): Promise<string> {
   return ver;
 }
 
-export const EDGE_UNIT = `[Unit]
+/** The edge's unit; with the view it needs the mount and cannot see the real sites directory at all. */
+export function edgeUnit(view: boolean): string {
+  return `[Unit]
 Description=pano edge (Caddy)
-After=network-online.target
+After=network-online.target${view ? ` ${EDGE_VIEW_UNIT}` : ""}
 Wants=network-online.target
-
+${view ? `Requires=${EDGE_VIEW_UNIT}\n` : ""}
 [Service]
 Type=notify
 User=${EDGE_USER}
@@ -394,15 +444,45 @@ ProtectClock=true
 ProtectKernelLogs=true
 ProtectHostname=true
 ReadWritePaths=${paths.edgeData} ${paths.accessLogs}
-LimitNOFILE=1048576
+${view ? `InaccessiblePaths=-${paths.sites}\n` : ""}LimitNOFILE=1048576
 TimeoutStopSec=30s
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 `;
+}
 
-export async function setupEdgeUnit() {
+/** Read-only bind of the sites directory on which no symlink is followed (see EDGE_VIEW). */
+export const VIEW_MOUNT = `[Unit]
+Description=pano: site files for the edge (read-only, symlinks not followed)
+RequiresMountsFor=${paths.sites}
+
+[Mount]
+What=${paths.sites}
+Where=${EDGE_VIEW}
+Type=none
+Options=bind,ro,nosymfollow
+DirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+/**
+ * Mounts the view and checks the kernel really applied nosymfollow. When it did not (Linux before
+ * 5.10, or a mount that drops the option), the mount is left off and the edge reads the real paths.
+ */
+async function ensureEdgeView(): Promise<boolean> {
+  await ensureDir(paths.sites, 0o755);
+  await writeAtomic(`${paths.systemd}/${EDGE_VIEW_UNIT}`, VIEW_MOUNT, 0o644);
+  await run(["systemctl", "daemon-reload"]);
+  await run(["systemctl", "enable", "--now", EDGE_VIEW_UNIT], { check: false });
+  return edgeViewMounted();
+}
+
+/** Edge user, directories, the view and the unit; idempotent. True when the edge reads sites through the view. */
+export async function setupEdgeUnit(): Promise<boolean> {
   await ensureUser(EDGE_USER, paths.edgeData);
   await ensureDir(paths.edgeData, 0o700, EDGE_USER);
   await ensureDir(paths.logs, 0o711);
@@ -410,8 +490,29 @@ export async function setupEdgeUnit() {
   await run(["chown", "-R", `${EDGE_USER}:${EDGE_USER}`, fsPath(paths.accessLogs), fsPath(paths.edgeData)], { check: false });
   await ensureDir(paths.certs, 0o750);
   await run(["chgrp", EDGE_USER, fsPath(paths.certs)], { check: false });
-  await writeAtomic(`${paths.systemd}/pano-edge.service`, EDGE_UNIT, 0o644);
+  const view = await ensureEdgeView();
+  await writeAtomic(`${paths.systemd}/pano-edge.service`, edgeUnit(view), 0o644);
   await run(["systemctl", "daemon-reload"]);
+  // Off only once the edge no longer requires it (stopping a required unit stops the edge too).
+  if (!view) await run(["systemctl", "disable", "--now", EDGE_VIEW_UNIT], { check: false });
+  return view;
+}
+
+/**
+ * At agent start and daily (shield.ts): brings existing installs onto the view, and back to the real
+ * paths if the view is gone (a kernel that cannot nosymfollow after a reboot: the edge, which requires
+ * the mount, would not start). The edge restarts only when its unit changed.
+ */
+export async function refreshEdgeView(): Promise<boolean> {
+  if (DRY_RUN || !(await edgeInstalled())) return false;
+  const before = await readText(`${paths.systemd}/pano-edge.service`);
+  const view = await setupEdgeUnit();
+  // Paths first, so the restarted edge starts on a config that matches its unit.
+  await applyEdge().catch((e) => console.error(`[agent] edge view: ${e instanceof Error ? e.message : e}`));
+  if (before !== edgeUnit(view) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
+    await run(["systemctl", "restart", "pano-edge"], { check: false });
+  }
+  return view;
 }
 
 export async function ensureUser(user: string, home: string) {

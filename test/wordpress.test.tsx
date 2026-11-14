@@ -28,6 +28,20 @@ test("wp-cli argv: site PHP, phar, arguments, then globals; no secrets on it", (
   expect(wpEnv("8.3", "/srv/pano/sites/a.com").HOME).toBe("/srv/pano/sites/a.com/tmp");
 });
 
+test("wp-cli runs under the site's php.ini: open_basedir and no processes, except for core download", () => {
+  const argv = wpCommand("8.3", "/srv/pano/sites/a.com", ["core", "version"]);
+  expect(argv.slice(1, 3)).toEqual(["-c", "/etc/pano/php/a.com/php.ini"]);
+  expect(argv).toContain(`open_basedir=/srv/pano/sites/a.com/:${WP_PHAR}`);
+  expect(argv.some((a) => a.startsWith("disable_functions="))).toBe(false); // the ini's list applies
+  const dl = wpCommand("8.3", "/srv/pano/sites/a.com", ["core", "download"], { launch: true });
+  const df = dl.find((a) => a.startsWith("disable_functions="))!;
+  expect(df).toContain("shell_exec");
+  expect(df.split("=")[1]!.split(",")).not.toContain("proc_open");
+  // wp-cli's own config and packages never come from the site's tmp/.
+  expect(wpEnv("8.3", "/srv/pano/sites/a.com").WP_CLI_CONFIG_PATH).toBe("/dev/null");
+  expect(wpEnv("8.3", "/srv/pano/sites/a.com").WP_CLI_PACKAGES_DIR).not.toContain("/srv/pano/sites/");
+});
+
 test("passwords go in a wp-cli config file, quoted", () => {
   expect(secretsYaml({ "core install": { admin_password: 'p"w' }, "user update": { user_pass: "x" } })).toBe(
     'core install:\n  admin_password: "p\\"w"\nuser update:\n  user_pass: "x"\n',

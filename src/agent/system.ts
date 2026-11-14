@@ -5,7 +5,7 @@
 import { cpus, hostname, loadavg, totalmem, uptime } from "node:os";
 import { env } from "../shared/config.ts";
 import { destIds } from "./backup.ts";
-import { edgeActive } from "./edge.ts";
+import { EDGE_VIEW, EDGE_VIEW_UNIT, edgeActive, edgeInstalled, edgeViewMounted } from "./edge.ts";
 import { kitState } from "./recovery.ts";
 import { bindAddress } from "./mysql.ts";
 import { PHP_EOL } from "../shared/validate.ts";
@@ -164,6 +164,22 @@ export async function audit(): Promise<Finding[]> {
 
   // Edge
   if (!edgeUp) f.push({ id: "edge", level: "fail", title: "Edge is down", detail: "Sites are unreachable.", fix: "systemctl restart pano-edge; journalctl -u pano-edge -n 50" });
+  // Edge and symlinks in PHP sites (edge.ts EDGE_VIEW)
+  if (sites.list().some((s) => s.kind === "php") && (await edgeInstalled())) {
+    // As the host sees it and, when the edge runs, inside the edge's own mount namespace.
+    const pid = (await showUnits(["pano-edge.service"], ["MainPID"])).get("pano-edge.service")?.MainPID ?? "0";
+    f.push(
+      (await edgeViewMounted()) && (!/^[1-9]\d*$/.test(pid) || (await edgeViewMounted(pid)))
+        ? { id: "edge-links", level: "ok", title: "The edge never follows symlinks in site files", detail: `Sites are served from a read-only, nosymfollow view (${EDGE_VIEW}).` }
+        : {
+            id: "edge-links",
+            level: "warn",
+            title: "The edge can follow symlinks that sites create",
+            detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and a mount/util-linux that knows the option). A site could link to another site's files or a TLS key and fetch them over HTTP; links that lead out of a site are removed once a day, which only narrows that window.`,
+            fix: `Upgrade to a distribution with Linux 5.10+ (Debian 12, Ubuntu 22.04, AlmaLinux/Rocky 9) and reboot; pano switches over by itself (check: systemctl status ${EDGE_VIEW_UNIT}).`,
+          },
+    );
+  }
 
   if (kit) {
     f.push(

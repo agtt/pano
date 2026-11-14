@@ -11,7 +11,7 @@ import { fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { createDatabase, listDatabases } from "./mysql.ts";
-import { fixPermissions, phpCli, phpSandbox, siteHome, siteUser } from "./php.ts";
+import { DISABLED_FUNCTIONS, confDir, fixPermissions, phpCli, phpSandbox, siteHome, siteUser } from "./php.ts";
 import { audit, settings, sites, type Site } from "./state.ts";
 import { currentOs, mysqlSocketFor } from "./php-os.ts";
 import { ensureDir, exists, randomPassword, randomToken, readText, remove, run, writeAtomic } from "./sys.ts";
@@ -97,11 +97,22 @@ export function parseAdmins(out: string): WpAdmin[] {
 /** `maintenance-mode status` prints "Maintenance mode is active." / "... is not active." */
 export const parseMaintenance = (out: string) => /is active/i.test(out) && !/not active/i.test(out);
 
-/** wp-cli argv: the site's PHP, the phar, then the arguments and the globals. */
-export function wpCommand(ver: string, home: string, args: string[]): string[] {
+/**
+ * wp-cli argv: the site's PHP, the phar, then the arguments and the globals. wp-cli runs the site's
+ * code (wp-config.php, wp-cli.yml), so it gets the site's own php.ini like its PHP-FPM: open_basedir
+ * (no symlink() to pano's keys or another site) and disable_functions. The CLI's conf.d still loads the
+ * extensions. Only the phar is added to open_basedir. `launch`: wp-cli may start processes (proc_open);
+ * only `core download` needs it (it unpacks with tar), and only on an empty site.
+ */
+export function wpCommand(ver: string, home: string, args: string[], o: { launch?: boolean } = {}): string[] {
+  const name = home.slice(home.lastIndexOf("/") + 1);
   return [
     phpCli(ver),
+    "-c", `${confDir(name)}/php.ini`,
+    "-d", `open_basedir=${home}/:${WP_PHAR}`,
+    ...(o.launch ? ["-d", `disable_functions=${DISABLED_FUNCTIONS.filter((f) => f !== "proc_open").join(",")}`] : []),
     "-d", "memory_limit=512M",
+    "-d", "max_execution_time=0",
     "-d", "display_errors=0",
     "-d", `sys_temp_dir=${home}/tmp`,
     "-d", `mysqli.default_socket=${mysqlSocket()}`,
@@ -121,6 +132,10 @@ export const wpEnv = (ver: string, home: string): Record<string, string> => ({
   WP_CLI_CACHE_DIR: `${home}/tmp/wp-cli-cache`,
   WP_CLI_PHP: phpCli(ver),
   WP_CLI_DISABLE_AUTO_CHECK_UPDATE: "1",
+  // Not the defaults under HOME (the site's tmp/): a config there can `require:` PHP files and a packages
+  // dir is autoloaded, which would run before any check. wp() points the config at its own file when it has one.
+  WP_CLI_CONFIG_PATH: "/dev/null",
+  WP_CLI_PACKAGES_DIR: `${paths.bin}/wp-cli-packages`,
 });
 
 /** wp-cli config file with per-command defaults: how a password reaches wp-cli without argv. */
@@ -208,7 +223,7 @@ function phpSite(name: unknown): Site {
   return site;
 }
 
-type WpOpts = { secrets?: Record<string, Record<string, string>>; timeoutMs?: number; check?: boolean };
+type WpOpts = { secrets?: Record<string, Record<string, string>>; timeoutMs?: number; check?: boolean; launch?: boolean };
 
 /**
  * wp-cli loads the site's own code (wp-config.php, plugins), so it runs in the same sandbox as the
@@ -236,7 +251,7 @@ async function wp(site: Site, args: string[], o: WpOpts = {}) {
     env.WP_CLI_CONFIG_PATH = conf;
   }
   try {
-    return await run(wpSandboxed(site.name, user, home, env, wpCommand(site.php_version, home, args)), { timeoutMs: o.timeoutMs ?? 300_000, check: o.check });
+    return await run(wpSandboxed(site.name, user, home, env, wpCommand(site.php_version, home, args, { launch: o.launch })), { timeoutMs: o.timeoutMs ?? 300_000, check: o.check });
   } finally {
     if (conf) await remove(conf);
   }
@@ -315,7 +330,8 @@ export async function install(input: Record<string, unknown>, actor: string) {
   const url = `https://${domain}`;
 
   try {
-    await wp(site, ["core", "download", "--force"], { timeoutMs: 600_000 });
+    // The site was checked empty just above, so no site code is there to use the processes wp-cli may start.
+    await wp(site, ["core", "download", "--force"], { timeoutMs: 600_000, launch: true });
     await wp(site, ["config", "create", `--dbname=${db.name}`, `--dbuser=${db.user}`, "--dbhost=localhost"], { secrets: { "config create": { dbpass: db.password } } });
     await wp(site, ["core", "install", `--url=${url}`, `--title=${title}`, `--admin_user=${adminUser}`, `--admin_email=${adminEmail}`, "--skip-email"], {
       secrets: { "core install": { admin_password: adminPassword } },

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cp } from "node:fs/promises";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { apply, scan } from "../src/agent/importer.ts";
 import { sites } from "../src/agent/state.ts";
@@ -28,4 +28,15 @@ test("imports a CyberPanel/OpenLiteSpeed layout into sites", async () => {
 
   await apply({ sites: ["blog.example.org", "shop.example"], apps: [] }, "test");
   expect(sites.list().map((s) => s.name)).toEqual(["blog.example.org", "shop.example"]);
+});
+
+test("a malformed domain in the OpenLiteSpeed config never reaches pano's state", async () => {
+  const conf = join(process.env.PANO_ROOT!, "usr/local/lsws/conf/httpd_config.conf");
+  const text = await readFile(conf, "utf8");
+  await writeFile(conf, text.replace("blog.example.org blog.example.org", "blog.example.org blog.example.org, evil.example}{import x"));
+  const plan = await scan();
+  const blog = plan.sites.find((s) => s.name === "blog.example.org")!;
+  expect(blog.domains).toEqual(["blog.example.org"]);
+  expect(plan.warnings.some((w) => w.includes("skipped the domain"))).toBe(true);
+  await writeFile(conf, text);
 });

@@ -6,7 +6,7 @@
 // a site needs that version, and pm=ondemand keeps an idle site at one small
 // process: nothing PHP runs on the server unless a PHP site exists.
 
-import { readdir, readlink, realpath, rename, unlink } from "node:fs/promises";
+import { readdir, readlink, realpath, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { DEFAULT_PHP, PHP_VERSIONS, v } from "../shared/validate.ts";
@@ -159,6 +159,12 @@ export async function uninstallPhp(ver: string, actor: string) {
 
 // ---- configuration -------------------------------------------------------------
 
+/** No processes, no privilege calls: for the site's PHP-FPM and for wp-cli running the site's code. */
+export const DISABLED_FUNCTIONS = [
+  "exec", "passthru", "shell_exec", "system", "proc_open", "popen", "pcntl_exec", "pcntl_fork", "dl", "show_source",
+  "posix_kill", "posix_setuid", "posix_setgid", "posix_setsid", "posix_mkfifo",
+];
+
 export function renderPhpIni(name: string): string {
   const home = siteHome(name);
   return `; Managed by pano. Per-site overrides: .user.ini in the site (system settings below cannot be loosened there).
@@ -182,7 +188,7 @@ open_basedir = ${home}/
 allow_url_fopen = On
 allow_url_include = Off
 enable_dl = Off
-disable_functions = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,pcntl_fork,dl,show_source,posix_kill,posix_setuid,posix_setgid,posix_setsid,posix_mkfifo
+disable_functions = ${DISABLED_FUNCTIONS.join(",")}
 cgi.fix_pathinfo = 0
 default_charset = "UTF-8"
 date.timezone = UTC
@@ -344,27 +350,41 @@ async function provision(name: string, ver: string) {
 /** The edge serves static files itself: it may enter the site dir and read public/, including files PHP creates later. */
 async function edgeAccess(name: string) {
   const home = fsPath(siteHome(name));
+  const user = siteUser(name);
+  // The home is root's (root:<user> 0750, the site cannot swap it): set by root.
   await run(["setfacl", "-m", `u:${EDGE_USER}:x`, home]);
-  await run(["setfacl", "-P", "-R", "-m", `u:${EDGE_USER}:rX`, `${home}/public`]);
-  await run(["find", `${home}/public`, "-type", "d", "-exec", "setfacl", "-d", "-m", `u:${EDGE_USER}:rX`, "{}", "+"]);
+  // public/ and below are the site's: set as the site's user (an owner may set ACLs on its own files), so a
+  // directory swapped for a link meanwhile only ever leads to what that user owns anyway. Nothing followed.
+  await run(["setfacl", "-P", "-R", "-m", `u:${EDGE_USER}:rX`, `${home}/public`], { user, check: false });
+  await run(["find", "-P", `${home}/public`, "-type", "d", "-exec", "setfacl", "-P", "-d", "-m", `u:${EDGE_USER}:rX`, "{}", "+"], { user, check: false });
 }
 
 /**
- * Owner, modes and ACLs after files were copied in. Symlinks that lead outside
- * the site are removed (they would expose other files to PHP or the edge).
+ * Removes symlinks that lead outside the site (another site, pano's keys: PHP or, on a kernel without
+ * the edge's no-symlink view, the edge would follow them). Listed and deleted as the site's user, never
+ * unlinked by root: the site may swap a directory for a link meanwhile, and then removes only its own
+ * files. Root only resolves the links to decide. Returns what was removed.
  */
+export async function removeOutsideLinks(name: string): Promise<string[]> {
+  const home = fsPath(siteHome(name));
+  const user = siteUser(name);
+  const base = await realpath(home);
+  const found = await run(["find", "-P", home, "-type", "l", "-print0"], { user, check: false, timeoutMs: 600_000 });
+  const outside: string[] = [];
+  for (const link of found.stdout.split("\0").filter(Boolean)) {
+    const target = await realpath(link).catch(() => "");
+    if (target !== base && !target.startsWith(base + "/")) outside.push(link);
+  }
+  // rm -f without -r: a path swapped for a directory meanwhile is left alone.
+  for (let i = 0; i < outside.length; i += 200) await run(["rm", "-f", "--", ...outside.slice(i, i + 200)], { user, check: false });
+  return outside.map((l) => `removed symlink ${l.slice(home.length)} (pointed outside the site)`);
+}
+
+/** Owner, modes and ACLs after files were copied in; symlinks leading outside the site are removed. */
 export async function fixPermissions(name: string): Promise<string[]> {
   const home = siteHome(name);
   const user = siteUser(name);
-  const warnings: string[] = [];
-  const links = await run(["find", fsPath(home), "-type", "l"], { check: false });
-  const base = await realpath(fsPath(home));
-  for (const link of links.stdout.split("\n").filter(Boolean)) {
-    const target = await realpath(link).catch(() => "");
-    if (target === base || target.startsWith(base + "/")) continue;
-    await unlink(link);
-    warnings.push(`removed symlink ${link.slice(fsPath(home).length)} (pointed outside the site)`);
-  }
+  // -R does not follow links (and works fd-relative); -h changes a link itself, never what it points at.
   await run(["chown", "-R", "--no-dereference", `${user}:${user}`, fsPath(home)]);
   // As the site's user: the site's PHP may run meanwhile and swap a path for a link, and then chmod
   // reaches only what that user owns anyway.
@@ -373,6 +393,8 @@ export async function fixPermissions(name: string): Promise<string[]> {
   // find never follows a symlinked start point: no chmod of whatever such a link points at.
   await run(["find", ...["tmp", "sessions", "logs"].map((d) => fsPath(`${home}/${d}`)), "-maxdepth", "0", "-type", "d", "-exec", "chmod", "0700", "{}", "+"], { user, check: false });
   await run(["chown", "-h", `root:${user}`, fsPath(home)]);
+  // After the chmods: the site's user can now list every directory it searches.
+  const warnings = await removeOutsideLinks(name);
   await edgeAccess(name);
   return warnings;
 }

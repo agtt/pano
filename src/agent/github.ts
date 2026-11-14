@@ -144,8 +144,10 @@ export async function reportStatus(app: App, sha: string, state: "pending" | "su
   const r = parseRepo(app.repo);
   if (!r || !/^[0-9a-f]{40}$/.test(sha) || !(await status()).connected) return;
   const target = (app.domains ?? [])[0];
+  // A failure never carries its error (build output can print secrets; statuses are public on public repos).
+  const text = state === "failure" ? (description.match(/^Deploy \d+ failed/)?.[0] ?? "Deploy failed") : description;
   await gh(`/repos/${r.owner}/${r.repo}/statuses/${sha}`, {
     method: "POST",
-    body: { state, context: as.context, description: description.slice(0, 140), ...(target && state === "success" ? { target_url: `https://${target}` } : {}) },
+    body: { state, context: as.context, description: text.slice(0, 140), ...(target && state === "success" ? { target_url: `https://${target}` } : {}) },
   }).catch(() => {});
 }

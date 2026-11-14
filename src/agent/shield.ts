@@ -9,14 +9,16 @@
 //      (works behind Cloudflare too, the edge sees the real visitor address).
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, realpath, rename, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { basename, dirname } from "node:path";
-import { fsPath, paths } from "../shared/config.ts";
+import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
-import { applyEdge, edgeSettings } from "./edge.ts";
+import { applyEdge, edgeInstalled, edgeSettings, refreshEdgeView } from "./edge.ts";
+import { appUser } from "./apps.ts";
+import { removeOutsideLinks, siteUser } from "./php.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
-import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, readAs, readText, remove, run, userName, writeAtomic } from "./sys.ts";
 
 // ---- settings ----------------------------------------------------------------------
 
@@ -184,32 +186,59 @@ const finding = (id: number) => {
  * The file's path with its directory resolved, refused unless that directory really is inside a
  * scan root: a site user can swap a directory for a symlink to make root move files elsewhere.
  */
-async function underRoots(p: string): Promise<string> {
+async function underRoots(p: string): Promise<{ real: string; root: string }> {
   const dir = await realpath(fsPath(dirname(p))).catch(() => null);
   if (dir) {
     for (const r of scanRoots()) {
       const base = await realpath(fsPath(r)).catch(() => null);
-      if (base && (dir === base || dir.startsWith(`${base}/`))) return `${dir}/${basename(p)}`;
+      if (base && (dir === base || dir.startsWith(`${base}/`))) return { real: `${dir}/${basename(p)}`, root: r };
     }
   }
   throw new Error("path is outside the site and app directories");
+}
+
+/**
+ * Who works on files under a scan root: the tenant who can write there (a PHP site's or an app's user,
+ * else whoever owns the root itself; "" = root, for a root that is root's). Taken from the root, never
+ * from the file's directory at the time of the move, which the tenant could have swapped by then. Moves
+ * into and out of the tree run as this user, so a directory swapped for a link meanwhile only ever leads
+ * to what they could change anyway.
+ */
+async function rootOwner(root: string): Promise<string> {
+  const site = sites.list().find((s) => s.root === root && s.kind === "php");
+  if (site) return siteUser(site.name);
+  const app = apps.list().find((a) => a.kind === "managed" && `${paths.apps}/${a.name}/data` === root);
+  if (app) return appUser(app.name);
+  const st = await lstat(fsPath(root));
+  if (st.uid === 0) return "";
+  const user = await userName(st.uid);
+  if (!user) throw new Error(`no user with uid ${st.uid} owns ${root}`);
+  return user;
 }
 
 /** Moves the file out of the site (root-only, original owner and mode remembered); reversible. */
 export async function quarantine(id: number, actor: string) {
   const f = finding(id);
   if (f.status === "quarantined") return;
-  const real = await underRoots(f.path);
+  const { real, root } = await underRoots(f.path);
   const st = await lstat(real);
   if (!st.isFile()) throw new Error("not a regular file");
+  const user = await rootOwner(root);
+  // Read and deleted as the tree's user (root never moves it by path): a copy into root's
+  // quarantine, then the original goes. The copy must be the file the scan flagged.
+  const buf = await readAs(real, user);
+  const sha = createHash("sha256").update(buf).digest("hex");
+  if (f.sha256 && sha !== f.sha256) throw new Error("the file changed since the scan; scan again");
   const dir = `${paths.data}/quarantine`;
   await ensureDir(dir, 0o700);
-  const target = `${dir}/${f.id}-${f.sha256.slice(0, 16)}`;
-  await rename(real, fsPath(target)).catch(async () => {
-    await run(["mv", "--", real, fsPath(target)]);
-  });
-  await run(["chown", "root:root", fsPath(target)]);
-  await run(["chmod", "600", fsPath(target)]);
+  const target = `${dir}/${f.id}-${sha.slice(0, 16)}`;
+  await writeAtomic(target, buf, 0o600);
+  try {
+    await run(["rm", "-f", "--", real], { user: user || undefined });
+  } catch (e) {
+    await remove(target);
+    throw e;
+  }
   // Every finding of the same file follows it.
   state()
     .query("UPDATE shield_findings SET status = 'quarantined', quarantine = ?, owner = ? WHERE path = ?")
@@ -220,17 +249,20 @@ export async function quarantine(id: number, actor: string) {
 export async function restore(id: number, actor: string) {
   const f = finding(id);
   if (f.status !== "quarantined" || !f.quarantine) throw new Error("not in quarantine");
-  const real = await underRoots(f.path);
+  const { real, root } = await underRoots(f.path);
   if (await lstat(real).catch(() => null)) throw new Error("a file with that name exists again; remove it first");
   const [uid, gid, mode] = f.owner.split(":");
-  if (!/^\d+$/.test(uid ?? "") || !/^\d+$/.test(gid ?? "")) throw new Error("unknown original owner");
   // Never give back setuid/setgid/sticky bits, whatever the file had.
   const perm = (/^[0-7]{1,4}$/.test(mode ?? "") ? Number.parseInt(mode!, 8) : 0o644) & 0o777;
-  // Owner and mode set while the file is still in the root-only quarantine: done on the restored path,
-  // the site user could swap it for a link first and have root chmod another file. mv keeps both.
-  await run(["chown", "-h", `${uid}:${gid}`, fsPath(f.quarantine)]);
-  await run(["chmod", perm.toString(8), fsPath(f.quarantine)]);
-  await run(["mv", "-n", "--", fsPath(f.quarantine), real]);
+  // Written as the tree's user (who then owns the file, as it did before), never by root on a path the
+  // site controls: dd's conv=excl creates it with O_EXCL, which neither replaces a file nor follows a link.
+  const user = await rootOwner(root);
+  const as = { user: user || undefined };
+  await run(["dd", `of=${real}`, "conv=excl", "status=none"], { ...as, inputFile: fsPath(f.quarantine) });
+  await run(["chmod", perm.toString(8), "--", real], as);
+  // A root-owned tree (no tenant can swap it): root gives the file its old owner back.
+  if (!user && /^\d+$/.test(uid ?? "") && /^\d+$/.test(gid ?? "")) await run(["chown", "-h", `${uid}:${gid}`, real]);
+  await remove(f.quarantine);
   state().query("UPDATE shield_findings SET status = 'ignored', quarantine = '' WHERE path = ?").run(f.path);
   audit(actor, "shield.restore", { path: f.path });
 }
@@ -517,12 +549,37 @@ export async function shieldStatus() {
   };
 }
 
-/** Every minute: login brute force. Hourly: changed files. Weekly: full scan. Daily: reputation lists. */
+// ---- symlinks out of sites ---------------------------------------------------------------
+
+/**
+ * The edge reads PHP sites through its no-symlink view (edge.ts EDGE_VIEW); this also brings existing
+ * installs onto it. Where the kernel cannot do that (before Linux 5.10), the edge would follow a link a site
+ * plants to a TLS key or another site's files, so links leading out of a site are removed instead (as the
+ * site's user, see removeOutsideLinks). A stopgap: a link lives until the next sweep.
+ */
+export async function guardSiteLinks() {
+  settings.set("shield.linkGuard", String(Date.now()));
+  if (DRY_RUN || (await refreshEdgeView()) || !(await edgeInstalled())) return;
+  const removed: string[] = [];
+  for (const s of sites.list().filter((x) => x.kind === "php")) {
+    const gone = await removeOutsideLinks(s.name).catch((e) => {
+      console.error(`[agent] link sweep ${s.name}: ${e}`);
+      return [] as string[];
+    });
+    removed.push(...gone.map((w) => `${s.name}: ${w}`));
+  }
+  if (removed.length) await notify(`🔗 shield: ${removed.length} symlinks leading out of sites removed (this kernel cannot keep the edge from following them)\n${removed.slice(0, 8).join("\n")}`);
+}
+
+/** Every minute: login brute force. Hourly: changed files. Weekly: full scan. Daily: reputation lists, site links. */
 export function startShield() {
   void primeOffsets();
+  void guardSiteLinks().catch((e) => console.error(`[agent] site links: ${e}`));
   setInterval(async () => {
     const s = shieldSettings();
     try {
+      // Not awaited: a sweep of large sites must not hold up the login check. It stamps its start, so it never overlaps.
+      if (Date.now() - Number(settings.get("shield.linkGuard") ?? 0) > 86400_000) void guardSiteLinks().catch((e) => console.error(`[agent] site links: ${e}`));
       if (s.bruteforce) await checkLogins();
       const last = scanState().last?.at ?? 0;
       const lastFull = Number(settings.get("shield.lastFull") ?? 0);

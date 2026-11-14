@@ -3,6 +3,7 @@
 // own state. Nothing CyberPanel owns is modified until the separate cutover.
 
 import { paths } from "../shared/config.ts";
+import { v } from "../shared/validate.ts";
 import { readServerConfig, readVhost, type OlsVhost } from "./ols.ts";
 import { apps, audit, sites, type App, type Route, type Site } from "./state.ts";
 import { pm2List, pm2Ref } from "./pm2.ts";
@@ -18,6 +19,15 @@ export type ImportPlan = {
 };
 
 const OLS_CONF = `${paths.ols}/conf/httpd_config.conf`;
+
+/** The validator's result, or "" when it rejects the value. */
+const attempt = (f: () => string) => {
+  try {
+    return f();
+  } catch {
+    return "";
+  }
+};
 
 function upstreamOf(address: string): string | null {
   const m = address.replace(/^https?:\/\//, "").match(/^(127\.0\.0\.1|localhost|\[::1\]):(\d+)$/);
@@ -121,19 +131,33 @@ export async function scan(): Promise<ImportPlan> {
     const mapped = new Set<string>();
     for (const l of server.listeners) for (const m of l.maps) if (m.vhost === ref.name) m.domains.forEach((d) => mapped.add(d.toLowerCase()));
     if (!mapped.size) [vh.domain, ...vh.aliases].forEach((d) => d && mapped.add(d.toLowerCase()));
-    const domains = [...mapped];
+    // Everything below lands in pano's state and the edge's config: only well-formed values.
+    const domains: string[] = [];
+    for (const d of mapped) {
+      const clean = d === "*" ? d : attempt(() => v.domain(d));
+      if (!clean) warnings.push(`${ref.name}: skipped the domain "${d.slice(0, 80)}" (not a valid host name)`);
+      else if (!domains.includes(clean)) domains.push(clean);
+    }
+    const name = attempt(() => v.siteName(ref.name.replace(/[^a-z0-9.-]/gi, "-").toLowerCase()));
+    if (!name || !domains.length) {
+      warnings.push(`${ref.name}: skipped (${domains.length ? "unusable name" : "no valid domain"})`);
+      continue;
+    }
     const { kind, routes, php } = classify(vh);
     const wpConfig = kind === "legacy" ? await readText(`${vh.docRoot}/wp-config.php`) : null;
+    // Certificate files: an absolute path or none. syncCerts (edge.ts) copies them only when root owns
+    // the files and every directory on the way (sys.ts readRootOwned).
+    const pem = (p: string | undefined) => (p && /^\/[^\0\n\r]{1,1024}$/.test(p) ? p : "");
     const site: ImportSite = {
-      name: ref.name.replace(/[^a-z0-9.-]/gi, "-").toLowerCase(),
+      name,
       kind,
       domains,
       root: vh.docRoot,
       routes,
       ask_url: "",
       php_version: php,
-      tls_cert: vh.ssl?.certFile ?? "",
-      tls_key: vh.ssl?.keyFile ?? "",
+      tls_cert: pem(vh.ssl?.certFile),
+      tls_key: pem(vh.ssl?.keyFile),
       source: "cyberpanel",
       enabled: suspended.has(ref.name) ? 0 : 1,
       on_demand_tls: domains.includes("*") ? 1 : 0,

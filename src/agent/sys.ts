@@ -3,7 +3,7 @@
 // build/start commands, and that runs as the app's unprivileged user.
 
 import { constants } from "node:fs";
-import { chmod, lchown, lstat, mkdir, open, readFile, rename, rm, stat, statfs } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, rm, stat, statfs } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DRY_RUN, fsPath } from "../shared/config.ts";
 
@@ -108,15 +108,41 @@ export async function readText(abs: string): Promise<string | null> {
   }
 }
 
+/**
+ * Root-owned directories only: inside a tree a tenant can write, create directories as that user
+ * (run(["mkdir", ...], { user })), since the parents on the way can be swapped for links.
+ */
 export async function ensureDir(abs: string, mode = 0o755, owner?: string) {
   const real = fsPath(abs);
   // mkdir's mode is filtered by the umask (0027 for the agent); fix every directory it created.
   const first = await mkdir(real, { recursive: true, mode });
-  // chmod/chown follow symlinks: a user who owns the parent could point this at /etc.
-  await notSymlink(real);
-  if (first) for (let d = real; d.length >= first.length; d = dirname(d)) await chmod(d, mode);
-  await chmod(real, mode);
-  if (owner) await chownTo(abs, owner);
+  if (first) for (let d = dirname(real); d.length >= first.length; d = dirname(d)) await setDir(d, mode);
+  await setDir(real, mode, owner);
+}
+
+/**
+ * chmod/chown through a descriptor opened without following a link: a user who owns the parent
+ * could otherwise swap the directory for a symlink to /etc between a check and the change.
+ */
+async function setDir(real: string, mode: number, owner?: string) {
+  let fh;
+  try {
+    fh = await open(real, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "ENOTDIR") throw new Error(`${real} is a symlink or not a directory, refusing`);
+    throw e;
+  }
+  try {
+    await fh.chmod(mode);
+    if (owner && !DRY_RUN && process.getuid?.() === 0) {
+      const ids = await lookupUser(owner);
+      if (!ids) throw new Error(`unknown user ${owner}`);
+      await fh.chown(ids.uid, ids.gid);
+    }
+  } finally {
+    await fh.close();
+  }
 }
 
 async function notSymlink(real: string) {
@@ -150,8 +176,34 @@ export async function writeAtomic(abs: string, content: string | Uint8Array, mod
   await rename(tmp, real);
 }
 
+/** Root-owned paths only; a tree its user can write goes through removeAs. */
 export async function remove(abs: string) {
   await rm(fsPath(abs), { recursive: true, force: true });
+}
+
+/**
+ * Deletes a tree a system user can write, as that user: whatever they swap in there meanwhile
+ * (a directory for a link to /etc), the delete only reaches what that user may remove anyway.
+ * Best effort, like remove: what the user cannot delete stays.
+ */
+export async function removeAs(abs: string, user: string) {
+  await run(["rm", "-rf", "--", fsPath(abs)], { user, check: false, timeoutMs: 600_000 });
+}
+
+/**
+ * The bytes of a file in a tenant's tree, read by that user ("" = root), so root never opens a path the
+ * tenant can redirect. `real` is a real filesystem path (already through fsPath).
+ */
+export async function readAs(real: string, user: string, maxBytes = 50_000_000): Promise<Uint8Array> {
+  if (DRY_RUN) return new Uint8Array(await readFile(real));
+  // Bounded: the path may have been swapped for a link to /dev/zero.
+  const cmd = ["head", "-c", String(maxBytes + 1), "--", real];
+  const argv = user ? ["runuser", "-u", user, "--", ...cmd] : cmd;
+  const proc = Bun.spawn(argv, { env: BASE_ENV, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) throw new Error(`cannot read ${real}: ${err.trim().slice(0, 200)}`);
+  if (out.byteLength > maxBytes) throw new Error(`${real} is larger than ${maxBytes} bytes`);
+  return new Uint8Array(out);
 }
 
 /** Not cached: users are deleted and recreated (app/site removal) and may come back with another uid. */
@@ -163,11 +215,45 @@ export async function lookupUser(user: string): Promise<{ uid: number; gid: numb
   return { uid: Number(uid), gid: Number(gid) };
 }
 
-async function chownTo(abs: string, owner: string) {
-  if (DRY_RUN || process.getuid?.() !== 0) return;
-  const ids = await lookupUser(owner);
-  if (!ids) throw new Error(`unknown user ${owner}`);
-  await lchown(fsPath(abs), ids.uid, ids.gid);
+/** The user name of a uid (null when /etc/passwd has none). */
+export async function userName(uid: number): Promise<string | null> {
+  const passwd = await readText("/etc/passwd");
+  return passwd?.split("\n").map((l) => l.split(":")).find((f) => f.length > 2 && f[2] === String(uid))?.[0] ?? null;
+}
+
+/**
+ * A file only root can have put in place, or null. The file, every directory on the way to it and
+ * every symlink on the way are root's, and no directory is writable by anyone but root, both on the
+ * path as given and on the path it resolves to; so nobody else can have pointed it at another file.
+ * Read through a descriptor (no final symlink followed) that must be a regular, root-owned file.
+ */
+export async function readRootOwned(abs: string, maxBytes = 1_000_000): Promise<string | null> {
+  const asRoot = !DRY_RUN && process.getuid?.() === 0;
+  try {
+    const real = await realpath(fsPath(abs));
+    if (asRoot) for (const p of [fsPath(abs), real]) if (!(await rootOnlyPath(p))) return null;
+    const fh = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > maxBytes || (asRoot && st.uid !== 0)) return null;
+      return await fh.readFile("utf8");
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function rootOnlyPath(p: string): Promise<boolean> {
+  const parts = p.split("/").filter(Boolean);
+  for (let i = 0; i <= parts.length; i++) {
+    const st = await lstat(`/${parts.slice(0, i).join("/")}`);
+    if (st.uid !== 0) return false;
+    // Group write only for root's group.
+    if (st.isDirectory() && (st.mode & 0o002 || (st.mode & 0o020 && st.gid !== 0))) return false;
+  }
+  return true;
 }
 
 export async function chownR(abs: string, owner: string) {
