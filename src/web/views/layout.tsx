@@ -137,7 +137,7 @@ function Topbar(p: PageProps) {
         <h1 class="page-title">{p.title}</h1>
       </div>
       {p.trustUntil && p.trustUntil > Date.now() ? (
-        <form method="post" action="/trust/end" class="trust" title={t("Routine actions skip the code until then. Deleting, restoring and admin changes still ask.")}>
+        <form method="post" action="/trust/end" class="trust" title={t("Routine actions skip the code until then. Revealing secrets, changing what runs, opening the network, deleting, restoring and admin changes still ask.")}>
           <input type="hidden" name="_csrf" value={p.csrf} />
           <Icon name="security" size={16} />
           <span>{t("2FA verified, {n} min left").replace("{n}", String(Math.max(1, Math.ceil((p.trustUntil - Date.now()) / 60_000))))}</span>
@@ -205,7 +205,10 @@ export function Card(p: { title?: string; actions?: Child; children?: Child; cla
   );
 }
 
-export function Field(p: { label: string; name: string; value?: string | number; type?: string; placeholder?: string; hint?: string; required?: boolean; autocomplete?: string }) {
+/** `always`: a code field the trusted window keeps visible (the agent asks for a code there every time). */
+export const alwaysAttr = (on?: boolean) => (on ? { "data-always": "" } : {});
+
+export function Field(p: { label: string; name: string; value?: string | number; type?: string; placeholder?: string; hint?: string; required?: boolean; autocomplete?: string; always?: boolean }) {
   return (
     <label class="field">
       <span>{t(p.label)}</span>
@@ -217,6 +220,7 @@ export function Field(p: { label: string; name: string; value?: string | number;
         required={p.required}
         autocomplete={p.autocomplete ?? "off"}
         spellcheck={false}
+        {...alwaysAttr(p.always)}
       />
       {p.hint ? <small class="muted">{p.hint}</small> : null}
     </label>

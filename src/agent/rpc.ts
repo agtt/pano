@@ -35,6 +35,7 @@ import * as runtimes from "./runtimes.ts";
 import * as services from "./services.ts";
 import * as pgRemote from "./pgremote.ts";
 import * as mysqlRemote from "./mysqlremote.ts";
+import { remoteDomains } from "./remotedb-config.ts";
 import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
@@ -75,37 +76,93 @@ const SENSITIVE = new Set([
   // PostgreSQL facing the internet, and a password for it shown once.
   "pg.remote.enable", "pg.remote.disable", "pg.remote.user.add", "pg.remote.user.remove",
   "mysql.remote.enable", "mysql.remote.disable", "mysql.remote.user.add", "mysql.remote.user.remove",
+  // Root moves or chowns files in a tenant's tree.
+  "sites.fixPermissions", "shield.quarantine",
 ]);
 /**
- * Guarded actions that need a code typed for them even while the session is trusted:
- * the ones that destroy or overwrite data, hand out the backup key, move all traffic, or change who can sign in.
+ * Guarded actions that need a code sent with that very call, even while the session is trusted
+ * and never through a grant: the ones that reveal a secret, change which code runs, open the
+ * network or a lock, leave lasting access (a key, a peer, a token, a backup destination, an admin),
+ * silence the alerts, or destroy or overwrite data. A compromised web process gets none of them
+ * from a sign-in or from a code the admin typed for something else.
  */
 export const FRESH_ONLY = new Set([
+  // destroy or overwrite data, move all traffic
   "apps.delete", "sites.delete", "db.drop", "pg.drop", "containers.delete", "realtime.uninstall", "turn.uninstall", "android.project.remove",
-  "backup.restore", "backup.key.export", "recovery.kit", "recovery.rebuild", "edge.cutover", "edge.rollback",
+  "backup.restore", "recovery.rebuild", "edge.cutover", "edge.rollback",
+  // who can sign in
   "admins.add", "admins.remove", "admins.reset",
+  // secrets: shown, or set to a value the caller knows
+  "apps.env.reveal", "envGroups.reveal", "containers.env.reveal", "apps.webhookSecret", "realtime.app.reveal", "turn.reveal", "services.valkeyUrl",
+  "backup.key.export", "recovery.kit", "wp.resetPassword", "db.password",
+  // which code runs (as an app, a site, a container or with the Android signing key)
+  "apps.create", "sites.crons", "containers.save", "android.project.save", "shield.restore",
+  // the network and the locks
+  "vpn.peer.add", "vpn.locks", "vpn.disable", "firewall.disable", "firewall.ports", "cloudflare.lock", "guard.set",
+  "pg.remote.enable", "pg.remote.user.add", "mysql.remote.enable", "mysql.remote.user.add",
+  // lasting access from outside, and the channel that would report it
+  "runner.enable", "runner.key.add", "github.connect", "backup.dest.set", "import.cpanel.apply", "alerts.save",
 ]);
 export const ENV_MASK = "••••••••";
 
-/** App fields that decide what runs as the app (and so can read its secrets) and where it is served. */
-// preview_domain and preview_env_exclude decide which hosts get previews and which secrets branch code receives;
-// env_groups hands shared secrets to the app's code.
+/** App fields that decide what runs as the app (and so can read its secrets): changing one always asks. */
+// preview_env_exclude decides which secrets branch code receives; env_groups hands shared secrets to the app's code.
 // build_isolated: turning it off lets install scripts reach the deploy key and data again.
-const CODE_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "domains", "ask_url", "preview_domain", "preview_env_exclude", "env_groups", "build_isolated"] as const;
+const RUN_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "preview_env_exclude", "env_groups", "build_isolated"] as const;
+/** Where the app is served: guarded, but routine (the trusted window covers it). */
+const CODE_FIELDS = [...RUN_FIELDS, "domains", "ask_url", "preview_domain"] as const;
+
+/** Guarded fields an apps.update call changes; none for an unknown app or invalid input (the handler rejects it the same way). */
+function changedAppFields(p: P): string[] {
+  const cur = apps.get(String(p.name ?? ""));
+  if (!cur) return [];
+  let next: appsOps.AppInput;
+  try {
+    next = appsOps.validateAppInput(p);
+  } catch {
+    return [];
+  }
+  const norm = (a: Pick<appsOps.AppInput, (typeof CODE_FIELDS)[number]>, k: (typeof CODE_FIELDS)[number]) => JSON.stringify(k === "processes" ? formatProcesses(a.processes) : a[k]);
+  return CODE_FIELDS.filter((k) => norm(next, k) !== norm(cur, k));
+}
 
 export function needsOtp(method: string, p: P): boolean {
   if (SENSITIVE.has(method)) return true;
-  if (method === "apps.update") {
-    const cur = apps.get(String(p.name ?? ""));
-    if (!cur) return false;
-    let next: appsOps.AppInput;
-    try {
-      next = appsOps.validateAppInput(p);
-    } catch {
-      return false; // the handler rejects it the same way
+  if (method === "apps.update") return changedAppFields(p).length > 0;
+  return false;
+}
+
+/**
+ * Variables that change what a runtime loads or runs, or where its traffic and trust go
+ * (NODE_OPTIONS=--import=data:..., LD_PRELOAD, a proxy, a CA file): setting one is planting code.
+ */
+const RUNTIME_ENV =
+  /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|BUN_.*|DENO_.*|LD_.*|DYLD_.*|PATH|PYTHON.*|PERL5?LIB|PERL5OPT|RUBYOPT|RUBYLIB|GEM_HOME|GEM_PATH|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|PHPRC|PHP_INI_SCAN_DIR|BASH_ENV|ENV|SHELLOPTS|PS4|GIT_.*|NPM_CONFIG_.*|YARN_.*|COREPACK_.*|GCONV_PATH|HOSTALIASES|LOCALDOMAIN|RES_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i;
+
+/** True when the new variables add or change a runtime variable. */
+export const changesRuntimeEnv = (next: Record<string, string>, cur: Record<string, string>) =>
+  Object.keys(next).some((k) => RUNTIME_ENV.test(k) && next[k] !== cur[k]);
+
+/**
+ * Whether this call needs a code sent with it (no trusted window, no grant). Fails closed: if the
+ * check itself fails, it asks.
+ */
+export async function alwaysAsk(method: string, p: P): Promise<boolean> {
+  if (FRESH_ONLY.has(method)) return true;
+  try {
+    if (method === "apps.update") return changedAppFields(p).some((k) => (RUN_FIELDS as readonly string[]).includes(k));
+    if (method === "apps.env.set") {
+      const cur = await appsOps.getEnv(p.name, envScope(p.scope));
+      return changesRuntimeEnv(unmask(p.vars, cur), cur);
     }
-    const norm = (a: Pick<appsOps.AppInput, (typeof CODE_FIELDS)[number]>) => CODE_FIELDS.map((k) => (k === "processes" ? formatProcesses(a.processes) : a[k]));
-    return JSON.stringify(norm(next)) !== JSON.stringify(norm(cur));
+    if (method === "envGroups.save") {
+      const cur = await envGroups.readGroup(p.name).catch(() => ({}) as Record<string, string>);
+      return changesRuntimeEnv(unmask(p.vars, cur), cur);
+    }
+    // The connection URL goes into the variable the caller names.
+    if (method === "apps.attachDatabase") return RUNTIME_ENV.test(String(p.key ?? ""));
+  } catch {
+    return true;
   }
   return false;
 }
@@ -116,7 +173,8 @@ const serviceKey = (s: unknown): services.ServiceKey => {
   return s as services.ServiceKey;
 };
 
-const allDomains = () => ({ apps: apps.list(), sites: sites.list(), previews: previews.list() });
+// Remote database names count as taken: a later app or site on one would break the edge config.
+const allDomains = () => ({ apps: apps.list(), sites: [...sites.list(), { name: "remote database access", domains: remoteDomains() }], previews: previews.list() });
 
 export const methods: Record<string, Handler> = {
   // ---- login: the web checks the password, the agent checks the code

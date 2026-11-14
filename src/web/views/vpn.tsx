@@ -127,7 +127,7 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
               hint="Best: create the key on the device and paste only its public key; the private key then never exists anywhere else."
             />
           </div>
-          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
           <button class="btn primary">+ Device</button>
         </form>
       </Card>
@@ -155,7 +155,7 @@ export function VpnPage(p: { csrf: string; s: VpnStatus; viaVpn: boolean; create
           </label>
           <div class="cols">
             <Field label="Confirm within (seconds)" name="confirmSeconds" value={300} />
-            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
           </div>
           <button class="btn primary">Apply</button>
         </form>

@@ -1,7 +1,7 @@
 import { fmtBytes, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
 export type ContainerRow = {
   name: string;
@@ -115,17 +115,18 @@ export function ContainerForm(p: { csrf: string; c?: Draft; note?: string; edit?
         <small class="muted">Empty PASSWORD / KEY / SECRET / TOKEN values are generated. {p.note ?? ""}</small>
       </label>
       <div class="actions">
-        <Otp />
+        <Otp always />
         <button class="btn primary">{t("Save")}</button>
       </div>
     </form>
   );
 }
 
-export function ContainerDetail(p: { csrf: string; c: ContainerRow & { logs: string; env: Record<string, string>; dataDir: string } }) {
+export function ContainerDetail(p: { csrf: string; c: ContainerRow & { logs: string; env: Record<string, string>; dataDir: string; notice?: string } }) {
   const c = p.c;
   return (
     <div class="stack">
+      {c.notice ? <div class="flash warn">{c.notice}</div> : null}
       <Card
         title={c.name}
         actions={
@@ -176,7 +177,7 @@ export function ContainerDetail(p: { csrf: string; c: ContainerRow & { logs: str
         actions={
           <form method="post" action={`/containers/${c.name}/reveal`} class="row">
             <Csrf token={p.csrf} />
-            <Otp />
+            <Otp always />
             <button class="btn small" title="Values stay hidden until shown with a code; saving with hidden values keeps them">
               Show values
             </button>

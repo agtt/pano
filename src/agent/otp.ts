@@ -1,11 +1,13 @@
 // Authenticator (TOTP) secrets live with the agent, root-only, never in the web
 // process. The web UI can ask "is this code right?" but cannot produce codes, so
 // even a fully compromised pano-web cannot read secrets, drop databases, add a
-// VPN device or change what an app runs: those operations need a fresh code,
-// which the agent checks itself.
+// VPN device or change what an app runs on its own: those operations need a code
+// sent with that very call, which the agent checks itself (no trusted window, no
+// grant). The code still travels through the web, so a compromised web can spend
+// a code the admin types on one always-ask action of its choosing.
 
 import { Database } from "bun:sqlite";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fsPath, paths } from "../shared/config.ts";
 import { checkRemove, checkUsername } from "../shared/admins.ts";
 import { newSecret, otpauthUri, verify } from "../web/totp.ts";
@@ -15,7 +17,7 @@ import { ensureDir, exists, readText, run, writeAtomic } from "./sys.ts";
 const MAX_FAILS = 5;
 const LOCK_SECONDS = 15 * 60;
 const GRANT_SECONDS = 60;
-/** One form post makes a handful of calls; a grant is not a session. */
+/** Retries of the same call; a grant is not a session. */
 const GRANT_USES = 10;
 const CLI_TOKEN = `${paths.secrets}/cli.token`;
 
@@ -56,20 +58,26 @@ export function checkOtp(username: string, code: unknown): boolean {
   return true;
 }
 
-// A verified code yields a short grant so one form post can make several calls.
-const grants = new Map<string, { actor: string; until: number; uses: number }>();
+// A verified code yields a short grant so the same form can repeat its call (a retry). It is bound
+// to the admin, the method and the exact params the code was checked for, and main.ts never
+// accepts one for an always-ask method: a code typed for one action cannot be spent on another.
+const grants = new Map<string, { actor: string; scope: string; until: number; uses: number }>();
 
-export function issueGrant(actor: string): string {
+/** What a grant covers: one method with exactly these params. */
+const grantScope = (method: string, params: unknown) => createHash("sha256").update(`${method}\n${JSON.stringify(params ?? {})}`).digest("base64url");
+
+export function issueGrant(actor: string, method = "", params: unknown = {}): string {
   const g = randomBytes(24).toString("base64url");
-  grants.set(g, { actor, until: Date.now() + GRANT_SECONDS * 1000, uses: GRANT_USES });
+  grants.set(g, { actor, scope: grantScope(method, params), until: Date.now() + GRANT_SECONDS * 1000, uses: GRANT_USES });
   for (const [k, v] of grants) if (v.until < Date.now()) grants.delete(k);
   return g;
 }
 
 /**
  * After a verified code (sign-in or any guarded action), the session is trusted for a while:
- * routine guarded actions go through without a new code. Deleting, restoring, revealing the
- * backup key, switching traffic and managing admins still ask every time (FRESH_ONLY in rpc.ts).
+ * routine guarded actions go through without a new code. Revealing secrets, changing what runs,
+ * opening the network, deleting, restoring and managing admins still ask every time
+ * (FRESH_ONLY / alwaysAsk in rpc.ts).
  */
 export const TRUST_SECONDS = 15 * 60;
 const trusts = new Map<string, { actor: string; until: number }>();
@@ -90,10 +98,10 @@ export const endTrust = (tk: unknown) => {
   if (typeof tk === "string") trusts.delete(tk);
 };
 
-/** Spends one use of the grant. */
-export const grantValid = (grant: unknown, actor: string) => {
+/** Spends one use of the grant; only for the method and params it was issued for. */
+export const grantValid = (grant: unknown, actor: string, method = "", params: unknown = {}) => {
   const g = typeof grant === "string" ? grants.get(grant) : undefined;
-  if (!g || g.actor !== actor || g.until <= Date.now() || g.uses <= 0) return false;
+  if (!g || g.actor !== actor || g.until <= Date.now() || g.uses <= 0 || g.scope !== grantScope(method, params)) return false;
   g.uses--;
   return true;
 };

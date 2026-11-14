@@ -171,7 +171,7 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           Slower builds (no shared cache).
         </small>
       </label>
-      <Field label="Preview domain" name="preview_domain" value={a.preview_domain ?? ""} placeholder="*.preview.example.com" hint="Wildcard you own (DNS * to this server). Empty: no previews." />
+      <Field label="Preview domain" name="preview_domain" value={a.preview_domain ?? ""} placeholder="*.preview.example.com" hint="A zone of its own (DNS * to this server), such as *.preview.example.com, not your app's domain. Empty: no previews." />
       <Field label="Max previews" name="preview_max" type="number" value={a.preview_max ?? 3} hint="Oldest is removed first" />
       <Field label="Preview lifetime (days)" name="preview_ttl_days" type="number" value={a.preview_ttl_days ?? 7} hint="Counted from the last push" />
       <Field
@@ -179,7 +179,7 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         name="preview_env_exclude"
         value={a.preview_env_exclude ?? ""}
         placeholder="DATABASE_URL, STRIPE_*"
-        hint="Left out of a preview's copy of the environment (comma separated; a trailing * matches a prefix)"
+        hint="Left out of a preview's copy of the environment (comma separated; a trailing * matches a prefix). Empty: previews get no secret-looking variables (*_URL, *_KEY, *_SECRET, *_TOKEN, *_PASSWORD, DATABASE_*) and no shared-group variables; !NAME or !* lets them through. Give previews their own values under Preview values."
       />
       <Field
         label="Shared variables"
@@ -203,10 +203,11 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           label="Authenticator code"
           name="otp"
           autocomplete="one-time-code"
-          hint="Only when changing the repository, branch, directory, runtime, commands, preview domain, prod-only or shared variables: they decide what runs with which secrets."
+          hint="Only when changing the repository, branch, directory, runtime, commands, crons, prod-only or shared variables (they decide what runs with which secrets: every time, also in the trusted window), or the domains and preview domain."
+          always
         />
       ) : (
-        <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+        <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
       )}
       <div class="actions">
         <button class="btn primary">{t(p.submit)}</button>
@@ -419,11 +420,13 @@ export function AppDetail(p: {
               </textarea>
               <p class="muted small">
                 KEY=value, one per line. {p.revealed === "production" ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}{" "}
-                Saving needs a code. A restart applies them; variables built into the code (NEXT_PUBLIC_*, VITE_*, …) need a redeploy.
+                Saving needs a code; showing values and setting a variable that changes what runs (NODE_OPTIONS, LD_PRELOAD, PATH, a proxy…) need one every time,
+                also in the trusted window. A restart applies them; variables built into the code (NEXT_PUBLIC_*, VITE_*, …) need a redeploy.
                 {a.env_groups ? ` Also gets the shared variables of ${a.env_groups.split(",").join(", ")} (its own values win).` : ""}
               </p>
               <div class="row">
-                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+                {/* Not required: in the trusted window a plain save needs none, but the field stays for the cases above. */}
+                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
                 <button class="btn">{t("Save")}</button>
                 {p.revealed === "production" ? null : (
                   <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
@@ -476,7 +479,7 @@ export function AppDetail(p: {
                   sees them. Used from the next preview build.
                 </p>
                 <div class="row">
-                  <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+                  <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
                   <button class="btn">{t("Save")}</button>
                   {p.revealed === "preview" ? null : (
                     <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
@@ -579,7 +582,7 @@ export function AppDetail(p: {
             </p>
             <form method="post" action={`/apps/${a.name}/webhook-secret`} class="row">
               <Csrf token={p.csrf} />
-              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" data-always />
               <button class="btn">Show webhook secret</button>
             </form>
           </Card>
@@ -663,7 +666,7 @@ export function GitPage(p: { csrf: string; github: { connected: boolean; login: 
               and write (preview links on pull requests). It is stored root-only on this server and never shown again.
             </p>
             <Field label="Token" name="token" type="password" autocomplete="off" required placeholder="github_pat_…" />
-            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
             <button class="btn primary">Connect GitHub</button>
           </form>
         )}

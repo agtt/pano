@@ -1,5 +1,5 @@
 import { fmtBytes, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 
 export type TurnView = {
   installed: boolean;
@@ -15,7 +15,7 @@ export type TurnView = {
   relay: { min: number; max: number };
 };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required {...alwaysAttr(p.always)} />;
 
 export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; appNames: string[] }) {
   if (!v.installed || !v.managed) {
@@ -82,7 +82,7 @@ export function TurnCard({ v, csrf, appNames }: { v: TurnView; csrf: string; app
         <div class="row">
           <form method="post" action="/services/turn/reveal" class="inline">
             <Csrf token={csrf} />
-            <Otp />
+            <Otp always />
             <button class="btn small">Secret</button>
           </form>
           <form method="post" action="/services/turn/rotate" class="inline">

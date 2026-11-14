@@ -1,5 +1,5 @@
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 
 export type RealtimeView = {
   installed: boolean;
@@ -14,7 +14,7 @@ export type RealtimeView = {
   apps: { id: string; name: string; key: string; origins: string[]; webhook_url?: string; max_connections?: number; created_at: number }[];
 };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required {...alwaysAttr(p.always)} />;
 
 export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: string; appNames: string[] }) {
   if (!r.installed) {
@@ -99,7 +99,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
               <td class="row">
                 <form method="post" action={`/services/realtime/apps/${a.name}/reveal`} class="inline">
                   <Csrf token={csrf} />
-                  <Otp />
+                  <Otp always />
                   <button class="btn small">Secret</button>
                 </form>
                 <details>

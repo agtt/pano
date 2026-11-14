@@ -6,7 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import { chmod, chown, unlink } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
-import { startMonitor } from "./alerts.ts";
+import { notify, startMonitor } from "./alerts.ts";
 import { cleanupAndroid } from "./android.ts";
 import { startMetrics } from "./metrics.ts";
 import { startRealtime } from "./realtime.ts";
@@ -16,7 +16,7 @@ import { ensureDefaultJobs } from "./recovery.ts";
 import { startShield } from "./shield.ts";
 import { startScheduler } from "./backup.ts";
 import { cliToken, checkOtp, grantValid, issueGrant, issueTrust, migrateFromWeb, trustValid } from "./otp.ts";
-import { FRESH_ONLY, methods, needsOtp } from "./rpc.ts";
+import { alwaysAsk, methods, needsOtp } from "./rpc.ts";
 import { startRunner } from "./runner.ts";
 import { applyLocalPorts } from "./localports.ts";
 import { reloadUpdatedPhp } from "./php.ts";
@@ -34,21 +34,47 @@ import { recoverPending } from "./vpn.ts";
 const sameSecret = (given: string | null, secret: string) =>
   !!given && given.length === secret.length && timingSafeEqual(Buffer.from(given), Buffer.from(secret));
 
-/**
- * Names under a wildcard host that already got a certificate pass; new ones at most 20 an hour per
- * wildcard, so random names sent at the server cannot use up Let's Encrypt's weekly limit for the domain.
- */
-const WILDCARD_NEW_PER_HOUR = 20;
-let wildcardSeen: Set<string> | null = null;
-const wildcardNew = new Map<string, number[]>();
+/** Code-guarded actions that leave lasting access: each use of a code for one is sent to the alert channel. */
+const REPORTED = new Set([
+  "admins.add", "admins.reset", "runner.enable", "runner.key.add", "vpn.peer.add", "pg.remote.user.add", "mysql.remote.user.add",
+  "github.connect", "backup.dest.set", "backup.key.export", "recovery.kit", "alerts.save",
+]);
 
-function wildcardAllowed(wildcard: string, domain: string): boolean {
+/**
+ * Names under a wildcard host that already got a certificate pass. New ones: at most 5 an hour per
+ * wildcard and 20 a week per registered domain (counted across restarts), so random names sent at the
+ * server cannot use up Let's Encrypt's 50 a week for the domain: the domain's own hosts and previews
+ * keep at least 30.
+ */
+const WILDCARD_NEW_PER_HOUR = 5;
+const WILDCARD_NEW_PER_WEEK = 20;
+const WEEK_MS = 7 * 86400_000;
+let wildcardSeen: Set<string> | null = null;
+
+/** Registered domain, erring wide: "a.b.example.co.uk" -> "example.co.uk", "x.example.com" -> "example.com". */
+export function registeredDomain(host: string): string {
+  const labels = host.replace(/^\*\./, "").split(".");
+  // Second-level suffixes like co.uk, com.au, com.tr: one more label. A private suffix (user.github.io) counts as
+  // its parent, which only makes the cap stricter.
+  const n = labels.length >= 3 && labels.at(-1)!.length === 2 && /^(co|com|net|org|gov|edu|ac|ltd|plc|me|gen|web|nom|biz|info|or|ne|go|in|nic|k12|mil|av|bel|bbs|tv)$/.test(labels.at(-2)!) ? 3 : 2;
+  return labels.slice(-n).join(".");
+}
+
+export function wildcardAllowed(wildcard: string, domain: string, now = Date.now()): boolean {
   wildcardSeen ??= new Set<string>(JSON.parse(settings.get("edge.wildcard.seen") ?? "[]"));
   if (wildcardSeen.has(domain)) return true;
-  const now = Date.now();
-  const recent = (wildcardNew.get(wildcard) ?? []).filter((t) => now - t < 3600_000);
-  if (recent.length >= WILDCARD_NEW_PER_HOUR) return false;
-  wildcardNew.set(wildcard, [...recent, now]);
+  // Registered domain -> [wildcard, time] of each new name in the last week.
+  let issued: Record<string, [string, number][]> = {};
+  try {
+    issued = JSON.parse(settings.get("edge.wildcard.issued") ?? "{}");
+  } catch {}
+  const reg = registeredDomain(wildcard);
+  const week = (issued[reg] ?? []).filter(([, t]) => now - t < WEEK_MS);
+  if (week.length >= WILDCARD_NEW_PER_WEEK) return false;
+  if (week.filter(([w, t]) => w === wildcard && now - t < 3600_000).length >= WILDCARD_NEW_PER_HOUR) return false;
+  issued[reg] = [...week, [wildcard, now]];
+  for (const k of Object.keys(issued)) if (!issued[k]!.some(([, t]) => now - t < WEEK_MS)) delete issued[k];
+  settings.set("edge.wildcard.issued", JSON.stringify(issued));
   wildcardSeen.add(domain);
   settings.set("edge.wildcard.seen", JSON.stringify([...wildcardSeen].slice(-5000)));
   return true;
@@ -91,12 +117,20 @@ export async function startAgent() {
       // be used to burn the admin's attempts (lockout) or to mint grants.
       let grant: string | undefined;
       let trust: string | undefined;
-      const trusted = !FRESH_ONLY.has(method) && trustValid(body.trust, actor);
-      if (needsOtp(method, params) && !sameSecret(req.headers.get("x-pano-cli"), cli) && !trusted && !grantValid(body.grant, actor)) {
-        if (!body.otp) return Response.json({ ok: false, error: "Authenticator code required for this action." }, { status: 403 });
-        if (!checkOtp(actor, body.otp)) return Response.json({ ok: false, error: "Authenticator code wrong or already used (wait for a new code)." }, { status: 403 });
-        grant = issueGrant(actor);
-        trust = issueTrust(actor);
+      if (needsOtp(method, params) && !sameSecret(req.headers.get("x-pano-cli"), cli)) {
+        // Always-ask actions take only a code sent with this call: the trusted window and grants never cover them.
+        const always = await alwaysAsk(method, params);
+        const passed = !always && (trustValid(body.trust, actor) || grantValid(body.grant, actor, method, params));
+        if (!passed) {
+          if (!body.otp) return Response.json({ ok: false, error: always ? "This action always needs a new authenticator code." : "Authenticator code required for this action." }, { status: 403 });
+          if (!checkOtp(actor, body.otp)) return Response.json({ ok: false, error: "Authenticator code wrong or already used (wait for a new code)." }, { status: 403 });
+          if (!always) grant = issueGrant(actor, method, params);
+          trust = issueTrust(actor);
+          // The code came through the web process, which could have sent it with another method than the
+          // admin's form: actions that leave lasting access are reported on the alert channel (before
+          // alerts.save can change it).
+          if (REPORTED.has(method)) await notify(`🔐 ${actor} used a 2FA code for ${method}${typeof params.username === "string" ? ` (${params.username.slice(0, 64)})` : ""}`);
+        }
       }
       try {
         const result = await handler(params, actor);

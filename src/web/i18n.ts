@@ -49,8 +49,8 @@ const tr: Record<string, string> = {
   "Proxy or static site": "Proxy ya da statik site",
   "2FA verified, {n} min left": "2FA doğrulandı, {n} dk kaldı",
   Lock: "Kilitle",
-  "Routine actions skip the code until then. Deleting, restoring and admin changes still ask.": "O zamana kadar sıradan işlemler kod istemez. Silme, geri yükleme ve yönetici değişiklikleri yine sorar.",
-  "CPU usage": "CPU kullanımı",
+  "Routine actions skip the code until then. Revealing secrets, changing what runs, opening the network, deleting, restoring and admin changes still ask.":
+    "O zamana kadar sıradan işlemler kod istemez. Gizli değerleri göstermek, çalışan kodu değiştirmek, ağı açmak, silmek, geri yüklemek ve yönetici değişiklikleri yine sorar.",  "CPU usage": "CPU kullanımı",
   "Disk usage": "Disk kullanımı",
   "Import sites and apps": "Siteleri ve uygulamaları içe aktar",
   "Insights": "Özet",

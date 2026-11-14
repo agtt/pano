@@ -43,5 +43,8 @@ test("trusted window: per admin, ends on request, never covers the always-ask ac
   endTrust(tk);
   expect(trustValid(tk, "admin")).toBe(false);
   for (const m of ["apps.delete", "db.drop", "backup.restore", "edge.cutover", "admins.add"]) expect(FRESH_ONLY.has(m)).toBe(true);
-  expect(FRESH_ONLY.has("apps.env.set")).toBe(false);
+  // secrets, code, network and lasting access are never covered by the window either
+  for (const m of ["apps.env.reveal", "envGroups.reveal", "apps.create", "sites.crons", "runner.enable", "runner.key.add", "vpn.peer.add", "vpn.locks", "firewall.disable", "db.password", "backup.dest.set", "import.cpanel.apply", "github.connect", "recovery.kit", "backup.key.export", "alerts.save"])
+    expect(FRESH_ONLY.has(m)).toBe(true);
+  for (const m of ["apps.env.set", "envGroups.save", "sites.save", "apps.addDatabase", "sites.fixPermissions", "shield.quarantine"]) expect(FRESH_ONLY.has(m)).toBe(false);
 });

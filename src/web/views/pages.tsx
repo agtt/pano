@@ -1,8 +1,8 @@
 import type { Child } from "hono/jsx";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
 // ---- sites -----------------------------------------------------------------
 
@@ -135,8 +135,9 @@ function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versi
         <p class="muted small">
           Files: <code>{s.root}</code> · user <code>site-{s.name.replace(/[^a-z0-9]/g, "-").slice(0, 27)}</code>. Upload over SFTP as root, then fix permissions.
         </p>
-        <form method="post" action={`/sites/${s.name}/permissions`}>
+        <form method="post" action={`/sites/${s.name}/permissions`} class="row">
           <Csrf token={csrf} />
+          <Otp />
           <button class="btn small">Fix permissions</button>
         </form>
         {s.deny_paths?.length ? (
@@ -157,7 +158,7 @@ function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versi
             <code>Mon..Fri 09:00</code>.
           </p>
           <div class="row">
-            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+            <Otp always />
             <button class="btn">{t("Save")}</button>
           </div>
         </form>
@@ -344,7 +345,7 @@ export function DatabasesPage(p: {
               </select>
             </label>
             <Field label="Password (empty = generate)" name="password" type="password" autocomplete="new-password" />
-            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
             <button class="btn">{t("Reset password")}</button>
           </form>
         </Card>
@@ -477,7 +478,7 @@ export function BackupsPage(p: {
                 </label>
                 <label class="field">
                   <span>{t("Authenticator code")}</span>
-                  <Otp />
+                  <Otp always />
                 </label>
                 <div class="actions">
                   <button class="btn primary">{t("Save")}</button>
@@ -788,7 +789,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
         <Card title="Cloudflare">
           <p class="muted small">
             {s.cloudflare.locked
-              ? "Locked: only Cloudflare reaches ports 80 and 443, so nobody can go around its firewall, rate limits and cache by the server's address."
+              ? "Locked: only Cloudflare reaches ports 80 and 443. The ranges are shared by every Cloudflare customer, so another account's zone could still point at this server; for a lock bound to your zone, also turn on Authenticated Origin Pulls in Cloudflare."
               : "Open: anyone who finds the server's address reaches the sites directly, around Cloudflare. Lock it once every domain has Cloudflare's proxy on (orange cloud)."}{" "}
             Set SSL/TLS to Full (strict) in Cloudflare. SSH, the panel and the VPN are not affected. {s.cloudflare.ranges} address ranges
             {s.cloudflare.updatedAt ? `, fetched ${fmtTime(Math.floor(s.cloudflare.updatedAt / 1000))}` : " (built in, not fetched yet)"}.
@@ -811,7 +812,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
                 <input type="checkbox" name="force" value="1" /> Lock even if some domains do not come through Cloudflare
               </label>
             )}
-            <Otp />
+            <Otp always />
             <button class={s.cloudflare.locked ? "btn danger" : "btn primary"}>{s.cloudflare.locked ? "Unlock" : "Lock to Cloudflare"}</button>
           </form>
         </Card>
@@ -991,7 +992,7 @@ function CpanelImport(p: { csrf: string; archives: { file: string; bytes: number
             </ul>
           </Card>
           <div>
-            <Otp />
+            <Otp always />
             <button class="btn primary">{t("Import selected")}</button>
           </div>
         </form>

@@ -646,7 +646,9 @@ export function createWebApp() {
   }));
   app.post("/sites/:name/permissions", async (c) => {
     const name = c.req.param("name");
+    const f = await form(c);
     try {
+      needOtp(c, f.otp);
       const warnings = await call<string[]>("sites.fixPermissions", { name }, actor(c));
       return page(c, name, <NoticePage title="Permissions fixed" items={warnings} back={`/sites/${name}`} />);
     } catch (e) {
@@ -1293,7 +1295,7 @@ export function createWebApp() {
   }));
   app.post("/shield/finding", act("/shield", async (c, f) => {
     if (!["quarantine", "restore", "ignore"].includes(f.action)) throw new Error("bad action");
-    if (f.action !== "quarantine") needOtp(c, f.otp);
+    needOtp(c, f.otp);
     await call(`shield.${f.action}`, { id: Number(f.id) }, actor(c));
   }));
   app.post("/shield/unban", act("/shield", async (c, f) => {

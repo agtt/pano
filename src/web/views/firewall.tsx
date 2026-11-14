@@ -1,5 +1,5 @@
 import { t } from "../i18n.ts";
-import { Badge, Card, Csrf } from "./layout.tsx";
+import { Badge, Card, Csrf, alwaysAttr } from "./layout.tsx";
 
 export type FirewallView = {
   installed: boolean;
@@ -10,7 +10,7 @@ export type FirewallView = {
   detected: { ssh: number[]; panel: number | null; wg: number | null; turn: boolean };
 };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
 /** Shown on the Security page. Optional: off by default. */
 export function FirewallCard({ v, csrf }: { v: FirewallView; csrf: string }) {
@@ -47,13 +47,13 @@ export function FirewallCard({ v, csrf }: { v: FirewallView; csrf: string }) {
           </textarea>
         </label>
         <div class="row">
-          <Otp />
+          <Otp always />
           <button class="btn">{t("Save")}</button>
         </div>
       </form>
       <form method="post" action={v.on ? "/security/firewall/disable" : "/security/firewall/enable"} class="row">
         <Csrf token={csrf} />
-        <Otp />
+        <Otp always={v.on} />
         <button class={v.on ? "btn danger" : "btn primary"}>
           {v.on ? "Turn off" : "Turn on (rolls back unless confirmed)"}
         </button>

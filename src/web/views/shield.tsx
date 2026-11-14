@@ -97,7 +97,7 @@ export function ShieldPage({ csrf, s }: { csrf: string; s: ShieldView }) {
                       ) : null}
                       {f.status === "open" || f.status === "quarantined" ? (
                         <>
-                          <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" />
+                          <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" data-always />
                           {f.status === "quarantined" ? (
                             <button class="btn small" name="action" value="restore">
                               Restore

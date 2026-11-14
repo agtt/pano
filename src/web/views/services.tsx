@@ -1,5 +1,5 @@
 import { fmtBytes, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 import { RealtimeCard, type RealtimeView } from "./realtime.tsx";
 import { TurnCard, type TurnView } from "./turn.tsx";
 
@@ -30,7 +30,7 @@ export type RemoteView = {
 };
 type Secret = { title: string; lines: [string, string][] };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required autocomplete="one-time-code" />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required autocomplete="one-time-code" {...alwaysAttr(p.always)} />;
 
 /** Remote access for apps hosted elsewhere (Vercel, Netlify…): TLS, remote-only users, optional source networks. */
 export function RemoteCard(p: { v: RemoteView; dbs: string[]; csrf: string }) {
@@ -57,7 +57,7 @@ export function RemoteCard(p: { v: RemoteView; dbs: string[]; csrf: string }) {
         <Csrf token={p.csrf} />
         <Field label="Domain" name="domain" value={v.domain} placeholder="db.example.com" required hint="A DNS-only (grey cloud) record to this server; the edge gets its certificate." />
         <Field label="Allowed networks (optional)" name="allow" value={v.allow.join(" ")} placeholder="203.0.113.7 198.51.100.0/24" />
-        <Otp />
+        <Otp always />
         <button class="btn primary small">{v.on ? "Save" : "Turn on"}</button>
       </form>
       {v.on ? (
@@ -100,7 +100,7 @@ export function RemoteCard(p: { v: RemoteView; dbs: string[]; csrf: string }) {
                   ))}
                 </select>
               </label>
-              <Otp />
+              <Otp always />
               <button class="btn small">New remote user (shows DATABASE_URL once)</button>
             </form>
           ) : null}
@@ -234,7 +234,7 @@ export function ServicesPage(p: {
           <Card title="Valkey">
             <form method="post" action="/services/valkey/url" class="row">
               <Csrf token={p.csrf} />
-              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" data-always />
               <button class="btn">Show REDIS_URL</button>
             </form>
           </Card>

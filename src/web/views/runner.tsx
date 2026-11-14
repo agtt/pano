@@ -13,7 +13,8 @@ export type RunnerView = {
   androidToolchain: boolean;
 };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
+// Turning the runner on and adding a key always ask for a code, also in the trusted window.
+const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required data-always />;
 
 export function RunnerPage({ v, csrf }: { v: RunnerView; csrf: string }) {
   return (

@@ -21,7 +21,7 @@ export function ProtectCards(p: { csrf: string; guard: GuardView; alerts: Alerts
             dropped{p.behindCloudflare ? " (inactive while behind Cloudflare: visitors arrive from Cloudflare's addresses)" : ""}
           </label>
           {p.guard.banned.length ? <p class="small">Banned now: {p.guard.banned.join(", ")}</p> : null}
-          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
           <button class="btn primary">{t("Save")}</button>
         </form>
       </Card>
@@ -30,11 +30,11 @@ export function ProtectCards(p: { csrf: string; guard: GuardView; alerts: Alerts
           <Csrf token={p.csrf} />
           <p class="muted small">
             Failed deploys, crons and backups right away; app or service down, disk over 85%, memory almost full within a minute; and when it clears. Create a
-            bot with @BotFather, send it /start, and put your chat id here.
+            bot with @BotFather, send it /start, and put your chat id here. Every code used to add an admin, a runner key, a VPN device, a database login or a backup destination, or to export the backup key, is reported here too.
           </p>
           <Field label={p.alerts.tokenSet ? "Bot token (saved; empty = keep)" : "Bot token"} name="token" type="password" autocomplete="off" placeholder="123456:ABC…" />
           <Field label="Chat id" name="chatId" value={p.alerts.chatId} placeholder="123456789" />
-          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+          <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
           <div class="row">
             <button class="btn primary">{t("Save")}</button>
             <button class="btn" formaction="/security/alerts/test" formnovalidate>

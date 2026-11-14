@@ -1,7 +1,7 @@
 import { t } from "../i18n.ts";
-import { Card, Csrf, Field } from "./layout.tsx";
+import { Card, Csrf, Field, alwaysAttr } from "./layout.tsx";
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
 export type WpDetectView = { installed: boolean; version: string; empty: boolean; auto: boolean };
 type Ext = { name: string; title: string; status: string; version: string; update: string };
@@ -134,7 +134,7 @@ export function WordPressPage({ site, st, csrf }: { site: string; st: WpStatusVi
               </option>
             ))}
           </select>
-          <Otp />
+          <Otp always />
           <button class="btn">Reset password</button>
         </form>
         <p class="muted small">The new password is shown once and the user's sessions end.</p>

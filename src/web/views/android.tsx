@@ -1,5 +1,5 @@
 import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
 
 export type AndroidBuildRow = {
   id: number;
@@ -37,7 +37,7 @@ export type AndroidStatusView = {
 
 export type AndroidDetailView = { project: AndroidProjectRow; signing: string; deployKey: string; builds: AndroidBuildRow[]; cacheBytes: number };
 
-const Otp = () => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required />;
+const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder="2FA" size={6} class="short" required {...alwaysAttr(p.always)} />;
 
 export function AndroidPage({ v, csrf, toolchainLog }: { v: AndroidStatusView; csrf: string; toolchainLog: boolean }) {
   const tc = v.toolchain;
@@ -154,7 +154,7 @@ export function ProjectForm({ csrf, p }: { csrf: string; p?: AndroidProjectRow }
       <Field label="Memory (MB)" name="memory_mb" type="number" value={p?.memory_mb ?? 6144} hint="Cap for the build sandbox." />
       <Field label="Timeout (minutes)" name="timeout_min" type="number" value={p?.timeout_min ?? 60} />
       <div class="actions row">
-        <Otp />
+        <Otp always />
         <button class="btn primary">{t("Save")}</button>
       </div>
     </form>

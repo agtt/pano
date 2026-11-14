@@ -68,10 +68,12 @@ export function EnvGroupsPage(p: { csrf: string; groups: EnvGroupRow[]; edit?: {
             {envText(p.edit?.vars ?? {})}
           </textarea>
           <p class="muted small">
-            KEY=value, one per line. {p.edit?.revealed ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}
+            KEY=value, one per line. {p.edit?.revealed ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}{" "}
+            Showing values and setting a variable that changes what runs (NODE_OPTIONS, LD_PRELOAD, PATH, a proxy…) always ask for a code.
           </p>
           <div class="row">
-            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+            {/* Not required: in the trusted window a plain save needs none, but the field stays for the cases above. */}
+            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
             <button class="btn primary">{t("Save")}</button>
             {p.edit && !p.edit.revealed ? (
               <button class="btn" formaction={`/env-groups/${p.edit.name}/reveal`}>
