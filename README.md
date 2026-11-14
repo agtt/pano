@@ -78,21 +78,25 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 
 ## Install (AlmaLinux/Rocky 9, Debian/Ubuntu)
 
-```sh
-bun install && bun run build          # → dist/pano (linux-x64); build:arm for arm64
-scp dist/pano root@server:/tmp/pano
-ssh root@server '/tmp/pano install && /opt/pano/bin/pano admin you'
-ssh -L 7800:127.0.0.1:7800 root@server   # then open http://127.0.0.1:7800
-```
-
-From a release (tagged builds for x64/arm64, checked against `SHA256SUMS` before anything runs; while the repo is private set `GITHUB_TOKEN`):
+On a new server, as root:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sudo sh   # PANO_VERSION=x.y.z pins one
-sudo pano update --latest                                                          # later: download, verify, update with rollback
+curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh
 ```
 
-`install` creates the `pano` user, directories and the `pano-agent` / `pano-web` units. Nothing public changes.
+No questions. When it finishes it prints:
+
+- how to open the panel: an SSH tunnel line, or an HTTPS address on your tailnet when the server runs Tailscale;
+- the `admin` password (shown once) and a QR code for your authenticator app;
+- whether the web server started: on a server with nothing on ports 80/443, Caddy starts right away and sites get HTTPS automatically. A server that already runs a web server (CyberPanel, nginx, Apache) keeps it until you move it from the panel (Server > Edge).
+
+Then add sites and apps in the panel and connect backup storage (Backups).
+
+Later updates: `pano update --latest` (download, verify the signature, update, keep the previous version for `pano update-rollback`). Running the installer again also updates; it never touches the admin, the edge or the panel address a second time.
+
+Options: `PANO_VERSION=x.y.z` installs a given release, `PANO_NO_EDGE=1` leaves ports 80/443 alone. Releases are checked against the signed `SHA256SUMS` before anything runs.
+
+From source: `bun install && bun run build`, copy `dist/pano` to the server and run `./pano install` as root.
 
 ## Migrating from CyberPanel
 

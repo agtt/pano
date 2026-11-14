@@ -99,6 +99,7 @@ async function main() {
       const { parseKit, restorePanel } = await import("./agent/recovery.ts");
       await restorePanel(parseKit(text), host);
       const { call } = await import("./web/agent.ts");
+      const { waitForAgent } = await import("./firstrun.ts");
       await waitForAgent(call);
       await call("recovery.rebuild", {}, "cli");
       let shown = 0;
@@ -138,15 +139,6 @@ async function main() {
     default:
       fail("usage: pano install | version | update --latest | update <binary> <sha256> | update-rollback | recover | agent | web | admin <username> | rpc <method> [json]");
   }
-}
-
-/** The agent answers once its socket is up (after a restart: a few seconds). */
-export async function waitForAgent(call: (m: string, p?: Record<string, unknown>, a?: string) => Promise<unknown>, seconds = 60) {
-  for (let i = 0; i < seconds; i++) {
-    if (await call("system.info", {}, "cli").then(() => true, () => false)) return;
-    await Bun.sleep(1000);
-  }
-  throw new Error("the agent did not come up (journalctl -u pano-agent -n 50)");
 }
 
 function fail(msg: string): never {
@@ -304,12 +296,11 @@ async function install() {
   await sh(["systemctl", "enable", "pano-agent", "pano-web"]);
   // restart (not just start) so re-running install upgrades a running panel
   await sh(["systemctl", "restart", "pano-agent", "pano-web"]);
-  console.log(`
-Done.
-  1. Create the admin:   ${paths.bin}/pano admin <username>
-  2. Open the panel:     ssh -L 7800:127.0.0.1:7800 root@<server>  →  http://127.0.0.1:7800
-     (or set PANO_WEB_HOST to your Tailscale IP in ${paths.etc}/pano.env)
-  3. Nothing public changed yet. The edge (Caddy) only takes :80/:443 at cutover.`);
+  if (DRY_RUN) return;
+  // First install: admin, edge and panel address in one go (firstrun.ts). Later runs are updates.
+  const { firstRun } = await import("./firstrun.ts");
+  const { call } = await import("./web/agent.ts");
+  if (!(await firstRun(call, ownWebDb))) console.log("pano updated and restarted.");
 }
 
 main().catch((e) => fail(e instanceof Error ? e.message : String(e)));
