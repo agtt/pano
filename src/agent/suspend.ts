@@ -72,13 +72,19 @@ export async function suspendApp(name: unknown, reasonInput: unknown, actor: str
   }
   const reason = suspendReason(reasonInput);
   const units = suspendTargets(app);
+  // The flag goes on before anything awaits: from here deploys, previews, webhooks and starts are
+  // refused. A deploy that slipped in between the check above and this line is caught right after.
+  apps.update(app.name, { suspended: 1, suspended_reason: reason, suspended_at: Math.floor(Date.now() / 1000), suspended_units: [] });
+  if (deploys.running(app.name) || previews.list(app.name).some((p) => deploys.running(pvName(p.id)))) {
+    apps.update(app.name, { suspended: 0, suspended_reason: "", suspended_at: 0, suspended_units: [] });
+    throw new Error("a deploy is running for this app: suspend it when the deploy is done");
+  }
   const shown = await showUnits(units, ["ActiveState", "UnitFileState"]);
   const kept: SuspendedUnit[] = units.map((unit) => {
     const s = shown.get(unit) ?? {};
     return { unit, active: RUNNING.has(s.ActiveState ?? ""), enabled: /^enabled/.test(s.UnitFileState ?? "") };
   });
-  // From here deploys, previews, webhooks and starts are refused, and the edge serves the page.
-  apps.update(app.name, { suspended: 1, suspended_reason: reason, suspended_at: Math.floor(Date.now() / 1000), suspended_units: kept });
+  apps.update(app.name, { suspended_units: kept });
   await applyEdge();
   // Disabled too, so a reboot does not bring them back while suspended.
   for (const u of units) await run(["systemctl", "disable", "--now", u], { check: false });

@@ -717,7 +717,10 @@ async function deploy(app: App, id: number, target: DeployTarget) {
 
     await step("switch traffic");
     const previous = app.active_slot as "a" | "b" | "";
-    if (!target.get()) throw new Error("removed while it was building");
+    const now = target.get();
+    if (!now) throw new Error("removed while it was building");
+    // Suspended while it was building: never switch traffic to it (the failure path stops the new slot).
+    if (now.suspended) throw new Error("suspended while it was building");
     target.update({ active_slot: slot, current_release: release, env_running: builtEnv, env_built: builtEnv });
     await run(["ln", "-sfn", fsPath(`${home}/slot-${slot}`), fsPath(`${home}/current`)]);
     await writeCrons(target.get()!);
