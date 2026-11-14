@@ -314,7 +314,17 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     } else {
       body = routeLines(site.routes);
     }
-    out.push(...blocks(site.domains, tlsLine(`site-${site.name}`, input.certs.has(`site-${site.name}`), onDemand), body, `site-${site.name}`, site.http_redirect === 0));
+    const hasCert = input.certs.has(`site-${site.name}`);
+    const named = site.domains.filter((d) => d !== "*");
+    if (hasCert && named.length < site.domains.length) {
+      // A file certificate on a catch-all would be Caddy's choice for every name on the server (its
+      // connection policy has no SNI to match), so other sites would get this one. The listed names
+      // keep the file; any other host gets its own certificate on demand.
+      if (named.length) out.push(...blocks(named, tlsLine(`site-${site.name}`, true, false), body, `site-${site.name}`, site.http_redirect === 0));
+      out.push(...blocks(["*"], tlsLine("", false, true), body, `site-${site.name}`, false));
+    } else {
+      out.push(...blocks(site.domains, tlsLine(`site-${site.name}`, hasCert, onDemand), body, `site-${site.name}`, site.http_redirect === 0));
+    }
   }
   return out.join("\n");
 }

@@ -23,6 +23,20 @@ const block = (out: string, head: string) => {
   return i < 0 ? "" : out.slice(i, out.indexOf("\n}\n", i) + 2);
 };
 
+test("edge: a file certificate never sits on a catch-all (it would answer for every other site)", () => {
+  const out = renderCaddyfile({
+    apps: [],
+    sites: [site({ domains: ["shop.example", "*.shop.example", "*"], tls_cert: "/x/c.pem", tls_key: "/x/k.pem" })],
+    settings,
+    certs: new Set(["site-shop"]),
+  });
+  const named = block(out, "shop.example, *.shop.example");
+  expect(named).toContain("\ttls /etc/pano/certs/site-shop/cert.pem");
+  const any = block(out, "https://");
+  expect(any).toContain("on_demand");
+  expect(any).not.toContain("cert.pem");
+});
+
 describe("edge: suspended sites and apps", () => {
   test("a suspended site keeps its domain and certificate but answers with the fixed page", () => {
     const out = renderCaddyfile({ apps: [], sites: [site({ enabled: 0, tls_cert: "/x/c.pem", tls_key: "/x/k.pem" })], settings, certs: new Set(["site-shop"]) });
@@ -80,10 +94,13 @@ describe("edge: redirect HTTP to HTTPS", () => {
   test("off: a plain HTTP twin with the same handlers and no tls; a catch-all keeps its redirect", () => {
     const s = site({ kind: "legacy", domains: ["old.example", "www.old.example", "*"], routes: [], http_redirect: 0, tls_cert: "/c", tls_key: "/k" });
     const out = renderCaddyfile({ apps: [], sites: [s], settings, certs: new Set(["site-shop"]) });
-    const https = block(out, "old.example, www.old.example, https://");
+    const https = block(out, "old.example, www.old.example");
+    const any = block(out, "https://");
     const plain = block(out, "http://old.example, http://www.old.example");
     expect(https).toContain("\ttls /etc/pano/certs/site-shop/cert.pem");
     expect(https).toContain("reverse_proxy 127.0.0.1:8088");
+    expect(any).toContain("on_demand");
+    expect(any).toContain("reverse_proxy 127.0.0.1:8088");
     expect(plain).toContain("\timport pano_common");
     expect(plain).toContain("reverse_proxy 127.0.0.1:8088");
     expect(plain).not.toContain("tls");
