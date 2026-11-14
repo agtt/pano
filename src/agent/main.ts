@@ -8,6 +8,7 @@ import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { ValidationError } from "../shared/validate.ts";
 import { notify, startMonitor } from "./alerts.ts";
 import { cleanupAndroid } from "./android.ts";
+import { applyEdge } from "./edge.ts";
 import { startMetrics } from "./metrics.ts";
 import { startRealtime } from "./realtime.ts";
 import { startVulns } from "./vulns.ts";
@@ -208,6 +209,8 @@ export async function startAgent() {
   await startFirewall().catch((e) => console.error(`[agent] firewall: ${e}`));
   // OS updates bring PHP patch releases (same minor); restart pools onto the new binary.
   setInterval(() => reloadUpdatedPhp().catch((e) => console.error(`[agent] php reload: ${e}`)), 10 * 60_000);
+  // Imported certificates renewed in place (certbot, acme.sh) reach the edge within 6 hours.
+  if (!DRY_RUN) setInterval(() => applyEdge().catch((e) => console.error(`[agent] edge certificates: ${e}`)), 6 * 3600_000);
   // coturn reads its certificate at start: pick up the edge's renewals (only does anything when TURN over TLS is on).
   setInterval(() => renewTlsCert().catch((e) => console.error(`[agent] turn cert: ${e}`)), 6 * 3600_000);
   // The same for database remote access; also sets it up again after a recovery or an address change.

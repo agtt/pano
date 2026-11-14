@@ -341,6 +341,12 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
   return out.join("\n");
 }
 
+/**
+ * Set when a copied certificate's content changed (renewed by certbot/acme.sh at the same path): the
+ * Caddyfile stays the same, but Caddy reads certificate files only on a reload.
+ */
+let certsRenewed = false;
+
 /** Copies imported certificate files where only the edge user can read them. */
 async function syncCerts(): Promise<Set<string>> {
   const have = new Set<string>();
@@ -356,6 +362,8 @@ async function syncCerts(): Promise<Set<string>> {
     const key = await readRootOwned(w.key);
     if (!cert?.includes("-----BEGIN CERTIFICATE-----") || !key || !/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key)) continue;
     await ensureDir(certDir(w.id), 0o750);
+    const old = await readText(`${certDir(w.id)}/cert.pem`);
+    if (old !== null && old !== cert) certsRenewed = true;
     await writeAtomic(`${certDir(w.id)}/cert.pem`, cert, 0o640);
     await writeAtomic(`${certDir(w.id)}/key.pem`, key, 0o640);
     await run(["chgrp", "-R", EDGE_USER, fsPath(certDir(w.id))], { check: false });
@@ -405,9 +413,14 @@ export async function edgeActive(): Promise<boolean> {
  * kept, so a failed validation leaves the live config untouched.
  */
 export async function applyEdge(): Promise<{ changed: boolean; reloaded: boolean }> {
+  certsRenewed = false;
   const next = await buildCaddyfile();
   const current = await readText(paths.caddyfile);
-  if (current === next) return { changed: false, reloaded: false };
+  if (current === next) {
+    if (!certsRenewed || !(await edgeActive())) return { changed: false, reloaded: false };
+    await run(["systemctl", "reload", "pano-edge"]);
+    return { changed: false, reloaded: true };
+  }
   const candidate = `${paths.caddyfile}.next`;
   await writeAtomic(candidate, next, 0o640);
   await run(["chgrp", EDGE_USER, fsPath(candidate)], { check: false });
