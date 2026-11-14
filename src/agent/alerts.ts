@@ -69,7 +69,8 @@ async function activeStates(units: string[]): Promise<Map<string, boolean>> {
 export async function checkOnce() {
   const appUnits = apps
     .list()
-    .filter((a) => a.kind === "managed" && a.active_slot)
+    // A suspended app is stopped on purpose.
+    .filter((a) => a.kind === "managed" && a.active_slot && !a.suspended)
     .map((a) => ({ name: a.name, units: procsOf(a).map((p) => `pano-app-${a.name}${p.name ? `_${p.name}` : ""}@${a.active_slot}.service`) }));
   const services = Object.entries(await watchedServices());
   const active = await activeStates([...appUnits.flatMap((a) => a.units), ...services.map(([, u]) => u)]);

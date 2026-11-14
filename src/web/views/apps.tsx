@@ -2,7 +2,7 @@ import { AppCharts, type History } from "./charts.tsx";
 import { formatProcesses, type ProcessSpec } from "../../shared/validate.ts";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Icon } from "./icons.tsx";
-import { Badge, Card, Csrf, DangerForm, Field, PageHead, TabPanes } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, HttpRedirectCheck, PageHead, SuspendControl, SuspendedBanner, TabPanes } from "./layout.tsx";
 import { JobResult, type JobRow } from "./jobs.tsx";
 
 export type AppRow = {
@@ -35,6 +35,10 @@ export type AppRow = {
   preview_ttl_days?: number;
   preview_env_exclude?: string;
   env_groups?: string;
+  http_redirect?: number;
+  suspended?: number;
+  suspended_reason?: string;
+  suspended_at?: number;
   /** names of variables a restart (or, built into the code, a redeploy) would apply */
   env_pending?: { restart: string[]; redeploy: string[] };
   previews?: PreviewRow[];
@@ -164,6 +168,7 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         <input type="hidden" name="auto_deploy" value="0" />
         <input type="checkbox" name="auto_deploy" value="1" checked={a.auto_deploy !== 0} /> {t("Deploy automatically on every push to the branch")}
       </label>
+      <HttpRedirectCheck on={a.http_redirect !== 0} />
       <label class="check">
         <input type="checkbox" name="build_isolated" value="1" checked={a.build_isolated === 1} /> {t("Throwaway build sandbox")}
         <small class="muted">
@@ -227,39 +232,44 @@ export function appHost(a: Pick<AppRow, "domains" | "processes">): string {
 export function AppHead({ app: a, csrf }: { app: AppRow; csrf: string }) {
   const managed = a.kind === "managed";
   const host = appHost(a);
+  const suspended = !!a.suspended;
   return (
-    <PageHead
-      crumb={[["/projects", t("Projects")]]}
-      title={a.name}
-      sub={
-        <>
-          <Badge state={a.status.active} />
-          {host ? <span>{host}</span> : null}
-          <span class="muted">{managed ? `${a.runtime} ${a.runtime_version}` : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit || t("external")}</span>
-        </>
-      }
-      actions={
-        <>
-          {host ? (
-            <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
-              {t("Open")} <Icon name="external" size={14} />
-            </a>
-          ) : null}
-          {managed && a.active_slot ? (
-            <form method="post" action={`/apps/${a.name}/rollback`} title="Back to the previous release, kept on disk: no build, seconds">
-              <Csrf token={csrf} />
-              <button class="btn">↶ Rollback</button>
-            </form>
-          ) : null}
-          {managed ? (
-            <form method="post" action={`/apps/${a.name}/deploy`}>
-              <Csrf token={csrf} />
-              <button class="btn primary">{t("Deploy")}</button>
-            </form>
-          ) : null}
-        </>
-      }
-    />
+    <>
+      <PageHead
+        crumb={[["/projects", t("Projects")]]}
+        title={a.name}
+        sub={
+          <>
+            <Badge state={suspended ? t("Suspended") : a.status.active} />
+            {host ? <span>{host}</span> : null}
+            <span class="muted">{managed ? `${a.runtime} ${a.runtime_version}` : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit || t("external")}</span>
+          </>
+        }
+        actions={
+          <>
+            {host ? (
+              <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
+                {t("Open")} <Icon name="external" size={14} />
+              </a>
+            ) : null}
+            <SuspendControl base={`/apps/${a.name}`} suspended={suspended} csrf={csrf} what="app" />
+            {managed && a.active_slot && !suspended ? (
+              <form method="post" action={`/apps/${a.name}/rollback`} title="Back to the previous release, kept on disk: no build, seconds">
+                <Csrf token={csrf} />
+                <button class="btn">↶ Rollback</button>
+              </form>
+            ) : null}
+            {managed && !suspended ? (
+              <form method="post" action={`/apps/${a.name}/deploy`}>
+                <Csrf token={csrf} />
+                <button class="btn primary">{t("Deploy")}</button>
+              </form>
+            ) : null}
+          </>
+        }
+      />
+      {suspended ? <SuspendedBanner what="app" reason={a.suspended_reason} at={a.suspended_at} external={!managed} /> : null}
+    </>
   );
 }
 

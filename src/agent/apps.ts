@@ -60,7 +60,11 @@ export type AppInput = {
   preview_ttl_days: number;
   preview_env_exclude: string;
   env_groups: string;
+  http_redirect: number;
 };
+
+/** A form's hidden "0" plus a checkbox's "1", or an API caller's value; left out: `missing`. */
+const flag = (x: unknown, missing: 0 | 1): number => (x === undefined ? missing : [x].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0);
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
   const processes = Array.isArray(x.processes) ? parseProcesses(x.processes.join("\n")) : parseProcesses(String(x.processes ?? ""));
@@ -85,14 +89,16 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     // The form sends a hidden "0" plus the checkbox's "1"; API callers may leave it out (on).
     // Arrays (API callers) go through the same checks as the text form.
     crons: parseCrons(Array.isArray(x.crons) ? x.crons.map((c: any) => `${String(c?.schedule ?? "").replace(/[|\r\n]/g, " ")} | ${String(c?.command ?? "")}`).join("\n") : String(x.crons ?? "")),
-    auto_deploy: x.auto_deploy === undefined ? 1 : [x.auto_deploy].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
+    auto_deploy: flag(x.auto_deploy, 1),
     // Off unless asked for (slower: no shared caches).
-    build_isolated: [x.build_isolated].flat().some((d) => d === "1" || d === 1 || d === true) ? 1 : 0,
+    build_isolated: flag(x.build_isolated, 0),
     preview_domain: validatePreviewDomain(x.preview_domain),
     preview_max: v.int(x.preview_max || PREVIEW_MAX_DEFAULT, 1, 20, "max previews"),
     preview_ttl_days: v.int(x.preview_ttl_days || PREVIEW_TTL_DEFAULT, 1, 90, "preview lifetime (days)"),
     preview_env_exclude: normalizeEnvExclude(x.preview_env_exclude),
     env_groups: normalizeGroups(x.env_groups),
+    // On unless turned off: plain HTTP is redirected to HTTPS.
+    http_redirect: flag(x.http_redirect, 1),
   };
 }
 
@@ -204,6 +210,11 @@ export function mustGet(name: string): App {
   const app = apps.get(v.appName(name));
   if (!app) throw new Error(`no app named ${name}`);
   return app;
+}
+
+/** Refuses what would build or start an app's code while it is suspended. */
+export function assertNotSuspended(app: Pick<App, "name" | "suspended">, what = "deploy") {
+  if (app.suspended) throw new Error(`${app.name} is suspended: resume it before you ${what}`);
 }
 
 /** Template unit files of an app on disk: "pano-app-<name>@.service" and "pano-app-<name>_<proc>@.service". */
@@ -350,6 +361,7 @@ export const activeUnits = (app: App): string[] =>
 export async function rollback(name: string, actor: string) {
   const app = mustGet(name);
   if (app.kind !== "managed" || !app.active_slot) throw new Error("nothing deployed yet");
+  assertNotSuspended(app, "roll back");
   if (deploys.running(name)) throw new Error("a deploy is running");
   const home = appHome(name);
   const from = app.active_slot;
@@ -400,6 +412,8 @@ export function parseCrons(text: string): Cron[] {
 export const formatCrons = (c: Cron[]) => c.map((x) => `${x.schedule} | ${x.command}`).join("\n");
 
 const cronBase = (app: string, i: number) => `pano-cron-${app}-${i}`;
+/** The timers of an app's cron jobs. */
+export const cronTimers = (app: App) => app.crons.map((_, i) => `${cronBase(app.name, i)}.timer`);
 
 /** One timer + oneshot service per job, in the live release, with the app's user, env and sandbox. Never two runs at once. */
 export async function writeCrons(app: App) {
@@ -438,7 +452,8 @@ ${LOW}${sandboxLines(home)}`,
     await writeAtomic(`${paths.systemd}/${base}.timer`, `[Unit]\nDescription=pano cron ${app.name} #${i}\n\n[Timer]\nOnCalendar=${c.schedule}\nPersistent=true\nRandomizedDelaySec=5\n\n[Install]\nWantedBy=timers.target\n`, 0o644);
   }
   await run(["systemctl", "daemon-reload"]);
-  if (!app.active_slot) return; // timers start with the first deploy
+  // Timers start with the first deploy, and again when a suspended app resumes.
+  if (!app.active_slot || app.suspended) return;
   for (const i of app.crons.keys()) await run(["systemctl", "enable", "--now", `${cronBase(app.name, i)}.timer`], { check: false });
 }
 
@@ -466,6 +481,8 @@ export async function appAction(name: string, action: "start" | "stop" | "restar
     audit(actor, "app.reload", { name, pm2: true });
     return;
   }
+  // Suspension stopped a managed app's processes; only resume starts them again.
+  if (app.kind === "managed" && action !== "stop") assertNotSuspended(app, action);
   const units = activeUnits(app);
   if (!units.length) throw new Error(app.kind === "external" ? "this app has no service unit to control" : "deploy the app first");
   await run(["systemctl", action, ...units]);
@@ -486,6 +503,7 @@ export async function appStatuses(list: App[]): Promise<AppStatus[]> {
     return ref ? pm2App(ref) : null;
   }));
   return list.map((app, i) => {
+    if (app.suspended) return { active: "suspended", memory: 0, since: "", procs: [] };
     if (parsePm2Ref(app.external_unit)) {
       const p = pm2[i];
       if (!p) return { active: "unknown", memory: 0, since: "", procs: [] };
@@ -570,6 +588,7 @@ let buildQueue: Promise<unknown> = Promise.resolve();
 export function startDeploy(name: string, trigger: string, actor: string): number {
   const app = mustGet(name);
   if (app.kind !== "managed") throw new Error("external apps are deployed by their own tooling");
+  assertNotSuspended(app);
   if (deploys.running(name)) throw new Error("a deploy is already running for this app");
   const id = enqueueDeploy(app, appTarget(name), trigger);
   audit(actor, "app.deploy", { name, id, trigger });
@@ -602,6 +621,8 @@ const appTarget = (name: string): DeployTarget => ({
 
 /** Queues a build (one at a time) and returns the deploy id. */
 export function enqueueDeploy(app: App, target: DeployTarget, trigger: string): number {
+  // A preview carries its parent's suspension (previewApp).
+  if (app.suspended) throw new Error("the app is suspended: resume it before you deploy");
   if (deploys.running(app.name)) throw new Error("a deploy is already running for this app");
   const id = deploys.start(app.name, trigger);
   buildQueue = buildQueue.then(() => deploy(app, id, target)).catch(() => {});

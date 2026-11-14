@@ -359,6 +359,84 @@ export function Badge({ state }: { state: string }) {
   return <span class={`badge ${cls}`}>{state}</span>;
 }
 
+type SuspendWhat = "app" | "site" | "project";
+
+const SUSPEND_EFFECT: Record<SuspendWhat, string> = {
+  app: "Visitors get a plain “This site is suspended” page (HTTP 503). The app's processes, cron jobs and previews stop; deploys and webhooks are refused until you resume.",
+  site: "Visitors get a plain “This site is suspended” page (HTTP 503). A PHP site's pool and cron jobs stop until you resume.",
+  project: "Every app and site of this project shows a plain “This site is suspended” page (HTTP 503); their processes and cron jobs stop until you resume.",
+};
+
+/** Suspend (with an optional reason) or Resume, each behind a small confirm panel. `base`: /apps/x, /sites/x, /projects/x. */
+export function SuspendControl(p: { base: string; suspended: boolean; csrf: string; what: SuspendWhat }) {
+  const otp = (
+    <label class="field">
+      <span>{t("Authenticator code")}</span>
+      <input name="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required />
+    </label>
+  );
+  if (p.suspended) {
+    return (
+      <details class="menu">
+        <summary class="btn primary">{t("Resume")}</summary>
+        <form method="post" action={`${p.base}/resume`} class="menu-list menu-form">
+          <Csrf token={p.csrf} />
+          <p class="small muted">{t("Starts again what ran before the suspension and serves the domains as before.")}</p>
+          {otp}
+          <button class="btn primary">{t("Resume now")}</button>
+        </form>
+      </details>
+    );
+  }
+  return (
+    <details class="menu">
+      <summary class="btn">{t("Suspend")}</summary>
+      <form method="post" action={`${p.base}/suspend`} class="menu-list menu-form">
+        <Csrf token={p.csrf} />
+        <p class="small muted">{t(SUSPEND_EFFECT[p.what])}</p>
+        <label class="field">
+          <span>{t("Reason (optional)")}</span>
+          <input name="reason" maxlength={200} autocomplete="off" placeholder={t("Unpaid invoice, abuse report…")} />
+        </label>
+        {otp}
+        <button class="btn danger">{t("Suspend now")}</button>
+      </form>
+    </details>
+  );
+}
+
+/** Under a suspended app's or site's header: since when and why. */
+export function SuspendedBanner(p: { what: "app" | "site"; reason?: string; at?: number; external?: boolean }) {
+  const when = p.at ? new Date(p.at * 1000).toISOString().replace("T", " ").slice(0, 16) : "";
+  return (
+    <div class="flash warn suspended-banner" role="status">
+      <span>
+        <strong>{t(p.what === "app" ? "This app is suspended." : "This site is suspended.")}</strong>{" "}
+        {t("Visitors see the suspended page.")}
+        {when ? ` ${t("Since {t}.").replace("{t}", when)}` : ""}
+        {p.reason ? (
+          <>
+            {" "}
+            {t("Reason")}: <em>{p.reason}</em>
+          </>
+        ) : null}
+        {p.external ? ` ${t("pano does not run this app, so its processes were left running.")}` : ""}
+      </span>
+    </div>
+  );
+}
+
+/** Settings checkbox: redirect plain HTTP to HTTPS (on by default). The hidden 0 is sent when it is off. */
+export function HttpRedirectCheck({ on }: { on: boolean }) {
+  return (
+    <label class="check">
+      <input type="hidden" name="http_redirect" value="0" />
+      <input type="checkbox" name="http_redirect" value="1" checked={on} /> {t("Redirect HTTP to HTTPS")}
+      <small class="muted"> {t("Turn off only if Cloudflare SSL is “Flexible” or the app redirects itself.")}</small>
+    </label>
+  );
+}
+
 /** Destructive actions ask for the name and a fresh authenticator code. */
 export function DangerForm(p: { action: string; csrf: string; name: string; label: string; extra?: Child }) {
   return (

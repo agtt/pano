@@ -386,6 +386,11 @@ async function rebuild(actor: string) {
   }
 
   for (const app of managed) {
+    // Suspended on the old server: stays suspended (the edge serves its notice); resume deploys nothing, so deploy after resuming.
+    if (app.suspended) {
+      log(`App ${app.name} is suspended: not deployed. Resume it, then deploy.`);
+      continue;
+    }
     await step(`app ${app.name}: deploy from ${app.branch}`, async () => {
       await writeUnits(app);
       startDeploy(app.name, "recovery", actor);

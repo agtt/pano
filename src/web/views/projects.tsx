@@ -5,7 +5,7 @@ import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
 import { appKey, projectSlug, siteKey, type Project } from "../projects.ts";
 import { Ago, appState, parseSince, portOf, runtimeOf, type AppRow, type CertRow, type SiteRow } from "./dashboard.tsx";
 import { Icon } from "./icons.tsx";
-import { Csrf } from "./layout.tsx";
+import { Csrf, SuspendControl } from "./layout.tsx";
 
 export type ProjAppRow = AppRow & {
   port_a?: number;
@@ -20,15 +20,20 @@ export type Proj = Project<ProjAppRow, ProjSiteRow>;
 export type LastDeploy = { status: string; started_at: number; finished_at: number | null };
 
 const DAY = 86400;
-type State = "up" | "warn" | "down" | "idle";
+type State = "up" | "warn" | "down" | "idle" | "suspended";
 
-/** "ok" when every app runs and every enabled site has a valid certificate; else the worst thing in it. */
+/** Suspended members of a project (sites: enabled 0). */
+export const suspendedCount = (p: Proj) => p.apps.filter((a) => a.suspended).length + p.sites.filter((s) => !s.enabled).length;
+const memberCount = (p: Proj) => p.apps.length + p.sites.length;
+
+/** "ok" when every app runs and every enabled site has a valid certificate; else the worst thing in it. "suspended": all of it is. */
 export function projectState(p: Proj, certs: Map<string, CertRow>, now: number): State {
+  if (memberCount(p) && suspendedCount(p) === memberCount(p)) return "suspended";
   if (p.apps.some((a) => appState(a) === "down")) return "down";
   const certDays = p.sites.filter((s) => s.enabled).map((s) => certs.get(s.name)).filter((c): c is CertRow => !!c?.notAfter).map((c) => Math.floor((c.notAfter! - now) / DAY));
   if (certDays.some((d) => d < 7)) return "down";
   if (p.apps.some((a) => appState(a) === "unknown") || certDays.some((d) => d < 14)) return "warn";
-  if (!p.apps.length && !p.sites.some((s) => s.enabled)) return "idle";
+  if (!p.apps.some((a) => !a.suspended) && !p.sites.some((s) => s.enabled)) return "idle";
   return "up";
 }
 
@@ -76,13 +81,29 @@ function certOf(p: Proj, certs: Map<string, CertRow>, now: number): { days: numb
   return { days: days.length ? Math.min(...days) : null, error: cs.some((c) => c.error) };
 }
 
-const STATE_LABEL: Record<State, string> = { up: "Running", warn: "Check", down: "Down", idle: "Idle" };
+const STATE_LABEL: Record<State, string> = { up: "Running", warn: "Check", down: "Down", idle: "Idle", suspended: "Suspended" };
 
 export function StatePill({ state }: { state: State }) {
   return (
     <span class={`state-pill ${state}`}>
       <span class={`led ${state}`} aria-hidden="true" />
       {t(STATE_LABEL[state])}
+    </span>
+  );
+}
+
+/** The project's state, and a "Suspended n/m" pill when only some of it is. */
+function ProjectStatus({ p, st }: { p: Proj; st: State }) {
+  const n = suspendedCount(p);
+  return (
+    <span class="pills">
+      <StatePill state={st} />
+      {n && st !== "suspended" ? (
+        <span class="state-pill suspended" title={t("Suspended")}>
+          <span class="led suspended" aria-hidden="true" />
+          {`${t("Suspended")} ${n}/${memberCount(p)}`}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -168,10 +189,13 @@ function AddMenu() {
 }
 
 function Summary({ projects, cm, now, deploys }: { projects: Proj[]; cm: Map<string, CertRow>; now: number; deploys?: Record<string, LastDeploy> }) {
-  const apps = projects.flatMap((p) => p.apps);
+  // Suspended apps are off on purpose: not counted as running or not running.
+  const apps = projects.flatMap((p) => p.apps).filter((a) => !a.suspended);
   const sites = projects.flatMap((p) => p.sites);
   const up = apps.filter((a) => appState(a) === "up").length;
   const on = sites.filter((s) => s.enabled).length;
+  const offApps = projects.flatMap((p) => p.apps).filter((a) => a.suspended).length;
+  const offSites = sites.length - on;
   const domains = new Set(projects.flatMap((p) => p.domains).filter((d) => d !== "*")).size;
   const badApps = apps.filter((a) => appState(a) === "down" || appState(a) === "unknown").length;
   const badCerts = sites.filter((s) => s.enabled).map((s) => cm.get(s.name)).filter((c) => c && (c.error || (c.notAfter && c.notAfter - now < 14 * DAY))).length;
@@ -189,6 +213,14 @@ function Summary({ projects, cm, now, deploys }: { projects: Proj[]; cm: Map<str
     },
   ];
   if (failed !== null) cards.push({ label: t("Failed deploys"), value: String(failed), sub: t("last deploy of each app"), tone: failed ? "down" : "" });
+  if (offApps + offSites) {
+    cards.push({
+      label: t("Suspended"),
+      value: String(offApps + offSites),
+      sub: t("Apps: {a}, sites: {s}").replace("{a}", String(offApps)).replace("{s}", String(offSites)),
+      tone: "suspended",
+    });
+  }
   return (
     <section class="summary" aria-label={t("Summary")}>
       {cards.map((c) => (
@@ -209,13 +241,13 @@ function Members({ p }: { p: Proj }) {
     <div class="members">
       {p.apps.map((a) => (
         <a class="chip" href={`/apps/${a.name}`}>
-          <span class={`led ${appState(a)}`} aria-hidden="true" />
+          <span class={`led ${a.suspended ? "suspended" : appState(a)}`} aria-hidden="true" />
           {a.name}
         </a>
       ))}
       {p.sites.map((s) => (
         <a class="chip" href={`/sites/${s.name}`}>
-          <span class={`led ${s.enabled ? "up" : "idle"}`} aria-hidden="true" />
+          <span class={`led ${s.enabled ? "up" : "suspended"}`} aria-hidden="true" />
           {s.name}
         </a>
       ))}
@@ -273,7 +305,10 @@ export function ProjectsPage({ projects, certs, now, deploys, wordpress = [] }: 
                 const dom = mainDomain(p);
                 const href = `/projects/${projectSlug(p.key)}`;
                 const more = p.domains.filter((d) => d !== dom).length;
-                const words = [p.name, ...p.domains, ...types.map((x) => x.label), ...p.apps.flatMap((a) => [a.name, a.runtime ?? ""]), ...p.sites.flatMap((s) => [s.name, s.kind])];
+                const words = [
+                  p.name, ...p.domains, ...types.map((x) => x.label), ...p.apps.flatMap((a) => [a.name, a.runtime ?? ""]), ...p.sites.flatMap((s) => [s.name, s.kind]),
+                  ...(suspendedCount(p) ? ["suspended", t("Suspended")] : []),
+                ];
                 return (
                   <tr data-filter={words.join(" ").toLowerCase()}>
                     <td class="proj-cell">
@@ -298,7 +333,7 @@ export function ProjectsPage({ projects, certs, now, deploys, wordpress = [] }: 
                       <TypeTags list={types} />
                     </td>
                     <td>
-                      <StatePill state={st} />
+                      <ProjectStatus p={p} st={st} />
                     </td>
                     <td class="nowrap">
                       <CertCell {...certOf(p, cm, now)} />
@@ -370,12 +405,19 @@ function DomainLinks({ list }: { list: string[] }) {
 // A project's own page. Room for more tabs later (members, who may manage it).
 export function ProjectDetail({ p, projects, certs, now, csrf }: { p: Proj; projects: Proj[]; certs: CertRow[]; now: number; csrf: string }) {
   const cm = new Map(certs.map((c) => [c.site, c]));
+  const off = suspendedCount(p);
+  const base = `/projects/${projectSlug(p.key)}`;
   return (
     <div class="stack">
       <section class="card">
         <div class="card-head">
           <h2>{t("Domains")}</h2>
-          <StatePill state={projectState(p, cm, now)} />
+          <div class="row">
+            <ProjectStatus p={p} st={projectState(p, cm, now)} />
+            {/* Partly suspended: both, for the rest and for those that are. */}
+            {off ? <SuspendControl base={base} suspended csrf={csrf} what="project" /> : null}
+            {off < memberCount(p) ? <SuspendControl base={base} suspended={false} csrf={csrf} what="project" /> : null}
+          </div>
         </div>
         <DomainLinks list={p.domains} />
       </section>
@@ -404,9 +446,9 @@ export function ProjectDetail({ p, projects, certs, now, csrf }: { p: Proj; proj
                 {p.apps.map((a) => {
                   const s = appState(a);
                   return (
-                    <tr class={s}>
+                    <tr class={a.suspended ? "off" : s}>
                       <td>
-                        <span class={`led ${s}`} title={a.status.active} />
+                        <span class={`led ${a.suspended ? "suspended" : s}`} title={a.suspended ? t("suspended") : a.status.active} />
                         <a href={`/apps/${a.name}`}>{a.name}</a>
                       </td>
                       <td>
@@ -414,7 +456,7 @@ export function ProjectDetail({ p, projects, certs, now, csrf }: { p: Proj; proj
                       </td>
                       <td class="num muted">{portOf(a)}</td>
                       <td class="num">{a.status.memory ? fmtBytes(a.status.memory) : "—"}</td>
-                      <td class="num">{s === "up" ? <Ago at={parseSince(a.status.since)} now={now} /> : <span class="state">{a.status.active}</span>}</td>
+                      <td class="num">{s === "up" ? <Ago at={parseSince(a.status.since)} now={now} /> : <span class="state">{a.suspended ? t("Suspended") : a.status.active}</span>}</td>
                       <td>
                         <MoveForm item={appKey(a.name)} current={p.key} projects={projects} csrf={csrf} />
                       </td>
@@ -458,7 +500,7 @@ export function ProjectDetail({ p, projects, certs, now, csrf }: { p: Proj; proj
                   return (
                     <tr class={s.enabled ? "" : "off"}>
                       <td>
-                        <span class={`led ${s.enabled ? "up" : "idle"}`} title={s.enabled ? t("enabled") : t("suspended")} />
+                        <span class={`led ${s.enabled ? "up" : "suspended"}`} title={s.enabled ? t("enabled") : t("suspended")} />
                         <a href={`/sites/${s.name}`}>{s.name}</a>
                       </td>
                       <td>

@@ -58,6 +58,43 @@ function siteAddresses(domains: string[]): string {
   return domains.map((d) => (d === "*" ? "https://" : d)).join(", ");
 }
 
+/**
+ * One site block, and with `plainHttp` its twin on port 80 with the same handlers (no redirect to HTTPS:
+ * Cloudflare "Flexible" SSL, or a backend that redirects itself). A "*" catch-all keeps its redirect: an
+ * "http://" block for any host would sit in front of every other site's redirect. ACME HTTP-01 still
+ * works on the twin: Caddy answers /.well-known/acme-challenge/ before any route.
+ */
+function blocks(hosts: string[], tls: string[], body: string[], log: string, plainHttp: boolean): string[] {
+  const out = [`${siteAddresses(hosts)} {`, "\timport pano_common", ...tls, ...body, ...logBlock(log), "}", ""];
+  const plain = plainHttp ? hosts.filter((h) => h !== "*") : [];
+  if (plain.length) out.push(`${plain.map((h) => `http://${h}`).join(", ")} {`, "\timport pano_common", ...body, ...logBlock(log), "}", "");
+  return out;
+}
+
+/**
+ * What a suspended site or app answers: a fixed page, 503 with Retry-After, nothing from the tenant and
+ * no backend contacted. Backticks and no braces: Caddy takes the body as is (no placeholders).
+ */
+export const SUSPENDED_PAGE =
+  '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">' +
+  "<title>Site suspended</title></head>" +
+  '<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f5f6f8;color:#1d2433;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif">' +
+  '<main style="max-width:32rem;padding:2rem;text-align:center"><h1 style="margin:0 0 .5rem;font-size:1.5rem">This site is suspended</h1>' +
+  '<p style="margin:0;color:#5b6475">Please contact the site owner or the hosting provider.</p></main></body></html>';
+
+const SUSPENDED_SNIPPET = [
+  "(pano_suspended) {",
+  "\thandle {",
+  '\t\theader Content-Type "text/html; charset=utf-8"',
+  '\t\theader Cache-Control "no-store"',
+  "\t\theader Retry-After 3600",
+  `\t\trespond \`${SUSPENDED_PAGE}\` 503`,
+  "\t}",
+  "}",
+  "",
+];
+const SUSPENDED_BODY = ["\timport pano_suspended"];
+
 function logBlock(name: string): string[] {
   return [
     "\tlog {",
@@ -200,6 +237,9 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     "}",
     "",
   ];
+  const anySuspended =
+    input.apps.some((a) => a.suspended) || input.sites.some((x) => !x.enabled && x.domains.length) || (input.previews ?? []).some((p) => p.app.suspended);
+  if (anySuspended) out.push(...SUSPENDED_SNIPPET);
 
   if (s.hooksDomain) {
     // Only the webhook endpoint is public; the panel itself never is.
@@ -222,6 +262,14 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
   }
 
   for (const a of input.apps) {
+    const plainHttp = a.http_redirect === 0;
+    const tls = (hosts: string[]) => tlsLine(`app-${a.name}`, input.certs.has(`app-${a.name}`), hosts.some((h) => h.includes("*")));
+    if (a.suspended) {
+      // Every host of the app, deployed or not, gets the notice (and keeps its certificate).
+      const hosts = [...appRoutes(a).keys()];
+      if (hosts.length) out.push(...blocks(hosts, tls(hosts), SUSPENDED_BODY, `app-${a.name}`, plainHttp));
+      continue;
+    }
     if (a.kind === "managed" && !a.active_slot) continue;
     // Hosts with the same routes share one block (example.com, www.example.com).
     const groups = new Map<string, { hosts: string[]; routes: Route[] }>();
@@ -233,52 +281,40 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
     }
     for (const { hosts, routes } of groups.values()) {
       const single = routes.length === 1 && routes[0]!.path === "/";
-      out.push(
-        `${siteAddresses(hosts)} {`,
-        "\timport pano_common",
-        ...tlsLine(`app-${a.name}`, input.certs.has(`app-${a.name}`), hosts.some((h) => h.includes("*"))),
-        ...(single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true)),
-        ...logBlock(`app-${a.name}`),
-        "}",
-        "",
-      );
+      out.push(...blocks(hosts, tls(hosts), single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true), `app-${a.name}`, plainHttp));
     }
   }
 
   // Previews: one exact host each. Certificates are issued on demand, and the ask endpoint
-  // (agent main.ts) approves only hosts of existing previews.
+  // (agent main.ts) approves only hosts of existing previews. A suspended app's previews are suspended too.
   for (const { parent, app: pv } of input.previews ?? []) {
     if (!pv.active_slot) continue;
     for (const [host, routes] of appRoutes(pv)) {
       const single = routes.length === 1 && routes[0]!.path === "/";
-      out.push(
-        `${host} {`,
-        "\timport pano_common",
-        ...tlsLine("", false, true),
-        ...(single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true)),
-        ...logBlock(`preview-${parent}`),
-        "}",
-        "",
-      );
+      const body = pv.suspended ? SUSPENDED_BODY : single ? [`\treverse_proxy ${routes[0]!.upstream}`] : routeLines(routes, true);
+      out.push(...blocks([host], tlsLine("", false, true), body, `preview-${parent}`, false));
     }
   }
 
   for (const site of input.sites) {
-    if (!site.enabled || !site.domains.length) continue;
+    if (!site.domains.length) continue;
     const onDemand = !!site.on_demand_tls || site.domains.includes("*");
-    out.push(`${siteAddresses(site.domains)} {`, "\timport pano_common", ...tlsLine(`site-${site.name}`, input.certs.has(`site-${site.name}`), onDemand));
-    if (site.kind === "legacy") {
+    let body: string[];
+    if (!site.enabled) {
+      // Suspended: the domains stay on the edge (certificates keep renewing), nothing reaches the site.
+      body = SUSPENDED_BODY;
+    } else if (site.kind === "legacy") {
       // Imported PHP/static/rewrite-heavy sites stay on OpenLiteSpeed, now on localhost only.
       // Caddy adds X-Forwarded-For/-Proto/-Host and keeps the Host header.
-      out.push(`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`);
+      body = [`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`];
     } else if (site.kind === "static") {
-      out.push(`\troot * ${(view && viewPath(site.root)) || site.root}`, ...ASSET_CACHE, "\tfile_server");
+      body = [`\troot * ${(view && viewPath(site.root)) || site.root}`, ...ASSET_CACHE, "\tfile_server"];
     } else if (site.kind === "php") {
-      out.push(...phpLines(site, view));
+      body = phpLines(site, view);
     } else {
-      out.push(...routeLines(site.routes));
+      body = routeLines(site.routes);
     }
-    out.push(...logBlock(`site-${site.name}`), "}", "");
+    out.push(...blocks(site.domains, tlsLine(`site-${site.name}`, input.certs.has(`site-${site.name}`), onDemand), body, `site-${site.name}`, site.http_redirect === 0));
   }
   return out.join("\n");
 }
@@ -288,7 +324,8 @@ async function syncCerts(): Promise<Set<string>> {
   const have = new Set<string>();
   const want: { id: string; cert: string; key: string }[] = siteStore
     .list()
-    .filter((s) => s.enabled && s.tls_cert && s.tls_key)
+    // Suspended sites too: the edge still serves their domains (the suspended page).
+    .filter((s) => s.tls_cert && s.tls_key)
     .map((s) => ({ id: `site-${s.name}`, cert: s.tls_cert, key: s.tls_key }));
   for (const w of want) {
     // Only files root put there (owner of the file, every directory and link on the way), so a path under a

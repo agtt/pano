@@ -531,6 +531,16 @@ a.proj-name:hover { color: var(--accent); text-decoration: none; }
 .state-pill.up { background: var(--up-bg); color: var(--up); }
 .state-pill.warn { background: var(--check-bg); color: var(--check); }
 .state-pill.down { background: var(--down-bg); color: var(--down); }
+/* suspended on purpose: its own tone, never the alarm red */
+.state-pill.suspended { background: var(--t3-bg); color: var(--t3); }
+.led.suspended { background: var(--t3); box-shadow: none; animation: none; }
+.summary-card.suspended .summary-value { color: var(--t3); }
+.pills { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+/* Suspend / Resume: a small confirm panel under the button */
+.menu-list.menu-form { width: 320px; gap: 10px; padding: 14px; text-align: left; }
+.menu-form p { margin: 0; }
+.menu-form .field { margin: 0; }
+.suspended-banner { display: flex; gap: 12px; align-items: center; }
 .deploy-cell { display: inline-flex; align-items: baseline; white-space: nowrap; }
 .deploy-cell .led { margin-right: 8px; width: 7px; height: 7px; box-shadow: none; animation: none; }
 .deploy-cell small { margin-left: 8px; }

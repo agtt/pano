@@ -9,7 +9,8 @@ import { apps, audit, sites, type App, type Route, type Site } from "./state.ts"
 import { pm2List, pm2Ref } from "./pm2.ts";
 import { exists, readText, run } from "./sys.ts";
 
-export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons"> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
+export type ImportSite = Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at"> &
+  Partial<Pick<Site, "suspended_reason">> & { wordpress: boolean; wpProxyReady: boolean; databases: string[] };
 export type ImportApp = Pick<App, "name" | "external_unit" | "upstream"> & { ports: number[]; process: string };
 export type ImportPlan = {
   cyberpanel: { installed: boolean; version: string; services: Record<string, string> };
@@ -160,6 +161,9 @@ export async function scan(): Promise<ImportPlan> {
       tls_key: pem(vh.ssl?.keyFile),
       source: "cyberpanel",
       enabled: suspended.has(ref.name) ? 0 : 1,
+      ...(suspended.has(ref.name) ? { suspended_reason: "suspended in CyberPanel" } : {}),
+      // OpenLiteSpeed keeps deciding about plain HTTP (as before the edge): no redirect that could loop behind Cloudflare "Flexible".
+      http_redirect: kind === "legacy" ? 0 : 1,
       on_demand_tls: domains.includes("*") ? 1 : 0,
       wordpress: wpConfig !== null,
       wpProxyReady: !!wpConfig && /HTTP_X_FORWARDED_PROTO/.test(wpConfig),
@@ -235,8 +239,10 @@ export async function apply(select: { sites: string[]; apps: string[] }, actor: 
   for (const s of plan.sites.filter((x) => select.sites.includes(x.name))) {
     const { wordpress, wpProxyReady, databases, ...site } = s;
     // Already moved to pano's PHP: a re-import must not send it back to OpenLiteSpeed.
-    if (sites.get(site.name)?.kind === "php") continue;
-    sites.upsert(site);
+    const existing = sites.get(site.name);
+    if (existing?.kind === "php") continue;
+    // A re-import keeps what was decided in pano since: suspension and the HTTPS redirect.
+    sites.upsert(existing ? { ...site, enabled: existing.enabled, suspended_reason: existing.suspended_reason, http_redirect: existing.http_redirect } : site);
     siteCount++;
   }
   for (const a of plan.apps.filter((x) => select.apps.includes(x.name))) {

@@ -474,7 +474,7 @@ export async function setDomain(domain: string, actor: string) {
       tls_cert: "",
       tls_key: "",
       source: "pano",
-      enabled: 1,
+      enabled: existing?.enabled ?? 1,
       on_demand_tls: 0,
     });
   }

@@ -38,6 +38,7 @@ import * as mysqlRemote from "./mysqlremote.ts";
 import { remoteDomains } from "./remotedb-config.ts";
 import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
+import * as suspend from "./suspend.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
 import { PROVIDERS, PROVIDER_IDS } from "../shared/backup-providers.ts";
 import * as system from "./system.ts";
@@ -79,6 +80,8 @@ const SENSITIVE = new Set([
   "mysql.remote.enable", "mysql.remote.disable", "mysql.remote.user.add", "mysql.remote.user.remove",
   // Root moves or chowns files in a tenant's tree.
   "sites.fixPermissions", "shield.quarantine",
+  // Takes a tenant offline (or back): routine for an admin, so the trusted window covers it.
+  "sites.suspend", "sites.resume", "sites.toggle", "apps.suspend", "apps.resume", "projects.suspend", "projects.resume",
 ]);
 /**
  * Guarded actions that need a code sent with that very call, even while the session is trusted
@@ -111,7 +114,7 @@ export const ENV_MASK = "••••••••";
 // build_isolated: turning it off lets install scripts reach the deploy key and data again.
 const RUN_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "preview_env_exclude", "env_groups", "build_isolated"] as const;
 /** Where the app is served: guarded, but routine (the trusted window covers it). */
-const CODE_FIELDS = [...RUN_FIELDS, "domains", "ask_url", "preview_domain"] as const;
+const CODE_FIELDS = [...RUN_FIELDS, "domains", "ask_url", "preview_domain", "http_redirect"] as const;
 
 /** Guarded fields an apps.update call changes; none for an unknown app or invalid input (the handler rejects it the same way). */
 function changedAppFields(p: P): string[] {
@@ -237,6 +240,9 @@ export const methods: Record<string, Handler> = {
     return appsOps.deleteApp(p.name, actor, !!p.removeFiles);
   },
   "apps.deploy": (p, actor) => ({ id: appsOps.startDeploy(p.name, "manual", actor) }),
+  // The edge answers with the suspended page; processes, cron timers and previews stop until resumed.
+  "apps.suspend": (p, actor) => suspend.suspendApp(p.name, p.reason, actor),
+  "apps.resume": (p, actor) => suspend.resumeApp(p.name, actor),
   "apps.rollback": (p, actor) => appsOps.rollback(v.appName(p.name), actor),
   "apps.crons": async (p) => {
     const app = apps.get(v.appName(p.name));
@@ -307,6 +313,7 @@ export const methods: Record<string, Handler> = {
     const r = appsOps.verifyWebhook(p.name, String(p.body ?? ""), String(p.signature ?? ""), String(p.ref ?? ""), String(p.gitlabToken ?? ""));
     // A push to another branch builds (or, on branch deletion, removes) its preview when the app has a preview domain.
     if (!r.deploy) return (await previewsOps.onPush(String(p.name), String(p.ref ?? ""), String(p.body ?? ""), source)) ?? r;
+    if (apps.get(p.name)?.suspended) return { deploy: false, reason: "app is suspended" };
     if (apps.get(p.name)?.auto_deploy === 0) return { deploy: false, reason: "auto deploy is off" };
     return { ...r, id: appsOps.startDeploy(p.name, "push", source) };
   },
@@ -570,6 +577,9 @@ export const methods: Record<string, Handler> = {
     audit(actor, "projects.move", { item, target });
     return moves;
   },
+  // Every app and site of a project at once (the web sends the members it grouped).
+  "projects.suspend": (p, actor) => suspend.setProjectSuspended({ apps: p.apps, sites: p.sites, reason: p.reason }, true, actor),
+  "projects.resume": (p, actor) => suspend.setProjectSuspended({ apps: p.apps, sites: p.sites }, false, actor),
   "sites.list": () => sites.list(),
   "sites.certs": () => siteCerts(),
   "sites.createPhp": async (p, actor) => {
@@ -631,20 +641,24 @@ export const methods: Record<string, Handler> = {
       tls_cert: p.autoTls ? "" : (prev?.tls_cert ?? ""),
       tls_key: p.autoTls ? "" : (prev?.tls_key ?? ""),
       source: prev?.source ?? "pano",
-      enabled: p.enabled === false ? 0 : 1,
+      // Suspension changes only through sites.suspend / sites.resume (they stop and start what runs).
+      enabled: prev ? prev.enabled : p.enabled === false ? 0 : 1,
       on_demand_tls: p.on_demand_tls || clean.includes("*") ? 1 : 0,
+      // Left out (API callers): unchanged, on for a new site.
+      ...(p.http_redirect === undefined ? {} : { http_redirect: [p.http_redirect].flat().some((x) => x === true || x === 1 || x === "1") ? 1 : 0 }),
     });
     await applyEdge();
-    audit(actor, "site.save", { name });
+    audit(actor, "site.save", { name, http_redirect: sites.get(name)?.http_redirect });
   },
+  "sites.suspend": (p, actor) => suspend.suspendSite(p.name, p.reason, actor),
+  "sites.resume": (p, actor) => suspend.resumeSite(p.name, actor),
+  // Older callers: enabled = false suspends (without a reason), true resumes; already so is a no-op.
   "sites.toggle": async (p, actor) => {
     const site = sites.get(v.siteName(p.name));
     if (!site) throw new Error("not found");
-    sites.setEnabled(site.name, !!p.enabled);
-    if (site.kind === "php") await php.setPhpEnabled(site, !!p.enabled);
-    await jobs.writeSiteCrons(site.name);
-    await applyEdge();
-    audit(actor, "site.toggle", { name: site.name, enabled: !!p.enabled });
+    if (!!p.enabled === !!site.enabled) return;
+    if (p.enabled) await suspend.resumeSite(site.name, actor);
+    else await suspend.suspendSite(site.name, "", actor);
   },
   "sites.delete": async (p, actor) => {
     if (p.confirm !== p.name) throw new Error("type the site name to confirm");

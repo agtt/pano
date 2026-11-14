@@ -160,7 +160,8 @@ export async function startAgent() {
       const appPorts = (a: App) => (a.kind === "external" ? [a.upstream.split(":").at(-1)!] : procsOf(a).flatMap((p) => [String(p.port_a), String(p.port_b)]));
       const owners = [
         ...apps.list().map((a) => ({ hosts: appHosts(a), ask: a.ask_url, ports: appPorts(a) })),
-        ...sites.list().filter((s) => s.enabled).map((s) => ({ hosts: s.domains, ask: s.ask_url, ports: s.routes.map((r) => r.upstream.split(":").at(-1)!) })),
+        // Suspended sites too: the edge keeps serving their domains (the suspended page) over HTTPS.
+        ...sites.list().map((s) => ({ hosts: s.domains, ask: s.ask_url, ports: s.routes.map((r) => r.upstream.split(":").at(-1)!) })),
         // Preview hosts: certificates only for previews that exist (no ask URL, never a catch-all).
         ...previews.list().map((pv) => ({ hosts: [pv.host], ask: "", ports: [] as string[] })),
       ];

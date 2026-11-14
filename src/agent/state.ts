@@ -50,9 +50,20 @@ export type App = {
   /** env fingerprints (envSnapshot) the processes started with and the live build used; never sent to the UI */
   env_running: string;
   env_built: string;
+  /** 1: plain HTTP is redirected to HTTPS (default); 0: also served on plain HTTP (Cloudflare "Flexible" SSL, apps that redirect themselves) */
+  http_redirect: number;
+  /** 1: the edge answers every request with the suspended page; its processes, cron timers and previews are stopped */
+  suspended: number;
+  suspended_reason: string;
+  suspended_at: number;
+  /** what suspend stopped, so resume brings back exactly that */
+  suspended_units: SuspendedUnit[];
   created_at: number;
   updated_at: number;
 };
+
+/** A unit as it was when its app was suspended. */
+export type SuspendedUnit = { unit: string; active: boolean; enabled: boolean };
 
 /** A process of a multi-process app. Workers have no routes and port 0. */
 export type Process = ProcessSpec & { port_a: number; port_b: number };
@@ -77,7 +88,13 @@ export type Site = {
   tls_cert: string;
   tls_key: string;
   source: "cyberpanel" | "cpanel" | "container" | "pano";
+  /** 0: suspended. The edge keeps the domains (and their certificates) but answers with the suspended page; a PHP site's pool and cron timers are stopped. */
   enabled: number;
+  /** why and when it was suspended ("" / 0 while it runs, and for sites disabled before suspension existed) */
+  suspended_reason: string;
+  suspended_at: number;
+  /** 1: plain HTTP is redirected to HTTPS; 0: also served on plain HTTP (legacy imports: the backend decides) */
+  http_redirect: number;
   on_demand_tls: number;
   /** php sites: path prefixes answered with 404 (from "deny from all" .htaccess files) */
   deny_paths: string[];
@@ -329,26 +346,52 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "env_groups", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "env_running", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "env_built", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "http_redirect", "INTEGER NOT NULL DEFAULT 1"],
+  ["apps", "suspended", "INTEGER NOT NULL DEFAULT 0"],
+  ["apps", "suspended_reason", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "suspended_at", "INTEGER NOT NULL DEFAULT 0"],
+  ["apps", "suspended_units", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "deny_paths", "TEXT NOT NULL DEFAULT '[]'"],
   ["sites", "converted_from", "TEXT NOT NULL DEFAULT ''"],
   ["sites", "crons", "TEXT NOT NULL DEFAULT '[]'"],
+  ["sites", "suspended_reason", "TEXT NOT NULL DEFAULT ''"],
+  ["sites", "suspended_at", "INTEGER NOT NULL DEFAULT 0"],
+  ["sites", "http_redirect", "INTEGER NOT NULL DEFAULT 1"],
   ["containers", "digest", "TEXT NOT NULL DEFAULT ''"],
   ["containers", "read_only", "INTEGER NOT NULL DEFAULT 0"],
   ["backup_runs", "dest", "TEXT NOT NULL DEFAULT 'a'"],
   ["backup_runs", "engine", "TEXT NOT NULL DEFAULT 'archive'"],
 ];
 
-function migrate(d: Database) {
+/** Data changes that go with a new column: run once, right after the column is added. */
+const COLUMN_MIGRATIONS: Record<string, string> = {
+  // Imported OpenLiteSpeed sites keep what they did before the edge: OLS (the backend) decides whether
+  // plain HTTP redirects, so a site behind Cloudflare "Flexible" SSL does not start looping.
+  "sites.http_redirect": "UPDATE sites SET http_redirect = 0 WHERE kind = 'legacy'",
+};
+
+// Sites disabled before suspension existed (enabled = 0, e.g. imported as suspended from CyberPanel) need
+// no change: enabled = 0 now means suspended, and the edge serves them the suspended page.
+export function migrate(d: Database) {
   for (const [table, column, def] of ADDED_COLUMNS) {
     const cols = d.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    if (cols.some((c) => c.name === column)) continue;
+    d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    const then = COLUMN_MIGRATIONS[`${table}.${column}`];
+    if (then) d.exec(then);
   }
 }
 
 const now = () => Math.floor(Date.now() / 1000);
 
 function decodeApp(row: any): App {
-  return { ...row, domains: JSON.parse(row.domains), processes: JSON.parse(row.processes || "[]"), crons: JSON.parse(row.crons || "[]") };
+  return {
+    ...row,
+    domains: JSON.parse(row.domains),
+    processes: JSON.parse(row.processes || "[]"),
+    crons: JSON.parse(row.crons || "[]"),
+    suspended_units: JSON.parse(row.suspended_units || "[]"),
+  };
 }
 function decodeSite(row: any): Site {
   return {
@@ -383,7 +426,8 @@ export const apps = {
   },
   insert(a: Partial<App> & { name: string }) {
     const t = now();
-    const row = { ...a, domains: JSON.stringify(a.domains ?? []), processes: JSON.stringify(a.processes ?? []), crons: JSON.stringify(a.crons ?? []), created_at: t, updated_at: t };
+    const row: Record<string, unknown> = { ...a, domains: JSON.stringify(a.domains ?? []), processes: JSON.stringify(a.processes ?? []), crons: JSON.stringify(a.crons ?? []), created_at: t, updated_at: t };
+    if (a.suspended_units) row.suspended_units = JSON.stringify(a.suspended_units);
     const cols = Object.keys(row);
     state()
       .query(`INSERT INTO apps (${cols.join(",")}) VALUES (${cols.map((c) => "$" + c).join(",")})`)
@@ -394,6 +438,7 @@ export const apps = {
     if (patch.domains) row.domains = JSON.stringify(patch.domains);
     if (patch.processes) row.processes = JSON.stringify(patch.processes);
     if (patch.crons) row.crons = JSON.stringify(patch.crons);
+    if (patch.suspended_units) row.suspended_units = JSON.stringify(patch.suspended_units);
     delete row.name;
     const sets = Object.keys(row).map((c) => `${c} = $${c}`);
     state().query(`UPDATE apps SET ${sets.join(", ")} WHERE name = $name`).run({ ...row, name } as any);
@@ -478,18 +523,26 @@ export const sites = {
     const row = state().query("SELECT * FROM sites WHERE name = ?").get(name);
     return row ? decodeSite(row) : null;
   },
-  upsert(input: Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons"> & Partial<Pick<Site, "deny_paths" | "converted_from" | "crons">>) {
+  upsert(
+    input: Omit<Site, "created_at" | "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect"> &
+      Partial<Pick<Site, "deny_paths" | "converted_from" | "crons" | "suspended_reason" | "suspended_at" | "http_redirect">>,
+  ) {
     // Cron jobs change only through setCrons.
     const { crons: _crons, ...s } = input;
     const prev = sites.get(s.name);
     const deny = s.deny_paths ?? prev?.deny_paths ?? [];
     const from = s.converted_from !== undefined ? s.converted_from : (prev?.converted_from ?? null);
+    // Why it was suspended stays while it is; a site that runs has none.
+    const suspended = !s.enabled;
     state()
       .query(
-        `INSERT INTO sites (name, kind, domains, root, routes, ask_url, php_version, tls_cert, tls_key, source, enabled, on_demand_tls, deny_paths, converted_from, created_at)
-         VALUES ($name, $kind, $domains, $root, $routes, $ask_url, $php_version, $tls_cert, $tls_key, $source, $enabled, $on_demand_tls, $deny_paths, $converted_from, $created_at)
+        `INSERT INTO sites (name, kind, domains, root, routes, ask_url, php_version, tls_cert, tls_key, source, enabled, on_demand_tls, deny_paths, converted_from,
+           suspended_reason, suspended_at, http_redirect, created_at)
+         VALUES ($name, $kind, $domains, $root, $routes, $ask_url, $php_version, $tls_cert, $tls_key, $source, $enabled, $on_demand_tls, $deny_paths, $converted_from,
+           $suspended_reason, $suspended_at, $http_redirect, $created_at)
          ON CONFLICT(name) DO UPDATE SET kind=$kind, domains=$domains, root=$root, routes=$routes, ask_url=$ask_url, php_version=$php_version,
-           tls_cert=$tls_cert, tls_key=$tls_key, source=$source, enabled=$enabled, on_demand_tls=$on_demand_tls, deny_paths=$deny_paths, converted_from=$converted_from`,
+           tls_cert=$tls_cert, tls_key=$tls_key, source=$source, enabled=$enabled, on_demand_tls=$on_demand_tls, deny_paths=$deny_paths, converted_from=$converted_from,
+           suspended_reason=$suspended_reason, suspended_at=$suspended_at, http_redirect=$http_redirect`,
       )
       .run({
         ...s,
@@ -497,14 +550,22 @@ export const sites = {
         routes: JSON.stringify(s.routes),
         deny_paths: JSON.stringify(deny),
         converted_from: from ? JSON.stringify(from) : "",
+        suspended_reason: suspended ? (s.suspended_reason ?? prev?.suspended_reason ?? "") : "",
+        suspended_at: suspended ? (s.suspended_at ?? prev?.suspended_at ?? 0) : 0,
+        http_redirect: s.http_redirect ?? prev?.http_redirect ?? 1,
         created_at: now(),
       } as any);
   },
   setCrons(name: string, crons: Site["crons"]) {
     state().query("UPDATE sites SET crons = ? WHERE name = ?").run(JSON.stringify(crons), name);
   },
+  /** enabled = false is a suspension (without a reason); see setSuspended. */
   setEnabled(name: string, enabled: boolean) {
-    state().query("UPDATE sites SET enabled = ? WHERE name = ?").run(enabled ? 1 : 0, name);
+    if (enabled) state().query("UPDATE sites SET enabled = 1, suspended_reason = '', suspended_at = 0 WHERE name = ?").run(name);
+    else state().query("UPDATE sites SET enabled = 0, suspended_at = CASE WHEN enabled = 1 THEN ? ELSE suspended_at END WHERE name = ?").run(now(), name);
+  },
+  setSuspended(name: string, reason: string) {
+    state().query("UPDATE sites SET enabled = 0, suspended_reason = ?, suspended_at = ? WHERE name = ?").run(reason, now(), name);
   },
   remove(name: string) {
     state().query("DELETE FROM sites WHERE name = ?").run(name);

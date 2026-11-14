@@ -331,6 +331,34 @@ const tr: Record<string, string> = {
   "No databases yet. Create one below, or add one to an app from its Database tab.": "Henüz veritabanı yok. Aşağıdan bir tane oluştur ya da bir uygulamanın Veritabanı sekmesinden ekle.",
   "Backup jobs": "Yedekleme işleri",
   "Server checks": "Sunucu kontrolleri",
+  // suspend / resume
+  Suspended: "Askıda",
+  Suspend: "Askıya al",
+  Resume: "Devam ettir",
+  "Suspend now": "Şimdi askıya al",
+  "Resume now": "Şimdi devam ettir",
+  Resumed: "Devam ettirildi",
+  "Suspended: {n}": "Askıya alınan: {n}",
+  "Resumed: {n}": "Devam ettirilen: {n}",
+  "Reason (optional)": "Neden (isteğe bağlı)",
+  Reason: "Neden",
+  "Unpaid invoice, abuse report…": "Ödenmemiş fatura, kötüye kullanım bildirimi…",
+  "Starts again what ran before the suspension and serves the domains as before.": "Askıya almadan önce çalışanları yeniden başlatır ve alan adlarını eskisi gibi sunar.",
+  "Visitors get a plain “This site is suspended” page (HTTP 503). The app's processes, cron jobs and previews stop; deploys and webhooks are refused until you resume.":
+    "Ziyaretçiler sade bir “Bu site askıya alındı” sayfası görür (HTTP 503). Uygulamanın süreçleri, zamanlanmış işleri ve önizlemeleri durur; devam ettirene kadar yayınlar ve webhook'lar reddedilir.",
+  "Visitors get a plain “This site is suspended” page (HTTP 503). A PHP site's pool and cron jobs stop until you resume.":
+    "Ziyaretçiler sade bir “Bu site askıya alındı” sayfası görür (HTTP 503). PHP sitesinin havuzu ve zamanlanmış işleri devam ettirene kadar durur.",
+  "Every app and site of this project shows a plain “This site is suspended” page (HTTP 503); their processes and cron jobs stop until you resume.":
+    "Bu projenin tüm uygulama ve siteleri sade bir “Bu site askıya alındı” sayfası gösterir (HTTP 503); süreçleri ve zamanlanmış işleri devam ettirene kadar durur.",
+  "This app is suspended.": "Bu uygulama askıda.",
+  "This site is suspended.": "Bu site askıda.",
+  "Visitors see the suspended page.": "Ziyaretçiler askıya alındı sayfasını görüyor.",
+  "Since {t}.": "{t} tarihinden beri.",
+  "pano does not run this app, so its processes were left running.": "Bu uygulamayı pano çalıştırmıyor, bu yüzden süreçleri çalışır bırakıldı.",
+  "Apps: {a}, sites: {s}": "Uygulama: {a}, site: {s}",
+  // HTTP -> HTTPS
+  "Redirect HTTP to HTTPS": "HTTP'yi HTTPS'e yönlendir",
+  "Turn off only if Cloudflare SSL is “Flexible” or the app redirects itself.": "Yalnızca Cloudflare SSL “Flexible” ise ya da uygulama yönlendirmeyi kendisi yapıyorsa kapat.",
 };
 
 // An entry already in `tr` wins over the backup/database texts.

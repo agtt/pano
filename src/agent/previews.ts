@@ -11,7 +11,7 @@ import {
   branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, previewComment, previewDomainProblem, previewEnv, previewHost, previewProcesses, previewSlug, pvName,
 } from "../shared/preview.ts";
 import { formatEnv, v } from "../shared/validate.ts";
-import { appHome, appUser, assertDomainsFree, effectiveEnv, enqueueDeploy, getEnv, mustGet, teardownUnits, type DeployTarget } from "./apps.ts";
+import { appHome, appUser, assertDomainsFree, assertNotSuspended, effectiveEnv, enqueueDeploy, getEnv, mustGet, teardownUnits, type DeployTarget } from "./apps.ts";
 import { applyEdge } from "./edge.ts";
 import { readGroup } from "./envgroups.ts";
 import { commentPreview, reportStatus } from "./github.ts";
@@ -154,6 +154,7 @@ export function startPreview(appName: string, branchInput: string, trigger: stri
   return serial(async () => {
     const app = mustGet(appName);
     if (app.kind !== "managed") throw new Error("external apps have no previews");
+    assertNotSuspended(app, "build previews");
     if (!app.preview_domain) throw new Error("previews are off for this app: set a preview domain in its settings");
     const branch = v.branch(branchInput);
     if (branch === app.branch) throw new Error(`${branch} is the production branch: use Deploy`);

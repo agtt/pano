@@ -3,7 +3,7 @@ import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Icon } from "./icons.tsx";
 import type { ProviderSpec } from "../../shared/backup-providers.ts";
 import { BackupBanner, BackupSummary, DestCards, type BackupHealth, type Dest } from "./backups.tsx";
-import { Badge, Card, Csrf, DangerForm, Field, PageHead, TabPanes, alwaysAttr } from "./layout.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, HttpRedirectCheck, PageHead, SuspendControl, SuspendedBanner, TabPanes, alwaysAttr } from "./layout.tsx";
 
 const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
@@ -19,7 +19,11 @@ export type SiteRow = {
   php_version: string;
   tls_cert: string;
   source: string;
+  /** 0: suspended */
   enabled: number;
+  suspended_reason?: string;
+  suspended_at?: number;
+  http_redirect?: number;
   on_demand_tls: number;
   deny_paths?: string[];
   converted_from?: { kind: string; root: string; php_version: string } | null;
@@ -223,27 +227,33 @@ export function NoticePage({ title, items, back }: { title: string; items: strin
 const siteHost = (s: SiteRow) => s.domains.find((d) => d && d !== "*" && !d.startsWith("*.")) ?? "";
 const siteKindLabel = (s: SiteRow) => (s.kind === "php" ? `PHP ${s.php_version}` : s.kind === "legacy" ? (s.source === "cyberpanel" ? "OpenLiteSpeed" : t("legacy")) : s.kind === "static" ? t("Static") : "Proxy");
 
-/** The site page's header: name, state, kind and Open. */
-export function SiteHead({ site: s }: { site: SiteRow }) {
+/** The site page's header: name, state, kind, Open and Suspend / Resume. */
+export function SiteHead({ site: s, csrf }: { site: SiteRow; csrf: string }) {
   const host = siteHost(s);
   return (
-    <PageHead
-      crumb={[["/projects", t("Projects")]]}
-      title={s.name}
-      sub={
-        <>
-          <Badge state={s.enabled ? "active" : "disabled"} />
-          <span class="muted">{siteKindLabel(s)}</span>
-        </>
-      }
-      actions={
-        host ? (
-          <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
-            {t("Open")} <Icon name="external" size={14} />
-          </a>
-        ) : null
-      }
-    />
+    <>
+      <PageHead
+        crumb={[["/projects", t("Projects")]]}
+        title={s.name}
+        sub={
+          <>
+            <Badge state={s.enabled ? "active" : t("Suspended")} />
+            <span class="muted">{siteKindLabel(s)}</span>
+          </>
+        }
+        actions={
+          <>
+            {host ? (
+              <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
+                {t("Open")} <Icon name="external" size={14} />
+              </a>
+            ) : null}
+            <SuspendControl base={`/sites/${s.name}`} suspended={!s.enabled} csrf={csrf} what="site" />
+          </>
+        }
+      />
+      {s.enabled ? null : <SuspendedBanner what="site" reason={s.suspended_reason} at={s.suspended_at} />}
+    </>
   );
 }
 
@@ -282,6 +292,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
               <input type="checkbox" name="autoTls" value="1" /> {t("Automatic TLS (drop imported certificate)")} <code class="small">{s.tls_cert}</code>
             </label>
           ) : null}
+          <HttpRedirectCheck on={s?.http_redirect !== 0} />
           <div class="actions">
             <Otp />
             <button class="btn primary">{t("Save")}</button>
@@ -297,7 +308,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
         <dl class="kv">
           <dt>{t("Status")}</dt>
           <dd>
-            <Badge state={s.enabled ? "active" : "disabled"} />
+            <Badge state={s.enabled ? "active" : t("Suspended")} />
           </dd>
           <dt>{t("Type")}</dt>
           <dd>{siteKindLabel(s)}</dd>

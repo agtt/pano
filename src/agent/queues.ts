@@ -154,6 +154,7 @@ export async function setQueues(on: boolean, actor: string) {
 export async function restartWorker(app: string, process: string, actor: string) {
   const w = (await workers()).find((x) => x.app === app && x.process === process);
   if (!w) throw new Error("no such worker");
+  if (apps.get(app)?.suspended) throw new Error(`${app} is suspended: resume it first`);
   await run(["systemctl", "restart", w.unit]);
   audit(actor, "worker.restart", { app, process });
 }

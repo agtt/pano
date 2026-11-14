@@ -275,6 +275,19 @@ export function createWebApp() {
     if (p.key !== key) return c.redirect(`/projects/${projectSlug(p.key)}`);
     return page(c, p.name, <ProjectDetail p={p} projects={d.projects} certs={d.certs} now={d.now} csrf={c.get("s").csrf} />);
   });
+  // Every app and site of the project, as grouped right now (never a list sent by the browser).
+  const projectSuspend = (on: boolean) =>
+    act((c) => `/projects/${c.req.param("slug")}`, async (c, f) => {
+      const key = slugKey(c.req.param("slug")!);
+      const p = (await loadProjects()).projects.find((x) => x.key === key);
+      if (!p) throw new Error("no such project");
+      const members = { apps: p.apps.map((a) => a.name), sites: p.sites.map((s) => s.name) };
+      const r = await call<{ done: string[]; failed: string[] }>(on ? "projects.suspend" : "projects.resume", on ? { ...members, reason: f.reason } : members, actor(c));
+      if (r.failed.length) throw new Error(r.failed.join("; "));
+      return t(on ? "Suspended: {n}" : "Resumed: {n}").replace("{n}", String(r.done.length));
+    });
+  app.post("/projects/:slug/suspend", projectSuspend(true));
+  app.post("/projects/:slug/resume", projectSuspend(false));
   app.post("/projects/move", act("/projects", async (c, f) => {
     const item = String(f.item ?? "");
     const target = String(f.target ?? "");
@@ -524,6 +537,14 @@ export function createWebApp() {
       return c.redirect(err(`/apps/${name}`, e));
     }
   });
+  app.post("/apps/:name/suspend", act((c) => `/apps/${c.req.param("name")}`, async (c, f) => {
+    await call("apps.suspend", { name: c.req.param("name"), reason: f.reason }, actor(c));
+    return t("Suspended");
+  }));
+  app.post("/apps/:name/resume", act((c) => `/apps/${c.req.param("name")}`, async (c) => {
+    await call("apps.resume", { name: c.req.param("name") }, actor(c));
+    return t("Resumed");
+  }));
   app.post("/apps/:name/rollback", act("/apps", async (c) => {
     const name = c.req.param("name")!;
     const r = await call("apps.rollback", { name }, actor(c));
@@ -598,7 +619,7 @@ export function createWebApp() {
     ]);
     const wp = site.kind === "php" ? await call<WpDetectView>("wp.detect", { name: site.name }).catch(() => null) : null;
     const extra = wp ? <WordPressCard site={site.name} d={wp} csrf={c.get("s").csrf} /> : null;
-    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} extra={extra} />, { head: <SiteHead site={site} /> });
+    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} extra={extra} />, { head: <SiteHead site={site} csrf={c.get("s").csrf} /> });
   });
   // ---- WordPress tools (wp-cli through the agent)
   const wpList = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
@@ -702,6 +723,14 @@ export function createWebApp() {
   app.post("/sites/save", act("/sites", async (c, f) => {
     await call("sites.save", { ...f, autoTls: f.autoTls === "1" }, actor(c));
     return "/sites";
+  }));
+  app.post("/sites/:name/suspend", act((c) => `/sites/${c.req.param("name")}`, async (c, f) => {
+    await call("sites.suspend", { name: c.req.param("name"), reason: f.reason }, actor(c));
+    return t("Suspended");
+  }));
+  app.post("/sites/:name/resume", act((c) => `/sites/${c.req.param("name")}`, async (c) => {
+    await call("sites.resume", { name: c.req.param("name") }, actor(c));
+    return t("Resumed");
   }));
   app.post("/sites/:name/toggle", act("/sites", async (c, f) => {
     await call("sites.toggle", { name: c.req.param("name"), enabled: f.enabled === "1" }, actor(c));

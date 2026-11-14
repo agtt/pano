@@ -17,6 +17,7 @@ export type AppRow = {
   domains: string[];
   runtime?: string;
   runtime_version?: string;
+  suspended?: number;
   status: { active: string; memory: number; since: string };
 };
 export type SiteRow = { name: string; kind: string; domains: string[]; enabled: number; tls_cert: string; source: string };
@@ -60,7 +61,9 @@ export function parseSince(since: string): number {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 }
 
-export const appState = (a: AppRow) => (a.status.active === "active" ? "up" : a.status.active === "unknown" ? "unknown" : a.status.active === "not deployed" ? "idle" : "down");
+// Suspended apps are off on purpose: idle, never "down".
+export const appState = (a: AppRow) =>
+  a.status.active === "active" ? "up" : a.status.active === "unknown" ? "unknown" : a.status.active === "not deployed" || a.status.active === "suspended" ? "idle" : "down";
 export const runtimeOf = (a: AppRow) => (a.kind === "managed" ? `${a.runtime ?? ""} ${a.runtime_version ?? ""}`.trim() : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit ? "systemd" : t("external"));
 export const portOf = (a: AppRow) => a.upstream.split(",")[0]?.split(":").at(-1) ?? "";
 
@@ -315,7 +318,7 @@ function Projects({ d }: { d: DashData }) {
                 .map((n) => Math.floor((n - d.now) / DAY));
               const minDays = days.length ? Math.min(...days) : null;
               return (
-                <tr class={st === "down" ? "down" : st === "idle" ? "off" : ""}>
+                <tr class={st === "down" ? "down" : st === "idle" || st === "suspended" ? "off" : ""}>
                   <td>
                     <span class={`led ${st}`} />
                     <a href={`/projects/${projectSlug(p.key)}`}>{p.name}</a>

@@ -189,7 +189,8 @@ async function syncSite(c: Container) {
   if (c.domains.length) {
     sites.upsert({
       name: siteName(c.name), kind: "proxy", domains: c.domains, root: "", routes: [{ path: "/", upstream: `127.0.0.1:${c.host_port}` }],
-      ask_url: "", php_version: "", tls_cert: "", tls_key: "", source: "container", enabled: 1, on_demand_tls: 0,
+      // A suspended site stays suspended when the container is saved again.
+      ask_url: "", php_version: "", tls_cert: "", tls_key: "", source: "container", enabled: sites.get(siteName(c.name))?.enabled ?? 1, on_demand_tls: 0,
     });
   } else {
     sites.remove(siteName(c.name));
