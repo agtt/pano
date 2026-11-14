@@ -627,6 +627,8 @@ export const methods: Record<string, Handler> = {
     const askUrl = String(p.ask_url ?? "").trim();
     if (askUrl && !/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(askUrl)) throw new Error("ask URL must be http://127.0.0.1:PORT/path");
     const prev = sites.get(name);
+    // Imported (legacy) sites keep the routes the import found: the form does not edit them.
+    if (kind === "legacy" && prev?.kind === "legacy") routes.push(...prev.routes);
     // PHP sites need a user, pool and unit: they come from sites.createPhp / convertPhp, then only change here.
     if ((kind === "php") !== (prev?.kind === "php")) throw new Error("use the PHP site form to create or convert PHP sites");
     sites.upsert({
