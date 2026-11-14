@@ -2,6 +2,7 @@
 // that need you, then the live gauges, apps, sites and the rest of the server, then history.
 
 import { fmtBytes, fmtDuration, fmtTime, t } from "../i18n.ts";
+import { BackupBanner, type BackupHealth } from "./backups.tsx";
 import { ServerCharts, type History, type Point } from "./charts.tsx";
 import type { ServerInfo } from "./home.tsx";
 import { Icon, type IconName } from "./icons.tsx";
@@ -31,6 +32,8 @@ export type DashData = {
   sites: SiteRow[];
   certs: CertRow[];
   backups: BackupJob[];
+  /** From backup.health: when present, the banner under the greeting covers "no storage / no jobs". */
+  backupHealth?: BackupHealth | null;
   vulns: VulnInfo;
   activity: AuditRow[];
   databases: number | null;
@@ -84,7 +87,7 @@ export function notices(d: DashData): Notice[] {
   if (mem >= 90) out.push({ level: "warn", text: t("Memory is {n}% used.").replace("{n}", String(mem)), href: "/" });
   for (const s of d.info.services) if (s.state === "failed") out.push({ level: "crit", text: t("Service {unit} failed.").replace("{unit}", s.unit), href: "/services" });
   const jobs = d.backups.filter((j) => j.enabled);
-  if (!jobs.length) out.push({ level: "warn", text: t("No backups are set up."), href: "/backups" });
+  if (!jobs.length && !d.backupHealth) out.push({ level: "warn", text: t("No backups are set up."), href: "/backups" });
   for (const j of jobs) {
     if (j.last_status && !/^(ok|success|done|running)$/.test(j.last_status)) out.push({ level: "crit", text: t("Backup {job} failed last time.").replace("{job}", j.name), href: "/backups" });
     else if (j.last_run_at && d.now - j.last_run_at > 2 * DAY) out.push({ level: "warn", text: t("Backup {job} has not run for {n} days.").replace("{job}", j.name).replace("{n}", String(Math.floor((d.now - j.last_run_at) / DAY))), href: "/backups" });
@@ -415,6 +418,7 @@ export function Dashboard({ d }: { d: DashData }) {
   return (
     <div class="dash">
       <Welcome d={d} list={list} />
+      <BackupBanner health={d.backupHealth} />
       <Quick />
       <Attention list={list} />
       <Stats d={d} />

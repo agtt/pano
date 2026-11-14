@@ -39,6 +39,7 @@ import { remoteDomains } from "./remotedb-config.ts";
 import * as cloudflare from "./cloudflare.ts";
 import * as shield from "./shield.ts";
 import { androidBuilds, apps, audit, auditList, backups, deploys, previews, settings, sites, type Site } from "./state.ts";
+import { PROVIDERS, PROVIDER_IDS } from "../shared/backup-providers.ts";
 import * as system from "./system.ts";
 import * as vpn from "./vpn.ts";
 
@@ -54,7 +55,7 @@ const SENSITIVE = new Set([
   "db.drop", "db.password", "pg.drop", "services.valkeyUrl", "backup.key.export", "backup.restore",
   "edge.cutover", "edge.rollback", "github.connect", "github.disconnect",
   "vpn.disable", "vpn.locks", "vpn.peer.add", "vpn.peer.remove", "guard.set", "alerts.save", "shield.set", "shield.restore", "shield.ignore", "shield.unban",
-  "sites.crons", "backup.dest.set", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.add", "realtime.app.update", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
+  "sites.crons", "backup.dest.set", "backup.dest.connect", "backup.jobs.defaults", "backup.dest.clear", "backup.engine", "vulns.patch", "realtime.uninstall", "realtime.app.add", "realtime.app.update", "realtime.app.remove", "realtime.app.reveal", "turn.uninstall", "turn.rotate", "turn.reveal", "recovery.kit", "recovery.rebuild",
   "apps.addDatabase", "apps.addRealtime", "apps.addTurn",
   // These reach root or the network: a container spec can mount the host, a site can take over a domain.
   // A new app picks its code, domains and shared variables at once (the same fields apps.update guards).
@@ -101,7 +102,7 @@ export const FRESH_ONLY = new Set([
   "vpn.peer.add", "vpn.locks", "vpn.disable", "firewall.disable", "firewall.ports", "cloudflare.lock", "guard.set",
   "pg.remote.enable", "pg.remote.user.add", "mysql.remote.enable", "mysql.remote.user.add",
   // lasting access from outside, and the channel that would report it
-  "runner.enable", "runner.key.add", "github.connect", "backup.dest.set", "import.cpanel.apply", "alerts.save",
+  "runner.enable", "runner.key.add", "github.connect", "backup.dest.set", "backup.dest.connect", "import.cpanel.apply", "alerts.save",
 ]);
 export const ENV_MASK = "••••••••";
 
@@ -723,6 +724,10 @@ export const methods: Record<string, Handler> = {
   "tune.status": () => tune.tuningStatus(),
   "tune.set": (p, actor) => tune.setKernelTuning(!!p.on, actor),
   "backup.dest.set": (p, actor) => backup.setDest(backup.parseDest(p.dest), p, actor),
+  "backup.dest.connect": (p, actor) => backup.connectDest(backup.parseDest(p.dest), { provider: p.provider, fields: p.fields, protect: p.protect }, actor),
+  "backup.providers": () => PROVIDER_IDS.map((id) => PROVIDERS[id]),
+  "backup.health": () => backup.health(),
+  "backup.jobs.defaults": (_p, actor) => backup.ensureDefaultJobs(actor),
   "backup.dest.clear": (p, actor) => backup.clearDest(backup.parseDest(p.dest), actor),
   "backup.dest.test": (p) => backup.testDest(backup.parseDest(p.dest)),
   "backup.engine": (p, actor) => backup.setEngine(p.engine, actor),

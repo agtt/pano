@@ -33,13 +33,16 @@ import { VulnsCard, type VulnView } from "./views/vulns.tsx";
 import { TuneCard, type TuneView } from "./views/tune.tsx";
 import { FirewallCard, type FirewallView } from "./views/firewall.tsx";
 import { Card, Layout } from "./views/layout.tsx";
+import { DatabaseDetail, DatabasesPage, rowsOf, type Engine, type MariaData } from "./views/databases.tsx";
+import type { ProviderSpec } from "../shared/backup-providers.ts";
+import { ConnectPage, ConnectResultPage, type BackupHealth, type ConnectResult } from "./views/backups.tsx";
 import { EnvGroupsPage, type EnvGroupRow } from "./views/envgroups.tsx";
 import { WordPressCard, WordPressPage, WpSecretPage, type WpDetectView, type WpStatusView } from "./views/wordpress.tsx";
 import {
   ActivityPage,
   BackupsPage,
   type BackupSettings,
-  DatabasesPage,
+  type JobRow as BackupJobRow,
   EdgePage,
   ImportPage,
   NoticePage,
@@ -186,8 +189,13 @@ export function createWebApp() {
   };
   const actor = (c: Context<Env>) => c.get("s").user.username;
   const form = async (c: Context<Env>) => (await c.req.parseBody({ all: true })) as Record<string, string | string[]>;
-  const back = (c: Context<Env>, to: string, ok?: string) => c.redirect(ok ? `${to}${to.includes("?") ? "&" : "?"}ok=${encodeURIComponent(ok)}` : to);
-  const err = (to: string, e: unknown) => `${to}${to.includes("?") ? "&" : "?"}err=${encodeURIComponent((e instanceof Error ? e.message : String(e)).slice(0, 300))}`;
+  // The query goes before a #tab fragment so the page still opens on that tab.
+  const withQuery = (to: string, q: string) => {
+    const [path, hash] = to.split("#", 2);
+    return `${path}${path!.includes("?") ? "&" : "?"}${q}${hash ? `#${hash}` : ""}`;
+  };
+  const back = (c: Context<Env>, to: string, ok?: string) => c.redirect(ok ? withQuery(to, `ok=${encodeURIComponent(ok)}`) : to);
+  const err = (to: string, e: unknown) => withQuery(to, `err=${encodeURIComponent((e instanceof Error ? e.message : String(e)).slice(0, 300))}`);
   const needOtp = (c: Context<Env>, otp: unknown) => {
     // Checked by the agent with the next call, not here: this process holds no TOTP secrets.
     const st = stepUp.getStore()!;
@@ -197,7 +205,8 @@ export function createWebApp() {
     st.otp = String(otp);
   };
   /** Runs an action and redirects back with a message either way. */
-  const act = (to: string, fn: (c: Context<Env>, f: Record<string, any>) => Promise<string | void>) => async (c: Context<Env>) => {
+  const act = (dest: string | ((c: Context<Env>) => string), fn: (c: Context<Env>, f: Record<string, any>) => Promise<string | void>) => async (c: Context<Env>) => {
+    const to = typeof dest === "string" ? dest : dest(c);
     const f = await form(c);
     // A code typed into any form goes along; the agent decides which calls need it.
     if (/^\d{6}$/.test(String(f.otp ?? ""))) stepUp.getStore()!.otp = String(f.otp);
@@ -213,7 +222,7 @@ export function createWebApp() {
   app.get("/", async (c) => {
     // One slow or missing part must not take the whole overview down.
     const soft = <T,>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
-    const [info, history, apps, sites, certs, backups, vulns, activity, dbCount, moves] = await Promise.all([
+    const [info, history, apps, sites, certs, backups, vulns, activity, dbCount, moves, backupHealth] = await Promise.all([
       call("system.info"),
       soft(call("metrics.history", { range: parseRange(c.req.query("range")) }), null),
       soft(call("apps.list"), []),
@@ -224,9 +233,10 @@ export function createWebApp() {
       soft(call("audit.list"), []),
       soft(call<{ databases: unknown[] }>("db.list").then((r) => r.databases.length), null),
       soft(call("projects.moves"), {}),
+      soft(call<BackupHealth>("backup.health"), null),
     ]);
     const d: DashData = {
-      info, history, apps, sites, certs, backups, vulns,
+      info, history, apps, sites, certs, backups, vulns, backupHealth,
       activity: activity.slice(0, 6),
       databases: dbCount,
       admins: listUsers().length,
@@ -731,18 +741,43 @@ export function createWebApp() {
   }));
 
   // ---- databases
-  app.get("/databases", async (c) => {
-    try {
-      return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={await call("db.list")} />);
-    } catch (e) {
-      return page(c, t("Databases"), <Card><p class="flash err">{String((e as Error).message)}</p></Card>);
-    }
+  const databasesPage = async (c: Context<Env>, created?: { name: string; user: string; password: string }) => {
+    // MariaDB may not be installed (db.list fails): then the table just has no MariaDB rows.
+    let error: string | undefined;
+    const [data, pg, services, myRemote, pgRemote] = await Promise.all([
+      call<MariaData>("db.list").catch((e) => {
+        error = String((e as Error).message);
+        return { databases: [], users: [] } as MariaData;
+      }),
+      call<PgDb[]>("pg.list").catch(() => [] as PgDb[]),
+      call<ServiceRow[]>("services.status").catch(() => [] as ServiceRow[]),
+      call<RemoteView>("mysql.remote.status").catch(() => undefined),
+      call<RemoteView>("pg.remote.status").catch(() => undefined),
+    ]);
+    const mariaUp = services.find((s) => s.key === "mariadb")?.installed;
+    return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={data} pg={pg} services={services} myRemote={myRemote} pgRemote={pgRemote} created={created} error={mariaUp === false ? undefined : error} />);
+  };
+  app.get("/databases", (c) => databasesPage(c));
+  app.get("/databases/:engine/:name", async (c) => {
+    const engine = c.req.param("engine");
+    const name = c.req.param("name");
+    if (engine !== "mariadb" && engine !== "postgres") return c.redirect("/databases");
+    const [data, pg, jobs, remote] = await Promise.all([
+      engine === "mariadb" ? call<MariaData>("db.list") : Promise.resolve({ databases: [], users: [] } as MariaData),
+      engine === "postgres" ? call<PgDb[]>("pg.list") : Promise.resolve([] as PgDb[]),
+      call<BackupJobRow[]>("backup.jobs").catch(() => [] as BackupJobRow[]),
+      call<RemoteView>(`${engine === "mariadb" ? "mysql" : "pg"}.remote.status`).catch(() => undefined),
+    ]);
+    const row = rowsOf(data, pg).find((r) => r.engine === engine && r.name === name && !r.system);
+    if (!row) return c.redirect(err("/databases", "No such database"));
+    const job = jobs.find((j) => j.kind === (engine === "mariadb" ? "mysql" : "postgres") && j.target === name);
+    return page(c, name, <DatabaseDetail csrf={c.get("s").csrf} engine={engine as Engine} name={name} row={row} mariaUsers={data.users} job={job} remote={remote} />);
   });
   app.post("/databases/create", async (c) => {
     const f = await form(c);
     try {
       const created = await call("db.create", { name: f.name, user: f.user || undefined, password: f.password || undefined }, actor(c));
-      return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={await call("db.list")} created={created} />);
+      return databasesPage(c, created);
     } catch (e) {
       return c.redirect(err("/databases", e));
     }
@@ -753,7 +788,7 @@ export function createWebApp() {
       const [user, host] = String(f.userhost ?? "").split("@");
       needOtp(c, f.otp);
       const r = await call("db.password", { user, host, password: f.password || undefined }, actor(c));
-      return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={await call("db.list")} created={{ name: "password", user: r.user, password: r.password }} />);
+      return databasesPage(c, { name: "password", user: r.user, password: r.password });
     } catch (e) {
       return c.redirect(err("/databases", e));
     }
@@ -900,13 +935,21 @@ export function createWebApp() {
     if (e !== "postgres" && e !== "mariadb") throw new Error("unknown engine");
     return REMOTE[e];
   };
-  app.post("/services/:engine/remote", act("/services", async (c, f) => {
+  // The remote access forms live on /databases and /services: go back to the page they came from.
+  const remoteBack = (c: Context<Env>) => {
+    const ref = c.req.header("referer");
+    try {
+      if (ref && new URL(ref).pathname === "/databases") return "/databases#tab-remote";
+    } catch {}
+    return "/services";
+  };
+  app.post("/services/:engine/remote", act(remoteBack, async (c, f) => {
     const r = remoteOf(c);
     needOtp(c, f.otp);
     await call(`${r.rpc}.remote.enable`, { domain: f.domain, allow: f.allow }, actor(c));
     return `${r.label} remote access is on`;
   }));
-  app.post("/services/:engine/remote/off", act("/services", async (c, f) => {
+  app.post("/services/:engine/remote/off", act(remoteBack, async (c, f) => {
     const r = remoteOf(c);
     needOtp(c, f.otp);
     await call(`${r.rpc}.remote.disable`, {}, actor(c));
@@ -923,10 +966,10 @@ export function createWebApp() {
         : [["User", r.user], ["DATABASE_URL (Prisma)", r.prisma ?? ""], ["DATABASE_URL (mysql2, Drizzle)", r.mysql2 ?? ""]];
       return servicesPage(c, { title: `${e.label} remote · ${r.database}`, lines });
     } catch (e) {
-      return c.redirect(err("/services", e));
+      return c.redirect(err(remoteBack(c), e));
     }
   });
-  app.post("/services/:engine/remote/users/remove", act("/services", async (c, f) => {
+  app.post("/services/:engine/remote/users/remove", act(remoteBack, async (c, f) => {
     const r = remoteOf(c);
     needOtp(c, f.otp);
     await call(`${r.rpc}.remote.user.remove`, { user: f.user }, actor(c));
@@ -935,15 +978,47 @@ export function createWebApp() {
 
   // ---- backups
   const backupsPage = async (c: Context<Env>, key?: string) => {
-    const [s, jobs, dbs, apps] = await Promise.all([
+    const [s, jobs, dbs, apps, health, providers] = await Promise.all([
       call<BackupSettings>("backup.settings"),
       call("backup.jobs"),
       call<string[]>("db.names").catch(() => []),
       call<{ name: string; kind: string }[]>("apps.names").then((a) => a.filter((x) => x.kind === "managed").map((x) => x.name)),
+      call<BackupHealth>("backup.health").catch(() => null),
+      call<ProviderSpec[]>("backup.providers").catch(() => []),
     ]);
-    return page(c, t("Backups"), <BackupsPage csrf={c.get("s").csrf} s={s} jobs={jobs} dbs={dbs} apps={apps} key={key} />);
+    return page(c, t("Backups"), <BackupsPage csrf={c.get("s").csrf} s={s} jobs={jobs} dbs={dbs} apps={apps} kitText={key} health={health} providers={providers} />);
   };
   app.get("/backups", (c) => backupsPage(c));
+  // Connect storage: pick a provider (links, no script needed), paste the key, see every step of the test.
+  const destOf = (v: unknown): "a" | "b" => (v === "b" ? "b" : "a");
+  app.get("/backups/connect", async (c) => {
+    const dest = destOf(c.req.query("dest"));
+    const [providers, s] = await Promise.all([call<ProviderSpec[]>("backup.providers"), call<BackupSettings>("backup.settings")]);
+    const provider = providers.find((x) => x.id === c.req.query("provider"));
+    return page(c, t("Connect storage"), <ConnectPage csrf={c.get("s").csrf} dest={dest} providers={providers} provider={provider} current={s.dests[dest]} />);
+  });
+  app.post("/backups/connect", async (c) => {
+    const f = await form(c);
+    const dest = destOf(f.dest);
+    const id = String(f.provider ?? "");
+    try {
+      needOtp(c, f.otp);
+      const providers = await call<ProviderSpec[]>("backup.providers");
+      const spec = providers.find((x) => x.id === id);
+      if (!spec) throw new Error("Choose a provider first.");
+      const fields = Object.fromEntries(spec.fields.map((x) => [x.name, String(f[x.name] ?? "")]));
+      const result = await call<ConnectResult>("backup.dest.connect", { dest, provider: spec.id, fields, protect: f.protect === "1" }, actor(c));
+      return page(c, t("Connect storage"), <ConnectResultPage csrf={c.get("s").csrf} dest={dest} result={result} providers={providers} />);
+    } catch (e) {
+      return c.redirect(err(`/backups/connect?dest=${dest}&provider=${encodeURIComponent(id)}`, e));
+    }
+  });
+  app.post("/backups/defaults", act("/backups", async (c, f) => {
+    needOtp(c, f.otp);
+    const r = await call<{ added: unknown[]; existing: number; skipped: unknown[]; keep: number }>("backup.jobs.defaults", {}, actor(c));
+    const msg = t("Daily backups are set up: {added} new, {existing} already existed, kept {keep} days.").replace("{added}", String(r.added.length)).replace("{existing}", String(r.existing)).replace("{keep}", String(r.keep));
+    return r.skipped.length ? `${msg} ${t("{n} could not be added.").replace("{n}", String(r.skipped.length))}` : msg;
+  }));
   app.post("/backups/dest", act("/backups", async (c, f) => {
     needOtp(c, f.otp);
     await call("backup.dest.set", f, actor(c));

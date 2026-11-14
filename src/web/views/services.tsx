@@ -242,7 +242,10 @@ export function ServicesPage(p: {
       </div>
       {p.list.find((s) => s.key === "mariadb")?.installed && p.mysqlRemote?.available ? (
         <Card title="MariaDB">
-          <RemoteCard v={p.mysqlRemote} dbs={p.mysqlDbs ?? []} csrf={p.csrf} />
+          <details class="more">
+            <summary>{t("Remote access")}</summary>
+            <RemoteCard v={p.mysqlRemote} dbs={p.mysqlDbs ?? []} csrf={p.csrf} />
+          </details>
         </Card>
       ) : null}
 
@@ -271,12 +274,15 @@ export function ServicesPage(p: {
               ))}
             </tbody>
           </table>
-          <form method="post" action="/services/postgres/create" class="row">
-            <Csrf token={p.csrf} />
-            <Field label="Name" name="name" required placeholder="app_db" />
-            <Field label="User (empty = same as name)" name="user" placeholder="app_user" />
-            <button class="btn primary">{t("New database")}</button>
-          </form>
+          <details class="more">
+            <summary>{t("New database")}</summary>
+            <form method="post" action="/services/postgres/create" class="row">
+              <Csrf token={p.csrf} />
+              <Field label="Name" name="name" required placeholder="app_db" />
+              <Field label="User (empty = same as name)" name="user" placeholder="app_user" />
+              <button class="btn primary">{t("Create")}</button>
+            </form>
+          </details>
           {p.pg.some((d) => !d.system) ? (
             <details>
               <summary class="muted small">{t("Delete")}</summary>
@@ -300,7 +306,12 @@ export function ServicesPage(p: {
               />
             </details>
           ) : null}
-          {p.pgRemote?.available ? <RemoteCard v={p.pgRemote} dbs={p.pg.filter((d) => !d.system).map((d) => d.name)} csrf={p.csrf} /> : null}
+          {p.pgRemote?.available ? (
+            <details class="more">
+              <summary>{t("Remote access")}</summary>
+              <RemoteCard v={p.pgRemote} dbs={p.pg.filter((d) => !d.system).map((d) => d.name)} csrf={p.csrf} />
+            </details>
+          ) : null}
         </Card>
       ) : null}
     </div>

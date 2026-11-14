@@ -4,6 +4,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { env } from "../shared/config.ts";
+import { trBackups } from "./i18n-backups.ts";
 
 export type Lang = "en" | "tr";
 export const LANGS: { code: Lang; label: string }[] = [
@@ -332,7 +333,8 @@ const tr: Record<string, string> = {
   "Server checks": "Sunucu kontrolleri",
 };
 
-const dicts = { tr, en: {} as Record<string, string> };
+// An entry already in `tr` wins over the backup/database texts.
+const dicts = { tr: { ...trBackups, ...tr }, en: {} as Record<string, string> };
 
 export function t(s: string): string {
   return dicts[lang()]?.[s] ?? s;

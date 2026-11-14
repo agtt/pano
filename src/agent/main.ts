@@ -37,7 +37,7 @@ const sameSecret = (given: string | null, secret: string) =>
 /** Code-guarded actions that leave lasting access: each use of a code for one is sent to the alert channel. */
 const REPORTED = new Set([
   "admins.add", "admins.reset", "runner.enable", "runner.key.add", "vpn.peer.add", "pg.remote.user.add", "mysql.remote.user.add",
-  "github.connect", "backup.dest.set", "backup.key.export", "recovery.kit", "alerts.save",
+  "github.connect", "backup.dest.set", "backup.dest.connect", "backup.key.export", "recovery.kit", "alerts.save",
 ]);
 
 /**

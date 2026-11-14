@@ -22,6 +22,9 @@ await startAgent();
 const { createUser, userCount } = await import("../src/web/auth.ts");
 if (userCount() === 0) {
   const { secret } = await createUser("admin", "pano-dev-password");
+  // as `pano admin` does: the agent keeps the 2FA secret, the web never stores it
+  const { setAdminSecret } = await import("../src/agent/otp.ts");
+  setAdminSecret("admin", secret);
   console.log(`[dev] admin / pano-dev-password, TOTP secret ${secret}`);
 }
 

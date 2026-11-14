@@ -1,6 +1,8 @@
 import type { Child } from "hono/jsx";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
 import { Icon } from "./icons.tsx";
+import type { ProviderSpec } from "../../shared/backup-providers.ts";
+import { BackupBanner, BackupSummary, DestCards, type BackupHealth, type Dest } from "./backups.tsx";
 import { Badge, Card, Csrf, DangerForm, Field, PageHead, TabPanes, alwaysAttr } from "./layout.tsx";
 
 const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
@@ -371,94 +373,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
 
 // ---- databases -------------------------------------------------------------
 
-export function DatabasesPage(p: {
-  csrf: string;
-  data: { databases: { name: string; sizeMb: number; tables: number; users: string[]; system: boolean }[]; users: { user: string; host: string }[] };
-  created?: { name: string; user: string; password: string };
-}) {
-  return (
-    <div class="stack">
-      {p.created?.user ? (
-        <div class="flash ok">
-          {p.created.name}: <code>{p.created.user}</code> / <code class="secret">{p.created.password}</code> — shown once, store it now.
-        </div>
-      ) : null}
-      <Card title={t("All databases")}>
-        {p.data.databases.length ? null : <p class="muted">{t("No databases yet. Create one below, or add one to an app from its Database tab.")}</p>}
-        <table hidden={!p.data.databases.length}>
-          <thead>
-            <tr>
-              <th>{t("Name")}</th>
-              <th class="num">{t("Size")}</th>
-              <th class="num">{t("Tables")}</th>
-              <th>{t("Users")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {p.data.databases.map((d) => (
-              <tr class={d.system ? "muted" : ""}>
-                <td>{d.name}</td>
-                <td class="num">{d.sizeMb} MB</td>
-                <td class="num">{d.tables}</td>
-                <td class="small">{d.users.join(", ")}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-      <div class="cols">
-        <Card title={t("New database")}>
-          <form method="post" action="/databases/create">
-            <Csrf token={p.csrf} />
-            <Field label="Name" name="name" required placeholder="app_db" />
-            <Field label="User (optional)" name="user" placeholder="app_user" />
-            <Field label="Password (empty = generate)" name="password" type="password" autocomplete="new-password" />
-            <button class="btn primary">{t("Create")}</button>
-          </form>
-        </Card>
-        <Card title={t("Reset password")}>
-          <form method="post" action="/databases/password">
-            <Csrf token={p.csrf} />
-            <label class="field">
-              <span>{t("Users")}</span>
-              <select name="userhost">
-                {p.data.users
-                  .filter((u) => u.user !== "root" && !u.user.startsWith("mariadb.") && u.user !== "mysql")
-                  .map((u) => (
-                    <option value={`${u.user}@${u.host}`}>{`${u.user}@${u.host}`}</option>
-                  ))}
-              </select>
-            </label>
-            <Field label="Password (empty = generate)" name="password" type="password" autocomplete="new-password" />
-            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
-            <button class="btn">{t("Reset password")}</button>
-          </form>
-        </Card>
-        <Card title={`${t("Delete")} · ${t("Databases")}`} class="danger-zone">
-          <form method="post" action="/databases/drop" class="danger">
-            <Csrf token={p.csrf} />
-            <label class="field">
-              <span>{t("Name")}</span>
-              <select name="name">
-                {p.data.databases
-                  .filter((d) => !d.system)
-                  .map((d) => (
-                    <option value={d.name}>{d.name}</option>
-                  ))}
-              </select>
-            </label>
-            <Field label="Type the name to confirm" name="confirm" required />
-            <label class="field">
-              <span>{t("Current authenticator code")}</span>
-              <Otp />
-            </label>
-            <button class="btn danger">{t("Delete")}</button>
-          </form>
-        </Card>
-      </div>
-    </div>
-  );
-}
+// The databases page moved to databases.tsx.
 
 // ---- backups ---------------------------------------------------------------
 
@@ -474,7 +389,6 @@ export type JobRow = {
   runs: { id: number; status: string; bytes: number; object_key: string; error: string; started_at: number; dest: string; engine: string }[];
 };
 
-type Dest = { accountId: string; bucket: string; prefix: string; accessKeyId: string; hasSecret: boolean; endpoint: string; protect: boolean };
 export type BackupSettings = { dests: { a: Dest; b: Dest }; engine: "archive" | "restic"; restic: string; kit: "none" | "outdated" | "ok" };
 
 export function BackupsPage(p: {
@@ -483,25 +397,28 @@ export function BackupsPage(p: {
   jobs: JobRow[];
   dbs: string[];
   apps: string[];
-  key?: string;
+  /** The recovery kit to show once (not called `key`: that name is reserved by JSX and never reaches the component). */
+  kitText?: string;
+  health?: BackupHealth | null;
+  providers?: ProviderSpec[];
 }) {
-  return (
-    <div class="stack">
-      {p.key ? (
-        <div class="flash ok">
-          <p>
-            Recovery kit — keep it in a password manager, never on this server. It holds the backup key and the store keys, so anyone with it can read the
-            backups.
-          </p>
-          <code class="secret" data-copy>
-            {p.key}
-          </code>
-          <p class="small">
-            New server: <code>pano install</code>, then <code>pano recover '&lt;kit&gt;'</code>: the panel comes back from its own nightly backup and rebuilds
-            services, databases, apps (deployed again from git), PHP sites and their files.
-          </p>
-        </div>
-      ) : null}
+  // Jobs and recovery sit in their own tabs; the storage tab is first because it is where a new server starts.
+  const keyFlash = p.kitText ? (
+    <div class="flash ok">
+      <p>
+        Recovery kit — keep it in a password manager, never on this server. It holds the backup key and the store keys, so anyone with it can read the
+        backups.
+      </p>
+      <code class="secret" data-copy>
+        {p.kitText}
+      </code>
+      <p class="small">
+        New server: <code>pano install</code>, then <code>pano recover '&lt;kit&gt;'</code>: the panel comes back from its own nightly backup and rebuilds
+        services, databases, apps (deployed again from git), PHP sites and their files.
+      </p>
+    </div>
+  ) : null;
+  const engineCard = (
       <Card title={t("Backup engine")}>
         <form method="post" action="/backups/engine" class="row">
           <Csrf token={p.csrf} />
@@ -521,7 +438,8 @@ export function BackupsPage(p: {
           ciphertext. Every job goes to each destination that is set up.
         </p>
       </Card>
-
+  );
+  const kitCard = (
       <Card
         title="Recovery kit"
         actions={<Badge state={p.s.kit === "ok" ? "ok" : "warn"} />}
@@ -536,12 +454,16 @@ export function BackupsPage(p: {
           <button class="btn">Show recovery kit</button>
         </form>
       </Card>
-
+  );
+  // The old manual form, for a provider the connect flow does not cover or a hand-picked endpoint.
+  const advancedDests = (
+    <details class="more advanced">
+      <summary>{t("Advanced: custom settings")}</summary>
       <div class="cols">
         {(["a", "b"] as const).map((d) => {
           const x = p.s.dests[d];
           return (
-            <Card title={d === "a" ? "Main destination" : "Second destination (optional)"}>
+            <Card title={d === "a" ? t("Main destination") : t("Second destination (optional)")}>
               <form method="post" action="/backups/dest" class="grid-form">
                 <Csrf token={p.csrf} />
                 <input type="hidden" name="dest" value={d} />
@@ -569,79 +491,111 @@ export function BackupsPage(p: {
                   <button class="btn primary">{t("Save")}</button>
                 </div>
               </form>
-              {x.bucket ? (
-                <div class="row">
-                  <form method="post" action="/backups/dest/test">
-                    <Csrf token={p.csrf} />
-                    <input type="hidden" name="dest" value={d} />
-                    <button class="btn">{t("Test connection")}</button>
-                  </form>
-                  {d === "b" ? (
-                    <form method="post" action="/backups/dest/clear" class="row">
-                      <Csrf token={p.csrf} />
-                      <input type="hidden" name="dest" value="b" />
-                      <Otp />
-                      <button class="btn">Stop using it</button>
-                    </form>
-                  ) : null}
-                </div>
-              ) : d === "b" ? (
-                <p class="muted small">Another provider than the main one (for example R2 + Backblaze B2): one account or region going away cannot take the backups with it.</p>
-              ) : null}
             </Card>
           );
         })}
       </div>
-
-      <Card title={t("Backup jobs")}>
-        {p.jobs.map((j) => (
-          <details class="job">
-            <summary>
-              <strong>{j.name}</strong> <span class="tag">{j.kind}</span> <span class="muted">{j.target}</span> · {j.schedule} · {t("Keep")} {j.keep} ·{" "}
-              {j.last_status ? <Badge state={j.last_status} /> : null} <span class="muted small">{fmtTime(j.last_run_at)}</span>
-            </summary>
-            <div class="row">
-              <form method="post" action={`/backups/jobs/${j.id}/run`}>
-                <Csrf token={p.csrf} />
-                <button class="btn small">{t("Run now")}</button>
-              </form>
-              <form method="post" action={`/backups/jobs/${j.id}/remove`}>
-                <Csrf token={p.csrf} />
-                <Otp />
-                <button class="btn small danger">{t("Delete")}</button>
-              </form>
-            </div>
-            <table class="compact">
-              {j.runs.map((r) => (
+    </details>
+  );
+  const jobsCard = (
+      <Card
+        title={t("Backup jobs")}
+        actions={
+          <form method="post" action="/backups/defaults" class="row">
+            <Csrf token={p.csrf} />
+            <Otp />
+            <button class="btn small">{t("Back up everything daily")}</button>
+          </form>
+        }
+      >
+        {p.jobs.length ? (
+          <table class="jobs-table">
+            <thead>
+              <tr>
+                <th>{t("What")}</th>
+                <th>{t("Schedule")}</th>
+                <th>{t("Keep")}</th>
+                <th>{t("Last run")}</th>
+                <th />
+              </tr>
+            </thead>
+            {p.jobs.map((j) => (
+              <tbody>
                 <tr>
-                  <td>#{r.id}</td>
                   <td>
-                    <Badge state={r.status} />
+                    <strong>{j.name}</strong> <span class="tag">{j.kind}</span>
+                    <div class="muted small">{j.target}</div>
                   </td>
-                  <td class="muted">{fmtTime(r.started_at)}</td>
-                  <td class="small muted">
-                    {r.dest === "b" ? "2nd" : "main"} · {r.engine === "restic" ? "incremental" : "full"}
-                  </td>
-                  <td class="num" title={r.engine === "restic" ? "new data uploaded" : "size"}>
-                    {r.bytes ? fmtBytes(r.bytes) : ""}
-                  </td>
-                  <td class="small muted">{r.error || r.object_key}</td>
+                  <td>{j.schedule}</td>
+                  <td class="num">{j.keep}</td>
                   <td>
-                    {r.status === "success" && r.object_key ? (
-                      <form method="post" action={`/backups/runs/${r.id}/restore`} class="row">
-                        <Csrf token={p.csrf} />
-                        {j.kind === "mysql" || j.kind === "postgres" ? <input name="target" value={j.target} class="short" title="target database" /> : null}
-                        <Otp />
-                        <button class="btn small">{t("Restore")}</button>
-                      </form>
-                    ) : null}
+                    {j.last_status ? <Badge state={j.last_status} /> : <span class="muted">{t("Never")}</span>}
+                    {j.last_run_at ? <div class="muted small">{fmtTime(j.last_run_at)}</div> : null}
+                  </td>
+                  <td>
+                    <form method="post" action={`/backups/jobs/${j.id}/run`}>
+                      <Csrf token={p.csrf} />
+                      <button class="btn small">{t("Run now")}</button>
+                    </form>
                   </td>
                 </tr>
-              ))}
-            </table>
-          </details>
-        ))}
-        <h3>+ Job</h3>
+                <tr class="job-more">
+                  <td colspan={5}>
+                    <details class="job">
+                      <summary>
+                        {t("Runs, restore and delete")} ({j.runs.length})
+                      </summary>
+                      <table class="compact">
+                        {j.runs.map((r) => (
+                          <tr>
+                            <td>#{r.id}</td>
+                            <td>
+                              <Badge state={r.status} />
+                            </td>
+                            <td class="muted">{fmtTime(r.started_at)}</td>
+                            <td class="small muted">
+                              {r.dest === "b" ? "2nd" : "main"} · {r.engine === "restic" ? "incremental" : "full"}
+                            </td>
+                            <td class="num" title={r.engine === "restic" ? "new data uploaded" : "size"}>
+                              {r.bytes ? fmtBytes(r.bytes) : ""}
+                            </td>
+                            <td class="small muted">{r.error || r.object_key}</td>
+                            <td>
+                              {r.status === "success" && r.object_key ? (
+                                <form method="post" action={`/backups/runs/${r.id}/restore`} class="row">
+                                  <Csrf token={p.csrf} />
+                                  {j.kind === "mysql" || j.kind === "postgres" ? <input name="target" value={j.target} class="short" title="target database" /> : null}
+                                  <Otp />
+                                  <button class="btn small">{t("Restore")}</button>
+                                </form>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                      </table>
+                      <form method="post" action={`/backups/jobs/${j.id}/remove`} class="row">
+                        <Csrf token={p.csrf} />
+                        <Otp />
+                        <button class="btn small danger">{t("Delete")}</button>
+                      </form>
+                    </details>
+                  </td>
+                </tr>
+              </tbody>
+            ))}
+          </table>
+        ) : (
+          <div class="empty">
+            <p>{t("No backup jobs yet. One click adds a daily backup of the panel and everything on this server.")}</p>
+            <form method="post" action="/backups/defaults" class="row">
+              <Csrf token={p.csrf} />
+              <Otp />
+              <button class="btn primary">{t("Back up everything daily")}</button>
+            </form>
+          </div>
+        )}
+        <details class="more">
+        <summary>{t("New job (custom)")}</summary>
         <form method="post" action="/backups/jobs" class="grid-form">
           <Csrf token={p.csrf} />
           <label class="field">
@@ -670,7 +624,38 @@ export function BackupsPage(p: {
             <button class="btn primary">{t("Create")}</button>
           </div>
         </form>
+        </details>
       </Card>
+  );
+  const panes = [
+    {
+      key: "storage",
+      label: t("Storage"),
+      body: (
+        <div class="stack">
+          <DestCards dests={p.s.dests} csrf={p.csrf} providers={p.providers} />
+          {advancedDests}
+        </div>
+      ),
+    },
+    { key: "jobs", label: t("Backup jobs"), body: <div class="stack">{jobsCard}</div> },
+    {
+      key: "recovery",
+      label: t("Settings"),
+      body: (
+        <div class="stack">
+          {kitCard}
+          {engineCard}
+        </div>
+      ),
+    },
+  ];
+  return (
+    <div class="stack">
+      {keyFlash}
+      <BackupBanner health={p.health} csrf={p.csrf} />
+      <BackupSummary health={p.health} dests={p.s.dests} />
+      <TabPanes panes={panes} open={p.kitText ? "recovery" : undefined} label={t("Backups")} />
     </div>
   );
 }
