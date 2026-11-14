@@ -13,7 +13,7 @@
 
 import { createHash } from "node:crypto";
 import { applyEdge } from "./edge.ts";
-import { copyCert, listening, localIp, obtainCert, parseAllow, REMOTE_CONN_LIMIT, remoteDomain, syncNetwork } from "./remotedb.ts";
+import { assertRemoteDomainFree, copyCert, listening, localIp, obtainCert, parseAllow, REMOTE_CONN_LIMIT, remoteDomain, syncNetwork } from "./remotedb.ts";
 import { REMOTE_PORT, remoteConfig, saveRemoteConfig } from "./remotedb-config.ts";
 import { pgConf, pgGrantAccess, pgIdent, pgLit, pgName, pgOwner, pgPaths, psql, RESERVED_PG } from "./services.ts";
 import { audit, settings } from "./state.ts";
@@ -127,6 +127,7 @@ export async function status() {
 export async function enable(input: { domain?: unknown; allow?: unknown }, actor: string) {
   const p = paths();
   const domain = remoteDomain(input.domain);
+  assertRemoteDomainFree(domain);
   const allow = parseAllow(input.allow);
   const previous = config();
   saveRemoteConfig("postgres", { on: true, domain, allow });

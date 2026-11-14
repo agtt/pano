@@ -7,7 +7,7 @@
 // never rewrites the configuration of something it did not install.
 
 import { createHash } from "node:crypto";
-import { paths } from "../shared/config.ts";
+import { DRY_RUN, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { createAppValkey } from "./appvalkey.ts";
 import { ensureJob } from "./backup.ts";
@@ -265,6 +265,33 @@ export async function valkeyUrl(): Promise<string> {
   return existing;
 }
 
+/** pids of the listeners in `ss -Htlnp` output. */
+export const listenerPids = (ss: string): string[] => [...new Set([...ss.matchAll(/pid=(\d+)/g)].map((m) => m[1]!))];
+
+/** True when there is a listener and every one of them is in the unit's cgroup. */
+export const onlyUnitListens = (pids: string[], cgroups: Record<string, string>, unit: string): boolean =>
+  pids.length > 0 && pids.every((p) => (cgroups[p] ?? "").split("\n").some((l) => l.endsWith(`/${unit}`)));
+
+/**
+ * The shared Valkey's URL for pano's own connections (the queue monitor, every minute). The password
+ * goes only to the server itself: while Valkey is stopped, an app or site user could bind 6379 and
+ * collect the AUTH, so the listener is looked at first. Per-app instances solved this with ports below
+ * 1024 (appvalkey.ts); the shared one keeps 6379, which apps already have in their REDIS_URL. Only a
+ * Valkey crash within the milliseconds between this check and the connect is left.
+ */
+export async function valkeyUrlChecked(): Promise<string> {
+  const url = await valkeyUrl();
+  if (DRY_RUN) return url;
+  const unit = (await detect("valkey"))?.unit;
+  if (!unit) throw new Error("Valkey is not installed");
+  const port = Number(new URL(url).port) || 6379;
+  const pids = listenerPids((await run(["ss", "-Htlnp", `sport = :${port}`], { check: false })).stdout);
+  const cgroups: Record<string, string> = {};
+  for (const p of pids) cgroups[p] = (await readText(`/proc/${p}/cgroup`)) ?? "";
+  if (!onlyUnitListens(pids, cgroups, unit)) throw new Error(`nothing from ${unit} listens on port ${port}: not sending the password`);
+  return url;
+}
+
 /** A Redis/Valkey that was there before pano: its address and password, read from its own config. */
 export async function existingRedisUrl(): Promise<string | null> {
   for (const file of ["/etc/valkey/valkey.conf", "/etc/redis/redis.conf", "/etc/redis.conf"]) {
@@ -292,7 +319,8 @@ export async function psql(query: string, db = "postgres"): Promise<string[][]> 
 }
 
 export const pgIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
-export const pgLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+/** E'..' reads backslashes as escapes whatever standard_conforming_strings says, so doubling them and the quote is always enough. */
+export const pgLit = (s: string) => `E'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 
 export async function pgList() {
   const rows = await psql("SELECT datname, pg_database_size(datname), pg_get_userbyid(datdba) FROM pg_database WHERE NOT datistemplate ORDER BY 1;");

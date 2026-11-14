@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { renderQuadlet, repoOf, runRef, validateContainer } from "../src/agent/containers.ts";
+import { REDIS_COMMAND, renderQuadlet, repoOf, runRef, TEMPLATES, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
-import { renderCaddyfile } from "../src/agent/edge.ts";
+import { EDGE_VIEW_UNIT, VIEW_MOUNT, edgeUnit, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
 import { renderFpmConf, renderPhpIni, renderPhpUnit } from "../src/agent/php.ts";
 import type { App, Site } from "../src/agent/state.ts";
@@ -67,6 +67,35 @@ describe("edge: multi-process apps and php sites", () => {
     expect(out.indexOf("respond @pano_deny 404")).toBeLessThan(out.indexOf("php_fastcgi"));
     expect(out).toContain("not path /.well-known/*");
   });
+  test("with the no-symlink view the edge reads files there; PHP-FPM still gets the real root", () => {
+    const st = { ...php, name: "files", kind: "static", domains: ["files.example.org"], root: "/var/www/files" } as Site;
+    const viewed = renderCaddyfile({ apps: [], sites: [php, st], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView: true });
+    expect(viewed).toContain("root * /srv/pano/edgeview/blog.example.org/public");
+    expect(viewed).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock {\n\t\troot /srv/pano/sites/blog.example.org/public\n\t}");
+    expect(viewed).not.toContain("root * /srv/pano/sites/");
+    // A root outside the sites directory is served as it is.
+    expect(viewed).toContain("root * /var/www/files");
+  });
+});
+
+describe("edge view", () => {
+  test("mount unit names follow systemd-escape", () => {
+    expect(EDGE_VIEW_UNIT).toBe("srv-pano-edgeview.mount");
+    expect(mountUnitName("/srv/pano/edge-view/")).toBe("srv-pano-edge\\x2dview.mount");
+    expect(viewPath("/srv/pano/sites/a/public")).toBe("/srv/pano/edgeview/a/public");
+    expect(viewPath("/srv/pano/sitesx/a")).toBeNull();
+  });
+  test("the edge requires the view and cannot see the real sites only when the view is there", () => {
+    const on = edgeUnit(true);
+    expect(on).toContain("Requires=srv-pano-edgeview.mount");
+    expect(on).toContain("After=network-online.target srv-pano-edgeview.mount");
+    expect(on).toContain("InaccessiblePaths=-/srv/pano/sites\n");
+    const off = edgeUnit(false);
+    expect(off).not.toContain("Requires=");
+    expect(off).not.toContain("InaccessiblePaths");
+    expect(VIEW_MOUNT).toContain("Options=bind,ro,nosymfollow");
+    expect(VIEW_MOUNT).toContain("Where=/srv/pano/edgeview");
+  });
 });
 
 describe("php config", () => {
@@ -131,6 +160,14 @@ describe("containers", () => {
     expect(q).toContain("--memory=256m");
     expect(q).toContain("Image=docker.io/library/redis:7-alpine");
     expect(q).not.toContain("ReadOnly");
+  });
+  test("the Redis template has a generated password and never puts it in the command line", () => {
+    expect(TEMPLATES.redis!.env).toEqual({ REDIS_PASSWORD: "" });
+    expect(TEMPLATES["uptime-kuma"]!.note).toContain("reachable by every other local user");
+    expect(TEMPLATES.n8n!.note).toContain("reachable by every other local user");
+    const q = renderQuadlet({ name: "cache", image: "docker.io/library/redis:7-alpine", port: 6379, host_port: 5100, domains: [], volumes: ["/data"], command: REDIS_COMMAND, memory_mb: 256, digest: "", read_only: 0, created_at: 0 });
+    expect(q).toContain("Exec=sh -c 'umask 077; printenv REDIS_PASSWORD");
+    expect(REDIS_COMMAND).not.toMatch(/--requirepass|[$\\%]/); // ps would show it; systemd would expand $ and %
   });
   test("a resolved digest is what runs, the tag stays for display; read-only is opt-in", () => {
     const d = "sha256:" + "ab".repeat(32);

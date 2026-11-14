@@ -11,6 +11,8 @@ import { run, writeAtomic } from "./sys.ts";
 
 const UNIT = "pano-guard.service";
 const RULES = `${paths.etc}/guard.nft`;
+/** Conntrack mark bit: this connection has been counted against the SSH limit. Nothing else in pano uses ct marks. */
+const COUNTED = "0x40000000";
 
 export type Guard = { ssh: boolean; http: boolean };
 
@@ -36,9 +38,12 @@ export function renderGuard(g: Guard, sshPort: number | number[], behindCloudfla
       ? [
           `\t\tip saddr @ssh_ban4 tcp dport ${ssh} drop`,
           `\t\tip6 saddr @ssh_ban6 tcp dport ${ssh} drop`,
-          // 20 new connections a minute is far beyond a person (and git, scp, rsync loops).
-          `\t\ttcp dport ${ssh} ct state new add @ssh_rate4 { ip saddr limit rate over 20/minute burst 20 packets } add @ssh_ban4 { ip saddr } drop`,
-          `\t\ttcp dport ${ssh} ct state new add @ssh_rate6 { ip6 saddr limit rate over 20/minute burst 20 packets } add @ssh_ban6 { ip6 saddr } drop`,
+          // 20 connections a minute is far beyond a person (and git, scp, rsync loops). A connection counts
+          // once, on the packet that completed its handshake (conntrack "assured": the client's valid ACK
+          // of our SYN-ACK), so a forged-source SYN, which never gets that ACK, cannot ban anyone.
+          // The first such packet sets a conntrack mark bit; later packets of the connection skip the rule.
+          `\t\tmeta nfproto ipv4 tcp dport ${ssh} ct status assured ct mark & ${COUNTED} == 0 ct mark set ct mark | ${COUNTED} add @ssh_rate4 { ip saddr limit rate over 20/minute burst 20 packets } add @ssh_ban4 { ip saddr } drop`,
+          `\t\tmeta nfproto ipv6 tcp dport ${ssh} ct status assured ct mark & ${COUNTED} == 0 ct mark set ct mark | ${COUNTED} add @ssh_rate6 { ip6 saddr limit rate over 20/minute burst 20 packets } add @ssh_ban6 { ip6 saddr } drop`,
         ]
       : []),
     ...(http

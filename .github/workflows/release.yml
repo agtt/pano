@@ -81,3 +81,27 @@ jobs:
         run: |
           gh release create "$TAG" release/pano-linux-x64 release/pano-linux-arm64 release/SHA256SUMS release/SHA256SUMS.sig \
             --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag --generate-notes
+
+      # install.sh without PANO_VERSION refuses releases older than MIN_VERSION: a validly signed
+      # old release cannot be served as "latest". Raised to each new release on main (never lowered).
+      # A protected main that refuses the push only costs a warning: bump MIN_VERSION by hand then.
+      - name: Raise the installer's minimum version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=$AUTH" fetch --depth=1 origin main
+          git checkout -q -f -B min-version FETCH_HEAD
+          CURRENT="$(sed -n 's/^MIN_VERSION="\([0-9][0-9.]*\)"$/\1/p' install.sh)"
+          [ -n "$CURRENT" ] || { echo "::warning::install.sh has no MIN_VERSION line"; exit 0; }
+          NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n 1)"
+          if [ "$NEWEST" = "$VERSION" ] && [ "$CURRENT" != "$VERSION" ]; then
+            sed -i "s/^MIN_VERSION=.*/MIN_VERSION=\"$VERSION\"/" install.sh
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "chore: installer minimum version $VERSION" install.sh
+            git -c "http.extraheader=$AUTH" push origin HEAD:main || echo "::warning::could not push the MIN_VERSION bump to main; set MIN_VERSION=\"$VERSION\" in install.sh by hand"
+          else
+            echo "MIN_VERSION stays $CURRENT"
+          fi

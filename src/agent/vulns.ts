@@ -21,6 +21,8 @@
 //
 // New high and critical (and urgent) findings go to Telegram once.
 
+import { constants } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
 import { appHome } from "./apps.ts";
@@ -128,23 +130,59 @@ export function parseNpmLock(file: string, text: string): { name: string; versio
 
 export function parseComposerLock(text: string): { name: string; version: string }[] {
   const lock = JSON.parse(text) as { packages?: { name: string; version: string }[]; "packages-dev"?: { name: string; version: string }[] };
-  return [...(lock.packages ?? []), ...(lock["packages-dev"] ?? [])].map((p) => ({ name: p.name, version: p.version.replace(/^v/, "") }));
+  const list = [lock?.packages, lock?.["packages-dev"]].flatMap((l) => (Array.isArray(l) ? l : []));
+  return list.filter((p) => typeof p?.name === "string" && typeof p?.version === "string").map((p) => ({ name: p.name, version: p.version.replace(/^v/, "") }));
 }
+
+const TENANT_FILE_MAX = 8 * 1024 * 1024;
+
+/**
+ * A file out of a tenant's tree, read as root: never through a final symlink, only a regular
+ * file (no FIFO or /dev/zero), at most a few MB. Anything else, or any error, reads as absent.
+ */
+export async function readTenantFile(abs: string, max = TENANT_FILE_MAX): Promise<string | null> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await open(fsPath(abs), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = await fh.stat();
+    if (!st.isFile() || st.size > max) return null;
+    return await fh.readFile("utf8");
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+/** A broken lockfile in one app or site is skipped, never fatal for the scan. */
+function tryParse<T>(parse: () => T[]): T[] {
+  try {
+    return parse();
+  } catch {
+    return [];
+  }
+}
+
+const validPkgs = <T extends { name?: unknown; version?: unknown }>(list: T[]) => list.filter((p) => typeof p?.name === "string" && typeof p?.version === "string");
 
 async function appPackages(): Promise<Pkg[]> {
   const out: Pkg[] = [];
   for (const a of apps.list()) {
-    if (a.kind !== "managed" || !a.active_slot) continue;
-    const base = `${appHome(a.name)}/current`;
-    for (const dir of new Set([base, a.root_dir ? `${base}/${a.root_dir}` : base])) {
-      for (const f of ["bun.lock", "package-lock.json"]) {
-        const text = await readText(`${dir}/${f}`);
-        if (!text) continue;
-        for (const p of parseNpmLock(f, text)) out.push({ where: `app:${a.name}`, ecosystem: "npm", ...p, autofix: false });
-        break;
+    try {
+      if (a.kind !== "managed" || !a.active_slot) continue;
+      const base = `${appHome(a.name)}/current`;
+      for (const dir of new Set([base, a.root_dir ? `${base}/${a.root_dir}` : base])) {
+        for (const f of ["bun.lock", "package-lock.json"]) {
+          const text = await readTenantFile(`${dir}/${f}`);
+          if (!text) continue;
+          for (const p of validPkgs(tryParse(() => parseNpmLock(f, text)))) out.push({ where: `app:${a.name}`, ecosystem: "npm", ...p, autofix: false });
+          break;
+        }
+        const composer = await readTenantFile(`${dir}/composer.lock`);
+        if (composer) for (const p of validPkgs(tryParse(() => parseComposerLock(composer)))) out.push({ where: `app:${a.name}`, ecosystem: "Packagist", ...p, autofix: false });
       }
-      const composer = await readText(`${dir}/composer.lock`);
-      if (composer) for (const p of parseComposerLock(composer)) out.push({ where: `app:${a.name}`, ecosystem: "Packagist", ...p, autofix: false });
+    } catch {
+      // this app only
     }
   }
   return out;
@@ -154,16 +192,20 @@ async function sitePackages(): Promise<{ pkgs: Pkg[]; wordpress: { site: string;
   const pkgs: Pkg[] = [];
   const wordpress: { site: string; version: string }[] = [];
   for (const s of sites.list()) {
-    if (!s.root || !["php", "legacy"].includes(s.kind)) continue;
-    const parent = s.root.replace(/\/[^/]+$/, "");
-    for (const dir of [s.root, parent]) {
-      const composer = await readText(`${dir}/composer.lock`);
-      if (!composer) continue;
-      for (const p of parseComposerLock(composer)) pkgs.push({ where: `site:${s.name}`, ecosystem: "Packagist", ...p, autofix: false });
-      break;
+    try {
+      if (!s.root || !["php", "legacy"].includes(s.kind)) continue;
+      const parent = s.root.replace(/\/[^/]+$/, "");
+      for (const dir of [s.root, parent]) {
+        const composer = await readTenantFile(`${dir}/composer.lock`);
+        if (!composer) continue;
+        for (const p of validPkgs(tryParse(() => parseComposerLock(composer)))) pkgs.push({ where: `site:${s.name}`, ecosystem: "Packagist", ...p, autofix: false });
+        break;
+      }
+      const wp = (await readTenantFile(`${s.root}/wp-includes/version.php`, 1024 * 1024))?.match(/\$wp_version\s*=\s*'([^']+)'/)?.[1];
+      if (wp) wordpress.push({ site: s.name, version: wp });
+    } catch {
+      // this site only
     }
-    const wp = (await readText(`${s.root}/wp-includes/version.php`))?.match(/\$wp_version\s*=\s*'([^']+)'/)?.[1];
-    if (wp) wordpress.push({ site: s.name, version: wp });
   }
   return { pkgs, wordpress };
 }
@@ -383,14 +425,20 @@ async function doScan(): Promise<ScanResult> {
       return [];
     }
   };
-  const site = await sitePackages();
-  const pkgs = [...(await appPackages()), ...site.pkgs, ...(await binaryPackages())];
+  // A bad tenant tree must never stop the scan or the urgent Caddy patch that follows it.
+  let wordpress: { site: string; version: string }[] = [];
+  const sitePkgs = await safe("site dependencies", async () => {
+    const s = await sitePackages();
+    wordpress = s.wordpress;
+    return s.pkgs;
+  });
+  const pkgs = [...(await safe("app dependencies", appPackages)), ...sitePkgs, ...(await safe("edge and realtime versions", binaryPackages))];
   const findings = [
     ...(await safe("os", osAdvisories)),
     ...(await safe("osv.dev", () => osv(pkgs))),
     ...(await safe("node", runtimeFindings)),
     ...(await safe("php", phpFindings)),
-    ...(await safe("wordpress", () => wordpressFindings(site.wordpress))),
+    ...(await safe("wordpress", () => wordpressFindings(wordpress))),
   ];
   await safe("exploit data (CISA KEV, EPSS)", async () => (await enrich(findings), []));
   findings.sort((a, b) => +urgent(b) - +urgent(a) || RANK[b.severity] - RANK[a.severity] || a.where.localeCompare(b.where));

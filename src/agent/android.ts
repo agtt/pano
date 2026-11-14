@@ -15,10 +15,10 @@ import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { ValidationError, v } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
 import { ensureUser } from "./edge.ts";
-import { installed as installedRuntimes, runtimeBin, sha256 } from "./runtimes.ts";
+import { installed as installedRuntimes, runtimeBin } from "./runtimes.ts";
 import { androidBuilds, androidProjects, audit, settings, type AndroidArtifact, type AndroidProject } from "./state.ts";
 import { dirBytes, ensureDir, exists, lookupUser, readText, remove, run, writeAtomic } from "./sys.ts";
-import { cacheName, cachePath, readResult, removeCache, removeSandbox, runSandbox, sandboxDir } from "./throwaway.ts";
+import { cacheName, cachePath, copyResult, plainDirectory, removeCache, removeSandbox, runSandbox, sandboxDir } from "./throwaway.ts";
 
 /** Fetches sources with the projects' deploy keys; never runs anything from a repository. */
 export const FETCH_USER = "pano-android";
@@ -88,7 +88,13 @@ function mustGet(name: string): AndroidProject {
 
 export async function saveProject(x: Record<string, unknown>, actor: string) {
   const p = validateProject(x);
+  const prev = androidProjects.get(p.name);
+  // A build of another repository or branch must not inherit what an earlier one left in the cache
+  // (a Gradle init script, a wrapper distribution): that would run in a later build and be signed.
+  const moved = !!prev && (prev.repo !== p.repo || prev.branch !== p.branch);
+  if (moved && androidBuilds.running().some((b) => b.project === p.name)) throw new Error("a build is running for this project: change the repository or branch when it has finished");
   androidProjects.upsert(p);
+  if (moved) await removeCache(cacheName(p.name));
   await deployKey(p.name);
   audit(actor, "android.project.save", p);
   return p;
@@ -476,6 +482,8 @@ async function collect(id: number, from: string, log: (s: string) => void): Prom
   const dir = `${ROOT}/artifacts/${id}`;
   await ensureDir(dir, 0o750);
   await panoGroup(dir);
+  // The sandbox could have swapped its output directory for a link to somewhere else: not followed.
+  if (!(await plainDirectory(from))) return [];
   let names: string[] = [];
   try {
     names = (await readdir(fsPath(from))).filter((n) => ARTIFACT_NAME.test(n)).sort().slice(0, 20);
@@ -484,11 +492,11 @@ async function collect(id: number, from: string, log: (s: string) => void): Prom
   }
   const out: AndroidArtifact[] = [];
   for (const name of names) {
-    const bytes = await readResult(`${from}/${name}`, MAX_ARTIFACT);
-    if (!bytes) continue;
-    await writeAtomic(artifactFile(id, name), bytes, 0o640);
+    // Streamed to its place (no 1 GiB file in memory); links, FIFOs and oversize files are skipped.
+    const copied = await copyResult(`${from}/${name}`, artifactFile(id, name), MAX_ARTIFACT, 0o640);
+    if (!copied) continue;
     await panoGroup(artifactFile(id, name));
-    const item = { name, size: bytes.length, sha256: sha256(bytes) };
+    const item = { name, size: copied.size, sha256: copied.sha256 };
     log(`${item.name}  ${item.size} bytes  sha256 ${item.sha256}\n`);
     out.push(item);
   }

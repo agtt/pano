@@ -7,10 +7,10 @@
 // npm, bun) that the next sandbox of the same project starts from.
 
 import { createHash } from "node:crypto";
-import { constants, lstat, open } from "node:fs/promises";
+import { constants, lstat, open, rename, rm, type FileHandle } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import { LOW } from "./apps.ts";
-import { remove, run, type RunOptions } from "./sys.ts";
+import { randomToken, remove, run, type RunOptions } from "./sys.ts";
 
 export type SandboxOptions = {
   memoryMb: number;
@@ -111,6 +111,52 @@ export async function removeCache(cache: string) {
   if (!CACHE.test(cache)) return;
   await remove(`/var/cache/private/${cache}`);
   await remove(cachePath(cache));
+}
+
+/** A real directory, not a link to one: a sandbox that replaced its `out` or `in` by a symlink points root nowhere. */
+export async function plainDirectory(path: string): Promise<boolean> {
+  return !!(await lstat(fsPath(path)).catch(() => null))?.isDirectory();
+}
+
+/**
+ * Copies a file a stopped sandbox left behind to `dest` without holding it in memory: a regular
+ * file only (checked on the opened descriptor), opened without following links, at most `maxBytes`
+ * (also counted while copying). Returns its size and sha256, or null when it is not acceptable.
+ */
+export async function copyResult(path: string, dest: string, maxBytes: number, mode = 0o640): Promise<{ size: number; sha256: string } | null> {
+  let src: FileHandle | undefined;
+  let out: FileHandle | undefined;
+  const target = fsPath(dest);
+  const tmp = `${target}.pano-tmp-${randomToken(9)}`;
+  try {
+    // O_NONBLOCK: opening a FIFO the sandbox left must not hang this process.
+    src = await open(fsPath(path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = await src.stat();
+    if (!st.isFile() || st.size > maxBytes) return null;
+    out = await open(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let size = 0;
+    for (;;) {
+      const { bytesRead } = await src.read(buf, 0, buf.length, null);
+      if (!bytesRead) break;
+      size += bytesRead;
+      if (size > maxBytes) throw new Error("file grew while it was copied");
+      hash.update(buf.subarray(0, bytesRead));
+      await out.write(buf, 0, bytesRead);
+    }
+    await out.chmod(mode);
+    await out.close();
+    out = undefined;
+    await rename(tmp, target);
+    return { size, sha256: hash.digest("hex") };
+  } catch {
+    await out?.close().catch(() => {});
+    await rm(tmp, { force: true }).catch(() => {});
+    return null;
+  } finally {
+    await src?.close().catch(() => {});
+  }
 }
 
 /**

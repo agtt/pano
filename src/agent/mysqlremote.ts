@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { applyEdge } from "./edge.ts";
 import { grantDb, lit, sql } from "./mysql.ts";
-import { copyCert, listening, localIp, obtainCert, parseAllow, REMOTE_CONN_LIMIT, remoteDomain, syncNetwork } from "./remotedb.ts";
+import { assertRemoteDomainFree, copyCert, listening, localIp, obtainCert, parseAllow, REMOTE_CONN_LIMIT, remoteDomain, syncNetwork } from "./remotedb.ts";
 import { REMOTE_PORT, remoteConfig, saveRemoteConfig } from "./remotedb-config.ts";
 import { v } from "../shared/validate.ts";
 import { audit, settings } from "./state.ts";
@@ -110,7 +110,8 @@ async function checkServer(base: string) {
 /** Accounts that would answer from the internet besides pano's remote users. */
 async function exposedAccounts(): Promise<string[]> {
   const ours = new Set(users().map((u) => u.user));
-  const rows = await sql(`SELECT User, Host FROM mysql.user WHERE Host NOT IN (${[...LOCAL_HOSTS, ""].map(lit).join(", ")});`);
+  // Host = '' is not local: the server reads it as "any host", so such an account counts as exposed.
+  const rows = await sql(`SELECT User, Host FROM mysql.user WHERE Host NOT IN (${LOCAL_HOSTS.map(lit).join(", ")});`);
   return rows.filter(([u]) => !ours.has(u!)).map(([u, h]) => `'${u}'@'${h}'`);
 }
 
@@ -214,6 +215,7 @@ export async function enable(input: { domain?: unknown; allow?: unknown }, actor
   await unit();
   const f = await files();
   const domain = remoteDomain(input.domain);
+  assertRemoteDomainFree(domain);
   const allow = parseAllow(input.allow);
   accountHosts(allow); // IPv6 networks are refused before anything changes
   const exposed = await exposedAccounts();

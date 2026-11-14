@@ -21,17 +21,37 @@ const envFile = (name: string) => `${paths.containerEnv}/${name}.env`;
 const dataDir = (name: string) => `${paths.containers}/${name}`;
 const siteName = (name: string) => `ct-${name}`;
 
+const SETUP_NOTE = "Until setup is finished its port on 127.0.0.1 is reachable by every other local user (apps, sites) on this server.";
+
 /** Ready-made settings for common services. Images are fully qualified (no short-name guessing). */
 export const TEMPLATES: Record<string, { image: string; port: number; volumes: string[]; env: Record<string, string>; memory_mb: number; note: string }> = {
-  redis: { image: "docker.io/library/redis:7-alpine", port: 6379, volumes: ["/data"], env: {}, memory_mb: 256, note: "127.0.0.1:<port> from your apps" },
+  redis: {
+    image: "docker.io/library/redis:7-alpine", port: 6379, volumes: ["/data"], env: { REDIS_PASSWORD: "" }, memory_mb: 256,
+    note: "redis://:<REDIS_PASSWORD>@127.0.0.1:<port> from your apps; the password is generated on save (Show values)",
+  },
   postgres: {
     image: "docker.io/library/postgres:17-alpine", port: 5432, volumes: ["/var/lib/postgresql/data"],
     env: { POSTGRES_USER: "app", POSTGRES_PASSWORD: "", POSTGRES_DB: "app" }, memory_mb: 512, note: "postgres://app:<password>@127.0.0.1:<port>/app",
   },
   meilisearch: { image: "docker.io/getmeili/meilisearch:latest", port: 7700, volumes: ["/meili_data"], env: { MEILI_MASTER_KEY: "", MEILI_ENV: "production" }, memory_mb: 512, note: "add a domain to reach it over HTTPS" },
-  "uptime-kuma": { image: "docker.io/louislam/uptime-kuma:1", port: 3001, volumes: ["/app/data"], env: {}, memory_mb: 256, note: "add a domain, then create the admin account" },
-  n8n: { image: "docker.io/n8nio/n8n:latest", port: 5678, volumes: ["/home/node/.n8n"], env: { N8N_SECURE_COOKIE: "true" }, memory_mb: 768, note: "add a domain; set WEBHOOK_URL=https://<domain>/" },
+  "uptime-kuma": {
+    image: "docker.io/louislam/uptime-kuma:1", port: 3001, volumes: ["/app/data"], env: {}, memory_mb: 256,
+    note: `add a domain, then create the admin account at once. ${SETUP_NOTE}`,
+  },
+  n8n: {
+    image: "docker.io/n8nio/n8n:latest", port: 5678, volumes: ["/home/node/.n8n"], env: { N8N_SECURE_COOKIE: "true" }, memory_mb: 768,
+    note: `add a domain; set WEBHOOK_URL=https://<domain>/. Create the owner account at once. ${SETUP_NOTE}`,
+  },
 };
+
+const REDIS_IMAGES = new Set(["docker.io/library/redis", "docker.io/redis"]);
+const isRedis = (image: string) => REDIS_IMAGES.has(repoOf(image));
+// Redis 7 cannot read a password from the environment, and a password in the command line is visible to
+// every local user (ps). The entrypoint writes it to a config file inside the container instead (no $ or
+// backslash, which systemd would expand). Container root is an unprivileged uid; the file is 0600 and in
+// the container's own filesystem.
+export const REDIS_COMMAND = `sh -c 'umask 077; printenv REDIS_PASSWORD | sed "s/^/requirepass /" > /tmp/redis.conf; exec redis-server /tmp/redis.conf'`;
+const REDIS_PASSWORD = /^[A-Za-z0-9._~+-]{8,128}$/;
 
 export async function podmanInstalled(): Promise<boolean> {
   return exists(PODMAN);
@@ -182,9 +202,16 @@ export async function saveContainer(input: ContainerInput, actor: string): Promi
   const prev = containers.get(input.name);
   assertDomainsFree(input.domains, { site: siteName(input.name) }, { apps: apps.list(), sites: sites.list() });
   const { env, ...rest } = input;
-  // Empty secrets in templates (passwords, master keys) are generated here, once.
   const old = parseEnv((await readText(envFile(input.name))) ?? "");
+  // Redis: always password-protected (any local user can reach the published port). A command the admin
+  // set themselves is left alone; saving an older, unprotected Redis container turns the password on.
+  if (isRedis(rest.image) && !rest.command) {
+    rest.command = REDIS_COMMAND;
+    env.REDIS_PASSWORD ||= old.REDIS_PASSWORD || "";
+  }
+  // Empty secrets in templates (passwords, master keys) are generated here, once.
   for (const [k, val] of Object.entries(env)) if (!val && /PASSWORD|KEY|SECRET|TOKEN/.test(k)) env[k] = old[k] || randomPassword(32);
+  if (rest.command === REDIS_COMMAND && !REDIS_PASSWORD.test(env.REDIS_PASSWORD ?? "")) throw new Error("REDIS_PASSWORD: 8-128 characters from A-Z a-z 0-9 . _ ~ + -");
   // Pinned once per image: saving other settings does not move a running container to a newer build.
   const digest = prev && prev.image === input.image && prev.digest ? prev.digest : await resolveDigest(input.image);
   const c: Container = { ...rest, digest, host_port: prev?.host_port || nextPort(), created_at: prev?.created_at ?? 0 };
@@ -246,7 +273,9 @@ export async function containerDetail(name: string) {
     run(["journalctl", "-u", unitName(c.name), "-n", "200", "--no-pager", "-o", "short-iso"], { check: false }).then((r) => r.stdout),
   ]);
   const env = parseEnv((await readText(envFile(c.name))) ?? "");
-  return { ...c, status, logs, env, dataDir: dataDir(c.name) };
+  // A Redis container made before passwords were added still answers anyone on this server.
+  const notice = isRedis(c.image) && !c.command && !env.REDIS_PASSWORD ? "This Redis has no password: every local user can read and change its data. Save it once to turn a generated password on, then add it to the apps that use it (redis://:<REDIS_PASSWORD>@127.0.0.1:<port>)." : "";
+  return { ...c, status, logs, env, dataDir: dataDir(c.name), notice };
 }
 
 export async function deleteContainer(name: string, removeData: boolean, actor: string) {

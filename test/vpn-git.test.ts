@@ -75,6 +75,19 @@ describe("guard and crons", () => {
     expect(renderGuard({ ssh: true, http: true }, 22, true)).not.toContain("http_rate");
     expect(renderGuard({ ssh: false, http: false }, 22, false)).not.toContain("drop");
   });
+  test("guard: SSH connections count only after the handshake, once each, never on a SYN", () => {
+    const g = renderGuard({ ssh: true, http: false }, 22, false);
+    const counted = g.split("\n").filter((l) => l.includes("@ssh_rate"));
+    expect(counted).toHaveLength(2);
+    for (const l of counted) {
+      expect(l).toContain("ct status assured");
+      expect(l).not.toContain("ct state new");
+      expect(l).toContain("ct mark & 0x40000000 == 0 ct mark set ct mark | 0x40000000");
+      expect(l.indexOf("ct mark set")).toBeLessThan(l.indexOf("@ssh_rate"));
+    }
+    // loopback and the WireGuard device stay exempt: they are accepted before any counting
+    expect(g.indexOf('iifname { "lo", "pano0" } accept')).toBeLessThan(g.indexOf("ct status assured"));
+  });
   test("crons parse and round-trip", () => {
     const c = parseCrons("*:0/15 | bun run sync.ts\n# note\ndaily | node x.js");
     expect(c).toEqual([{ schedule: "*:0/15", command: "bun run sync.ts" }, { schedule: "daily", command: "node x.js" }]);

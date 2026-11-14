@@ -3,9 +3,11 @@ import { renderCaddyfile } from "../src/agent/edge.ts";
 import { renderRules as fwRules } from "../src/agent/firewall.ts";
 import { accountHosts, bindFor, hostSpec, remoteUrls, renderDropin } from "../src/agent/mysqlremote.ts";
 import { mergeHba, remoteUrl, renderHbaBlock } from "../src/agent/pgremote.ts";
-import { parseAllow } from "../src/agent/remotedb.ts";
+import { lit, SQL_PRELUDE } from "../src/agent/mysql.ts";
+import { assertRemoteDomainFree, parseAllow } from "../src/agent/remotedb.ts";
+import { sites } from "../src/agent/state.ts";
 import { cidr, nftAccept } from "../src/agent/remotedb-config.ts";
-import { pgConf } from "../src/agent/services.ts";
+import { pgConf, pgLit } from "../src/agent/services.ts";
 import { renderRules as vpnRules } from "../src/agent/vpn.ts";
 
 test("cidr: canonical networks, host bits cleared, no /0", () => {
@@ -96,6 +98,23 @@ test("MariaDB: drop-in, listen list, account hosts", () => {
   const u = remoteUrls({ user: "shop_r_ab12cd", database: "shop" }, "pw", "db.example.com");
   expect(u.prisma).toBe("mysql://shop_r_ab12cd:pw@db.example.com:3306/shop?sslaccept=strict");
   expect(JSON.parse(new URL(u.mysql2).searchParams.get("ssl")!)).toEqual({ rejectUnauthorized: true });
+});
+
+test("SQL literals: the quote never ends the string, every batch starts in a sane sql_mode", () => {
+  expect(lit("a'b\\c")).toBe("'a''b\\\\c'");
+  expect(lit("x'; DROP USER y; -- ")).toBe("'x''; DROP USER y; -- '");
+  expect(SQL_PRELUDE).toBe("SET SESSION sql_mode='';\n");
+  expect(pgLit("a'b\\c")).toBe("E'a''b\\\\c'");
+});
+
+test("remote database name: refused when an app, site or preview serves it", () => {
+  sites.upsert({ name: "ct-db-taken", kind: "proxy", domains: ["taken.db.example.com"], root: "", routes: [], ask_url: "", php_version: "", tls_cert: "", tls_key: "", source: "container", enabled: 1, on_demand_tls: 0 });
+  try {
+    expect(() => assertRemoteDomainFree("taken.db.example.com")).toThrow("already used");
+    expect(() => assertRemoteDomainFree("free.db.example.com")).not.toThrow();
+  } finally {
+    sites.remove("ct-db-taken");
+  }
 });
 
 test("URL verifies the certificate", () => {

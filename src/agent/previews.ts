@@ -6,14 +6,16 @@
 // serves it with on-demand TLS, and the ask endpoint only approves hosts of existing previews.
 
 import { fsPath } from "../shared/config.ts";
+import { groupList } from "../shared/env.ts";
 import {
-  branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, previewComment, previewEnv, previewHost, previewProcesses, previewSlug, pvName,
+  branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, previewComment, previewDomainProblem, previewEnv, previewHost, previewProcesses, previewSlug, pvName,
 } from "../shared/preview.ts";
 import { formatEnv, v } from "../shared/validate.ts";
 import { appHome, appUser, assertDomainsFree, effectiveEnv, enqueueDeploy, getEnv, mustGet, teardownUnits, type DeployTarget } from "./apps.ts";
 import { applyEdge } from "./edge.ts";
+import { readGroup } from "./envgroups.ts";
 import { commentPreview, reportStatus } from "./github.ts";
-import { apps, audit, deploys, previewApp, previews, procsOf, sites, type App, type Preview, type Process } from "./state.ts";
+import { appHosts, apps, audit, deploys, previewApp, previews, procsOf, sites, type App, type Preview, type Process } from "./state.ts";
 import { remove, run, writeAtomic } from "./sys.ts";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -28,14 +30,22 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 
 const busy = (id: number) => !!deploys.running(pvName(id));
 
-/** The copy of the app's env a preview runs with. */
+/**
+ * The copy of the app's env a preview runs with. Without a prod-only list of the admin's own, secret-looking
+ * variables and everything that comes from shared groups are left out (see previewEnv); the preview scope
+ * ("Preview values") is how a preview gets its own database URL and keys.
+ */
 async function writePreviewEnv(parent: App, pv: Preview) {
   const name = pvName(pv.id);
+  const own = await getEnv(parent.name, "production");
+  const groupKeys = (await Promise.all(groupList(parent.env_groups ?? "").map((g) => readGroup(g).catch(() => ({} as Record<string, string>)))))
+    .flatMap((g) => Object.keys(g))
+    .filter((k) => !(k in own));
   const env = previewEnv(await effectiveEnv(parent), parent.preview_env_exclude, await getEnv(parent.name, "preview"), {
     PANO_PREVIEW: "1",
     PANO_PREVIEW_BRANCH: pv.branch,
     PANO_PREVIEW_URL: `https://${pv.host}`,
-  });
+  }, groupKeys);
   const file = `${appHome(name)}/shared/.env`;
   await writeAtomic(file, formatEnv(env), 0o640);
   await run(["chgrp", appUser(name), fsPath(file)], { check: false });
@@ -158,6 +168,9 @@ export function startPreview(appName: string, branchInput: string, trigger: stri
 
     let id = existing?.id ?? 0;
     if (!existing) {
+      // New previews only: ones that already run under an older, broader domain keep working until they are removed.
+      const problem = previewDomainProblem(app.preview_domain, appHosts(app));
+      if (problem) throw new Error(problem);
       assertDomainsFree([host], {}, { apps: apps.list(), sites: sites.list(), previews: previews.list() });
       const taken: number[] = [];
       const processes: Process[] = previewProcesses(procsOf(app), host).map((p) => {

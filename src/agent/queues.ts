@@ -44,7 +44,8 @@ async function readAll(): Promise<Queue[]> {
   const out: Queue[] = [];
   let c: RedisClient | null = null;
   try {
-    c = await connect(await services.valkeyUrl());
+    // Not valkeyUrl(): the password must not go to whatever listens on 6379 while Valkey is down.
+    c = await connect(await services.valkeyUrlChecked());
     out.push(...(await readQueues(c)));
   } finally {
     c?.close();

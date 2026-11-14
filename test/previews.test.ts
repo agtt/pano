@@ -4,7 +4,7 @@ import { renderCaddyfile } from "../src/agent/edge.ts";
 import { apps, previewApp, previews, type App } from "../src/agent/state.ts";
 import {
   branchFromRef, evictions, expiredIds, expiryFrom, hostMatchesPattern, isBranchDeletion, normalizeEnvExclude, previewEnv, previewHost, previewProcesses,
-  previewSlug, validatePreviewDomain,
+  previewDomainProblem, previewSlug, validatePreviewDomain,
 } from "../src/shared/preview.ts";
 
 describe("preview names", () => {
@@ -32,6 +32,11 @@ describe("preview names", () => {
     expect(validatePreviewDomain(" *.Preview.Example.com ")).toBe("*.preview.example.com");
     expect(() => validatePreviewDomain("preview.example.com")).toThrow();
     expect(() => validatePreviewDomain("*.com")).toThrow();
+    // A dedicated zone: never the app's own domain or a parent of it.
+    expect(() => validatePreviewDomain("*.example.com", ["example.com"])).toThrow("own domain");
+    expect(() => validatePreviewDomain("*.example.com", ["app.example.com"])).toThrow("own domain");
+    expect(validatePreviewDomain("*.preview.example.com", ["app.example.com", "example.com"])).toBe("*.preview.example.com");
+    expect(previewDomainProblem("*.pv.example.net", ["example.com"])).toBe("");
     expect(previewHost("*.preview.example.com", "login")).toBe("login.preview.example.com");
     expect(hostMatchesPattern("*.preview.example.com", "login.preview.example.com")).toBe(true);
     expect(hostMatchesPattern("*.preview.example.com", "a.b.preview.example.com")).toBe(false);
@@ -79,7 +84,12 @@ describe("preview env and processes", () => {
     const env = { DATABASE_URL: "x", STRIPE_KEY: "k", STRIPE_WEBHOOK: "w", SECRET: "s", KEEP: "1" };
     const out = previewEnv(env, normalizeEnvExclude("DATABASE_URL, STRIPE_* SECRET"), {}, { PANO_PREVIEW: "1" });
     expect(out).toEqual({ KEEP: "1", PANO_PREVIEW: "1" });
-    expect(previewEnv(env, "")).toEqual(env);
+    // No list of the admin's own: secret-looking names and shared-group variables stay out by default, "!NAME" lets one in.
+    expect(previewEnv(env, "")).toEqual({ KEEP: "1", STRIPE_WEBHOOK: "w" });
+    expect(previewEnv({ KEEP: "1", SHARED_FLAG: "on", API_TOKEN: "t", DB_HOST: "h" }, "", {}, {}, ["SHARED_FLAG"])).toEqual({ KEEP: "1", DB_HOST: "h" });
+    expect(previewEnv(env, "!DATABASE_URL,!STRIPE_*")).toEqual({ DATABASE_URL: "x", STRIPE_KEY: "k", STRIPE_WEBHOOK: "w", KEEP: "1" });
+    expect(previewEnv(env, "!*")).toEqual(env);
+    expect(previewEnv({ KEEP: "1", MY_KEY: "k" }, "OTHER")).toEqual({ KEEP: "1", MY_KEY: "k" }); // an admin's own list is applied as it stands
     // Preview values win and are never excluded; pano's own come last.
     const scoped = previewEnv(env, "STRIPE_*", { STRIPE_KEY: "test", KEEP: "2", PANO_PREVIEW: "x" }, { PANO_PREVIEW: "1" });
     expect(scoped).toEqual({ DATABASE_URL: "x", SECRET: "s", KEEP: "2", STRIPE_KEY: "test", PANO_PREVIEW: "1" });
@@ -87,6 +97,8 @@ describe("preview env and processes", () => {
     expect(() => normalizeEnvExclude("bad key")).not.toThrow(); // split on spaces
     expect(() => normalizeEnvExclude("1BAD")).toThrow();
     expect(() => normalizeEnvExclude("A;rm")).toThrow();
+    expect(normalizeEnvExclude("!DATABASE_URL !*")).toBe("!DATABASE_URL,!*");
+    expect(() => normalizeEnvExclude("!")).toThrow();
   });
 
   test("web processes move to the preview host, workers do not run", () => {

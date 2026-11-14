@@ -4,7 +4,8 @@
 import { applyEdge, edgeCert, edgeInstalled } from "./edge.ts";
 import { followSettings as followFirewall } from "./firewall.ts";
 import { cidr, REMOTE_PORT, remoteConfig, type RemoteEngine } from "./remotedb-config.ts";
-import { settings } from "./state.ts";
+import { assertDomainsFree } from "./apps.ts";
+import { apps, previews, settings, sites } from "./state.ts";
 import { ensureDir, readText, run, writeAtomic } from "./sys.ts";
 import { followRemoteDb as followVpn } from "./vpn.ts";
 
@@ -16,6 +17,11 @@ export function remoteDomain(input: unknown): string {
   const d = String(input ?? "").trim().toLowerCase();
   if (!DOMAIN.test(d)) throw new Error("domain: a name of its own for the database, e.g. db.example.com");
   return d;
+}
+
+/** The name must not be a host an app, site, container or preview already serves (the edge would refuse the whole Caddyfile). */
+export function assertRemoteDomainFree(domain: string) {
+  assertDomainsFree([domain], {}, { apps: apps.list(), sites: sites.list(), previews: previews.list() });
 }
 
 /** Parses the allowed networks (spaces, commas or new lines between them); throws on the first that is not one. */

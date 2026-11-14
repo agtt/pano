@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { parseJlist, parsePm2Ref, pm2Ref, portOf } from "../src/agent/pm2.ts";
+import { parseJlist, parsePm2Ref, pm2LogPath, pm2Ref, portOf } from "../src/agent/pm2.ts";
+
+test("pm2 log files are read only from the user's own .pm2/logs", () => {
+  expect(pm2LogPath("/home/shop", "/home/shop/.pm2/logs/pos-out.log")).toBe(true);
+  for (const bad of ["/etc/shadow", "/home/shop/.pm2/logs/", "/home/shop/.pm2/logs/../../.ssh/id_rsa", "/home/shop/.pm2/other/x.log", "/home/shop2/.pm2/logs/x.log", "/dev/zero", ""]) expect(pm2LogPath("/home/shop", bad)).toBe(false);
+});
 
 test("pm2 refs round-trip and refuse anything else", () => {
   expect(parsePm2Ref(pm2Ref({ user: "shop", name: "deploy-hook" }))).toEqual({ user: "shop", name: "deploy-hook" });

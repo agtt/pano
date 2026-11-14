@@ -90,3 +90,20 @@ test("KEV and EPSS mark findings urgent", () => {
   expect(list[0]!.exploited).toBe(true);
   expect(list[1]!.epss).toBe(0.42);
 });
+
+test("tenant files: bad JSON, links and non-regular files are skipped, not followed", async () => {
+  const { mkdirSync, symlinkSync, writeFileSync } = await import("node:fs");
+  const { fsPath } = await import("../src/shared/config.ts");
+  const { readTenantFile } = await import("../src/agent/vulns.ts");
+  const dir = "/srv/vulns-tenant";
+  mkdirSync(fsPath(dir), { recursive: true });
+  writeFileSync(fsPath(`${dir}/ok.lock`), "{}");
+  writeFileSync(fsPath(`${dir}/big.lock`), "x".repeat(200));
+  symlinkSync(fsPath(`${dir}/ok.lock`), fsPath(`${dir}/link.lock`));
+  expect(await readTenantFile(`${dir}/ok.lock`)).toBe("{}");
+  expect(await readTenantFile(`${dir}/link.lock`)).toBeNull();
+  expect(await readTenantFile(`${dir}/big.lock`, 100)).toBeNull();
+  expect(await readTenantFile(`${dir}/missing.lock`)).toBeNull();
+  expect(() => parseNpmLock("package-lock.json", "{")).toThrow();
+  expect(parseComposerLock(JSON.stringify({ packages: [{ name: "a/b" }, null, { name: "c/d", version: "v1.0.0" }] }))).toEqual([{ name: "c/d", version: "1.0.0" }]);
+});

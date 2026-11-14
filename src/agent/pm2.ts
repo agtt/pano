@@ -103,13 +103,24 @@ export async function pm2Reload(ref: Pm2Ref) {
   if (r.code !== 0) throw new Error(r.stderr.trim().split("\n").at(-1) || "pm2 reload failed");
 }
 
+/** The log path PM2 reports comes from the tenant's own daemon: only a file under <home>/.pm2/logs/ is read. */
+export function pm2LogPath(home: string, file: string): boolean {
+  const dir = `${home.replace(/\/+$/, "")}/.pm2/logs/`;
+  return file.startsWith(dir) && file.length > dir.length && !file.includes("\0") && !file.split("/").includes("..");
+}
+
 export async function pm2Logs(ref: Pm2Ref, lines: number): Promise<string> {
   const a = await pm2App(ref);
   if (!a) return "";
+  const h = await home(ref.user);
+  if (!h) return "";
+  const n = Math.max(1, Math.min(5000, Math.floor(Number(lines)) || 100));
   const out: string[] = [];
   for (const [label, file] of [["stdout", a.out], ["stderr", a.err]] as const) {
-    if (!file) continue;
-    const r = await run(["tail", "-n", String(lines), "--", file], { check: false });
+    if (!file || !pm2LogPath(h, file)) continue;
+    // As the app's own user (what it cannot read, pano does not read for it), and a FIFO or a hung mount
+    // cannot stall the page: tail is killed after a few seconds.
+    const r = await run(["timeout", "-k", "1", "5", "tail", "-n", String(n), "--", file], { user: ref.user, check: false, timeoutMs: 10_000 });
     if (r.stdout.trim()) out.push(`==> ${label} (${file})\n${r.stdout}`);
   }
   return out.join("\n");

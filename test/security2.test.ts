@@ -16,7 +16,7 @@ test("the signed SHA256SUMS names its release and still parses as checksums", ()
 });
 
 test("every SSH port is guarded and locked", () => {
-  expect(renderGuard({ ssh: true, http: false }, [22, 2222], false)).toContain("tcp dport { 22, 2222 } ct state new");
+  expect(renderGuard({ ssh: true, http: false }, [22, 2222], false)).toContain("tcp dport { 22, 2222 } ct status assured");
   expect(renderRules({ panel: false, ssh: true, services: false, databases: false }, [22, 2222])).toContain("22, 2222");
 });
 
@@ -86,4 +86,15 @@ test("a release is only taken when SHA256SUMS is signed by the release key", () 
   expect(signedBy(new TextEncoder().encode("abd  pano-linux-x64\n"), sig, pem)).toBe(false);
   expect(signedBy(sums, sig)).toBe(false); // not the built-in key
   expect(signedBy(sums, new Uint8Array(3), pem)).toBe(false);
+});
+
+test("the shared Valkey's password goes only to a listener inside its own unit", async () => {
+  const { listenerPids, onlyUnitListens } = await import("../src/agent/services.ts");
+  const ss = 'LISTEN 0 511 127.0.0.1:6379 0.0.0.0:* users:(("valkey-server",pid=812,fd=6))\n';
+  expect(listenerPids(ss)).toEqual(["812"]);
+  const own = { "812": "0::/system.slice/valkey.service\n" };
+  expect(onlyUnitListens(["812"], own, "valkey.service")).toBe(true);
+  expect(onlyUnitListens(["812"], { "812": "0::/system.slice/pano-app-shop.service\n" }, "valkey.service")).toBe(false);
+  expect(onlyUnitListens(["812", "900"], { ...own, "900": "0::/user.slice/user-1001.slice/session-3.scope\n" }, "valkey.service")).toBe(false);
+  expect(onlyUnitListens([], {}, "valkey.service")).toBe(false); // nothing listens: Valkey is down
 });

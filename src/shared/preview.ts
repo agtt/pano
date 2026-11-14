@@ -24,12 +24,27 @@ export function previewSlug(branch: string): string {
 }
 
 /** "" (previews off) or a wildcard such as *.preview.example.com that the admin owns. */
-export function validatePreviewDomain(s: unknown): string {
+export function validatePreviewDomain(s: unknown, ownHosts: string[] = []): string {
   const x = String(s ?? "").trim().toLowerCase();
   if (!x) return "";
   const d = v.domain(x);
   if (!d.startsWith("*.")) throw new ValidationError("preview domain must be a wildcard such as *.preview.example.com");
+  if (d.slice(2).split(".").length < 2) throw new ValidationError("preview domain must be a wildcard such as *.preview.example.com");
+  const problem = previewDomainProblem(d, ownHosts);
+  if (problem) throw new ValidationError(problem);
   return d;
+}
+
+/**
+ * Why a preview domain is not acceptable next to these hosts (the app's own), or "" when it is.
+ * A branch named "mail" or "admin" takes the host <branch>.<zone>: the zone must be a dedicated one
+ * (*.preview.example.com), never the app's own domain or a parent of it (*.example.com).
+ */
+export function previewDomainProblem(pattern: string, ownHosts: string[]): string {
+  if (!pattern.startsWith("*.")) return "";
+  const zone = pattern.slice(2);
+  const hit = ownHosts.map((h) => h.toLowerCase()).find((h) => h === zone || h.endsWith(`.${zone}`));
+  return hit ? `the preview domain ${pattern} covers this app's own domain (${hit}): use a dedicated zone of its own, such as *.preview.example.com` : "";
 }
 
 export const previewHost = (pattern: string, slug: string) => `${slug}${pattern.slice(1)}`;
@@ -42,9 +57,12 @@ export function hostMatchesPattern(pattern: string, host: string): boolean {
 
 // ---- env: a preview gets the app's variables minus the ones marked prod-only ----
 
-const EXCLUDE_ITEM = /^[A-Za-z_][A-Za-z0-9_]{0,127}\*?$/;
+const EXCLUDE_ITEM = /^(!?[A-Za-z_][A-Za-z0-9_]{0,127}\*?|!\*)$/;
 
-/** "STRIPE_*, DATABASE_URL" -> "STRIPE_*,DATABASE_URL" (a trailing * matches a prefix). */
+/**
+ * "STRIPE_*, DATABASE_URL" -> "STRIPE_*,DATABASE_URL" (a trailing * matches a prefix).
+ * "!NAME" (or "!PREFIX*", "!*" for everything) lets a variable through that previews leave out by default.
+ */
 export function normalizeEnvExclude(s: unknown): string {
   const items = [...new Set(String(s ?? "").split(/[\s,]+/).filter(Boolean))];
   if (items.length > 100) throw new ValidationError("at most 100 prod-only variables");
@@ -52,13 +70,30 @@ export function normalizeEnvExclude(s: unknown): string {
   return items.join(",");
 }
 
+/** Names that carry credentials or connection strings: URLs, keys, secrets, tokens, passwords, DATABASE_*. */
+export const SECRET_LIKE = /^DATABASE_|(^|_)(URL|URI|KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASS|PWD|DSN|CREDENTIALS?)$/i;
+
+const ruleMatches = (rule: string, k: string) => (rule === "*" ? true : rule.endsWith("*") ? k.startsWith(rule.slice(0, -1)) : k === rule);
+
 /**
- * The app's env minus the prod-only variables, then the preview values (Vercel's "Preview"
- * scope: a test Stripe key, a staging database), which are never excluded, then pano's own.
+ * The app's env as a preview gets it. Branch code runs with it, and anyone who can push a branch
+ * can start a build, so by default a preview does not get what looks like a secret (SECRET_LIKE) nor
+ * anything from a shared variable group (`groupKeys`); "!NAME" in the list lets one through.
+ * A list the admin wrote with prod-only names ("STRIPE_*, DATABASE_URL") is taken as their own
+ * decision and applied as it stands, as before this default existed.
+ * Then come the preview values (Vercel's "Preview" scope: a test Stripe key, a staging database),
+ * which are never excluded, then pano's own.
  */
-export function previewEnv(env: Record<string, string>, exclude: string, overrides: Record<string, string> = {}, extra: Record<string, string> = {}): Record<string, string> {
-  const rules = exclude.split(",").filter(Boolean);
-  const dropped = (k: string) => rules.some((r) => (r.endsWith("*") ? k.startsWith(r.slice(0, -1)) : k === r));
+export function previewEnv(env: Record<string, string>, exclude: string, overrides: Record<string, string> = {}, extra: Record<string, string> = {}, groupKeys: string[] = []): Record<string, string> {
+  const items = exclude.split(",").filter(Boolean);
+  const allow = items.filter((r) => r.startsWith("!")).map((r) => r.slice(1));
+  const deny = items.filter((r) => !r.startsWith("!"));
+  const groups = new Set(groupKeys);
+  const dropped = (k: string) => {
+    if (deny.some((r) => ruleMatches(r, k))) return true;
+    if (deny.length) return false;
+    return (SECRET_LIKE.test(k) || groups.has(k)) && !allow.some((r) => ruleMatches(r, k));
+  };
   return { ...Object.fromEntries(Object.entries(env).filter(([k]) => !dropped(k))), ...overrides, ...extra };
 }
 

@@ -102,6 +102,12 @@ export async function refreshRanges(force = false) {
 
 const locked = () => settings.get("cloudflare.lock") === "1";
 
+/**
+ * Source addresses only: every Cloudflare customer's zone, not just the owner's, comes from these
+ * ranges, so another Cloudflare account can point a hostname at this server's address and reach the
+ * origin around the owner's WAF and rate limits. Authenticated Origin Pulls (mTLS, a certificate
+ * the edge requires from Cloudflare) closes that; it is documented next to the lock, not built here.
+ */
 export function renderLock(ranges: string[]): string {
   const v4 = ranges.filter((r) => !r.includes(":"));
   const v6 = ranges.filter((r) => r.includes(":"));

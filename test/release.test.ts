@@ -16,3 +16,11 @@ test("release asset names follow the CPU", () => {
   expect(assetName("arm64")).toBe("pano-linux-arm64");
   expect(() => assetName("ia32")).toThrow();
 });
+
+test("install.sh has a minimum version the release workflow raises", async () => {
+  const installer = await Bun.file(new URL("../install.sh", import.meta.url)).text();
+  const workflow = await Bun.file(new URL("../.github/workflows/release.yml", import.meta.url)).text();
+  expect(installer).toMatch(/^MIN_VERSION="[0-9]+\.[0-9]+\.[0-9]+"$/m);
+  expect(installer).toContain('version_lt "$SIGNED_TAG" "$MIN_VERSION"');
+  expect(workflow).toContain("s/^MIN_VERSION=.*/MIN_VERSION=");
+});

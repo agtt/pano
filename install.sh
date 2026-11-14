@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh
 #
 # Environment:
-#   PANO_VERSION   release to install, like 0.2.0 or v0.2.0 (default: the latest)
+#   PANO_VERSION   release to install, like 0.2.0 or v0.2.0 (default: the latest, which must be
+#                  at least MIN_VERSION below; an explicit PANO_VERSION is installed as asked)
 #   PANO_REPO      owner/name of the repository (default: agtt/pano)
 #   PANO_RELEASE_PUBKEY  the PEM public key releases are signed with (a fork's own)
 #   PANO_INSECURE_SKIP_SIGNATURE=1  install without OpenSSL 3 (checksum only, not the signature)
@@ -27,7 +28,18 @@ RELEASE_PUBKEY="-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA9lt4OZWuOwWbBaaBlgtzcuzVwi3T/LZDJTpM0Q3wa8Y=
 -----END PUBLIC KEY-----"
 
+# The oldest release a plain install (no PANO_VERSION) accepts. The release workflow raises it to
+# each new release; a validly signed but old release (known holes) is refused, not installed.
+MIN_VERSION="0.1.0"
+
 fail() { printf 'pano install: %s\n' "$1" >&2; exit 1; }
+# version_lt A B: succeeds when A is an older release than B (major.minor.patch, a leading v and any -pre/+build ignored).
+version_lt() {
+  awk -v a="$1" -v b="$2" 'function n(s) { sub(/^v/, "", s); sub(/[-+].*/, "", s); return s }
+    BEGIN { split(n(a), x, "."); split(n(b), y, ".")
+      for (i = 1; i <= 3; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
+      exit 1 }'
+}
 need() { command -v "$1" >/dev/null 2>&1 || fail "$1 is required but not installed"; }
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (curl ... | sudo sh)"
@@ -102,6 +114,9 @@ fi
 SIGNED_TAG="$(sed -n 's/^# pano \(v[0-9][A-Za-z0-9.+-]*\)$/\1/p' "$TMP/SHA256SUMS" | head -n 1)"
 [ -n "$SIGNED_TAG" ] || fail "SHA256SUMS names no release"
 [ -z "$VERSION" ] || [ "$SIGNED_TAG" = "$VERSION" ] || fail "asked for $VERSION but the signed SHA256SUMS is for $SIGNED_TAG"
+if [ -z "$VERSION" ] && version_lt "$SIGNED_TAG" "$MIN_VERSION"; then
+  fail "the latest release served is $SIGNED_TAG, older than $MIN_VERSION, the oldest this installer accepts (a stale or replayed release); nothing was installed. Set PANO_VERSION to install a specific release anyway"
+fi
 echo "release $SIGNED_TAG"
 
 WANT="$(awk -v f="$ASSET" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/SHA256SUMS")"

@@ -13,7 +13,14 @@ const PROTECTED_DBS = new Set([...SYSTEM_DBS, "cyberpanel"]);
 /** Accounts the server itself relies on: no password change or grant from the panel. */
 const SYSTEM_USERS = new Set(["root", "mysql", "mariadb.sys", "mysql.sys", "mysql.session", "mysql.infoschema", "debian-sys-maint", "cyberpanel", "healthcheck"]);
 
-export const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+/**
+ * A string literal. The quote is doubled, which ends nothing early in any sql_mode; the backslash is
+ * doubled for the default mode, which every batch is forced into (SQL_PRELUDE). Even if the prelude
+ * were missing, NO_BACKSLASH_ESCAPES could then only change what the value means, never end the literal.
+ */
+export const lit = (s: string) => `'${s.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+/** First statement of every batch sent to the client: a server running with NO_BACKSLASH_ESCAPES or ANSI_QUOTES reads literals as lit() writes them. */
+export const SQL_PRELUDE = "SET SESSION sql_mode='';\n";
 export const ident = (s: string) => `\`${s.replace(/`/g, "``")}\``;
 /**
  * A database name in GRANT/REVOKE ... ON <db>.*: "_" and "%" are wildcards there, so a_b would also
@@ -23,7 +30,7 @@ export const ident = (s: string) => `\`${s.replace(/`/g, "``")}\``;
 export const grantDb = (s: string) => ident(s.replace(/\\([_%])/g, "$1").replace(/[_%]/g, "\\$&"));
 
 export async function sql(query: string): Promise<string[][]> {
-  const r = await run(["mysql", "--batch", "--skip-column-names", "--raw"], { input: query, timeoutMs: 60_000 });
+  const r = await run(["mysql", "--batch", "--skip-column-names", "--raw"], { input: SQL_PRELUDE + query, timeoutMs: 60_000 });
   return r.stdout
     .split("\n")
     .filter(Boolean)
