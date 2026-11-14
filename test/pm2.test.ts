@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { parseJlist, parsePm2Ref, pm2Ref, portOf } from "../src/agent/pm2.ts";
 
 test("pm2 refs round-trip and refuse anything else", () => {
-  expect(parsePm2Ref(pm2Ref({ user: "fastpos", name: "deploy-hook" }))).toEqual({ user: "fastpos", name: "deploy-hook" });
-  for (const bad of ["pm2:root/a b", "pm2:../x", "nginx.service", "pm2:fastpos/$(id)", ""]) expect(parsePm2Ref(bad)).toBeNull();
+  expect(parsePm2Ref(pm2Ref({ user: "shop", name: "deploy-hook" }))).toEqual({ user: "shop", name: "deploy-hook" });
+  for (const bad of ["pm2:root/a b", "pm2:../x", "nginx.service", "pm2:shop/$(id)", ""]) expect(parsePm2Ref(bad)).toBeNull();
 });
 
 test("ports from start args or env", () => {

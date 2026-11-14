@@ -8,7 +8,7 @@ import type { App, Site } from "../src/agent/state.ts";
 import { formatProcesses, parseProcesses, v } from "../src/shared/validate.ts";
 
 describe("processes", () => {
-  const text = `# fastpos
+  const text = `# shop
 pos    | apps/pos    | example.com, www.example.com | 1024 |
 online | apps/online | *.example.com, *             | 768  |
 api    | apps/api    | example.com/api               | 256  | bun run start:prod
@@ -34,7 +34,7 @@ worker | .           | -                            | 256  | bun packages/api/cr
 
 describe("edge: multi-process apps and php sites", () => {
   const app = {
-    name: "fastpos", kind: "managed", domains: [], active_slot: "a", port_a: 4100, port_b: 4101,
+    name: "shop", kind: "managed", domains: [], active_slot: "a", port_a: 4100, port_b: 4101,
     processes: [
       { name: "pos", dir: "apps/pos", routes: ["example.com", "www.example.com"], memory_mb: 512, start: "", port_a: 4102, port_b: 4103 },
       { name: "api", dir: "apps/api", routes: ["example.com/api"], memory_mb: 512, start: "", port_a: 4104, port_b: 4105 },

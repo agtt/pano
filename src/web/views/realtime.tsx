@@ -124,7 +124,7 @@ export function RealtimeCard({ r, csrf, appNames }: { r: RealtimeView; csrf: str
       <div class="cols">
         <form method="post" action="/services/realtime/apps" class="grid-form">
           <Csrf token={csrf} />
-          <Field label="Name" name="name" required placeholder="fastpos" />
+          <Field label="Name" name="name" required placeholder="shop" />
           <Field label="Allowed origins (optional)" name="origins" placeholder="https://app.example.com" hint="Browsers from other sites cannot connect." />
           <Field label="Webhook URL (optional)" name="webhook_url" placeholder="https://app.example.com/api/webhooks/pusher" hint="Channel occupied/vacated and presence events, signed with the app secret like Pusher." />
           <Field label="Max connections (optional)" name="max_connections" placeholder="0 = no limit" hint="Keeps one app from using every connection of the server." />

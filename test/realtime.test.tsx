@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { envFor, newer, parseOrigins, parseWebhookUrl, renderConfig, renderUnit, signQuery, type RealtimeApp } from "../src/agent/realtime.ts";
 import { RealtimeCard } from "../src/web/views/realtime.tsx";
 
-const app: RealtimeApp = { id: "123456", name: "fastpos", key: "k1", secret: "s1", origins: ["https://pos.example.com"], webhook_url: "", max_connections: 0, created_at: 1 };
+const app: RealtimeApp = { id: "123456", name: "shop", key: "k1", secret: "s1", origins: ["https://pos.example.com"], webhook_url: "", max_connections: 0, created_at: 1 };
 
 test("config is valid TOML with our apps, localhost only, no client events", () => {
   const cfg = Bun.TOML.parse(renderConfig([app, { ...app, id: "2", name: "b", key: "k2", origins: [] }])) as any;
@@ -45,8 +45,8 @@ test("realtime card renders", () => {
   const on = String(
     <RealtimeCard
       csrf="c"
-      appNames={["fastpos"]}
-      r={{ installed: true, version: "5.2.0", latest: "6.0.0", autoUpdate: true, updatedAt: null, active: "active", memory: 9e6, domain: "ws.example.com", port: 6001, apps: [{ id: "1", name: "fastpos", key: "k1", origins: [], created_at: 1 }] }}
+      appNames={["shop"]}
+      r={{ installed: true, version: "5.2.0", latest: "6.0.0", autoUpdate: true, updatedAt: null, active: "active", memory: 9e6, domain: "ws.example.com", port: 6001, apps: [{ id: "1", name: "shop", key: "k1", origins: [], created_at: 1 }] }}
     />,
   );
   expect(on).toContain("Update to 6.0.0");
