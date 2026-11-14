@@ -1,6 +1,7 @@
 import type { Child } from "hono/jsx";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field, alwaysAttr } from "./layout.tsx";
+import { Icon } from "./icons.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, PageHead, TabPanes, alwaysAttr } from "./layout.tsx";
 
 const Otp = (p: { always?: boolean }) => <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" {...alwaysAttr(p.always)} />;
 
@@ -101,7 +102,7 @@ export function SitesPage({ sites, csrf }: { sites: SiteRow[]; csrf: string }) {
 
 export function PhpSiteNew({ csrf, versions }: { csrf: string; versions: PhpVersion[] }) {
   return (
-    <Card title="+ PHP site">
+    <Card>
       <p class="muted">
         Own system user, own PHP-FPM pool (started on demand, never as root), files in <code>/srv/pano/sites/&lt;name&gt;/public</code>. PHP is installed the
         first time a version is used. Hidden files, dumps, backups and PHP inside uploads are never served.
@@ -123,7 +124,7 @@ export function PhpSiteNew({ csrf, versions }: { csrf: string; versions: PhpVers
   );
 }
 
-function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versions: PhpVersion[]; logs: string }) {
+function PhpPanel({ s, csrf, versions }: { s: SiteRow; csrf: string; versions: PhpVersion[] }) {
   return (
     <>
       <Card title={`PHP ${s.php_version}`}>
@@ -162,9 +163,6 @@ function PhpPanel({ s, csrf, versions, logs }: { s: SiteRow; csrf: string; versi
             <button class="btn">{t("Save")}</button>
           </div>
         </form>
-      </Card>
-      <Card title={t("Logs")} actions={<a class="btn" href={`/sites/${s.name}`}>↻</a>}>
-        <pre class="log">{logs || "—"}</pre>
       </Card>
       {s.converted_from ? (
         <Card title="Back to OpenLiteSpeed">
@@ -219,11 +217,38 @@ export function NoticePage({ title, items, back }: { title: string; items: strin
   );
 }
 
+/** The host to open: the site's first plain domain. */
+const siteHost = (s: SiteRow) => s.domains.find((d) => d && d !== "*" && !d.startsWith("*.")) ?? "";
+const siteKindLabel = (s: SiteRow) => (s.kind === "php" ? `PHP ${s.php_version}` : s.kind === "legacy" ? (s.source === "cyberpanel" ? "OpenLiteSpeed" : t("legacy")) : s.kind === "static" ? t("Static") : "Proxy");
+
+/** The site page's header: name, state, kind and Open. */
+export function SiteHead({ site: s }: { site: SiteRow }) {
+  const host = siteHost(s);
+  return (
+    <PageHead
+      crumb={[["/projects", t("Projects")]]}
+      title={s.name}
+      sub={
+        <>
+          <Badge state={s.enabled ? "active" : "disabled"} />
+          <span class="muted">{siteKindLabel(s)}</span>
+        </>
+      }
+      actions={
+        host ? (
+          <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
+            {t("Open")} <Icon name="external" size={14} />
+          </a>
+        ) : null
+      }
+    />
+  );
+}
+
 export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site?: SiteRow; csrf: string; versions?: PhpVersion[]; logs?: string; extra?: Child }) {
   const s = site;
-  return (
-    <div class="stack">
-      <Card title={s ? s.name : "+ Site"}>
+  const form = (
+      <Card title={s ? t("Settings") : undefined}>
         <form method="post" action="/sites/save" class="grid-form">
           <Csrf token={csrf} />
           {s ? <input type="hidden" name="name" value={s.name} /> : <Field label="Name" name="name" required placeholder="example.com" />}
@@ -261,26 +286,85 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
           </div>
         </form>
       </Card>
-      {s?.kind === "php" ? <PhpPanel s={s} csrf={csrf} versions={versions} logs={logs} /> : null}
+  );
+  if (!s) return <div class="stack">{form}</div>;
+
+  const overview = (
+    <>
+      <Card title={t("Details")}>
+        <dl class="kv">
+          <dt>{t("Status")}</dt>
+          <dd>
+            <Badge state={s.enabled ? "active" : "disabled"} />
+          </dd>
+          <dt>{t("Type")}</dt>
+          <dd>{siteKindLabel(s)}</dd>
+          <dt>{t("Domains")}</dt>
+          <dd>{s.domains.join(", ") || "—"}</dd>
+          {s.root ? (
+            <>
+              <dt>{t("Root directory")}</dt>
+              <dd>
+                <code>{s.root}</code>
+              </dd>
+            </>
+          ) : null}
+          {s.routes.length ? (
+            <>
+              <dt>{t("Routes")}</dt>
+              <dd>{s.routes.map((r) => `${r.path} → ${r.upstream}`).join(", ")}</dd>
+            </>
+          ) : null}
+          <dt>TLS</dt>
+          <dd class="muted">{s.tls_cert ? t("imported certificate") : s.on_demand_tls ? t("on demand") : t("automatic")}</dd>
+        </dl>
+      </Card>
       {extra}
-      {s?.kind === "legacy" && versions.length ? <ConvertPanel s={s} csrf={csrf} versions={versions} /> : null}
-      {s ? (
-        <Card title={t("Delete")} class="danger-zone">
-          <DangerForm
-            action={`/sites/${s.name}/delete`}
-            csrf={csrf}
-            name={s.name}
-            label={t("Delete")}
-            extra={
-              s.kind === "php" && !s.converted_from ? (
-                <label class="check">
-                  <input type="checkbox" name="removeFiles" value="1" /> also remove files and the system user
-                </label>
-              ) : null
-            }
-          />
-        </Card>
-      ) : null}
+      {s.kind === "legacy" && versions.length ? <ConvertPanel s={s} csrf={csrf} versions={versions} /> : null}
+    </>
+  );
+  const settings = (
+    <>
+      {form}
+      <Card title={t("Delete")} class="danger-zone">
+        <DangerForm
+          action={`/sites/${s.name}/delete`}
+          csrf={csrf}
+          name={s.name}
+          label={t("Delete")}
+          extra={
+            s.kind === "php" && !s.converted_from ? (
+              <label class="check">
+                <input type="checkbox" name="removeFiles" value="1" /> also remove files and the system user
+              </label>
+            ) : null
+          }
+        />
+      </Card>
+    </>
+  );
+  const php = s.kind === "php";
+  const panes = [
+    { key: "overview", label: t("Overview"), body: overview },
+    ...(php
+      ? [
+          { key: "php", label: "PHP", body: <PhpPanel s={s} csrf={csrf} versions={versions} /> },
+          {
+            key: "logs",
+            label: t("Logs"),
+            body: (
+              <Card title={t("Logs")} actions={<a class="btn small" href={`/sites/${s.name}#tab-logs`} data-reload title={t("Refresh")}>↻</a>}>
+                <pre class="log">{logs || "—"}</pre>
+              </Card>
+            ),
+          },
+        ]
+      : []),
+    { key: "settings", label: t("Settings"), body: settings },
+  ];
+  return (
+    <div class="stack">
+      <TabPanes panes={panes} label={s.name} />
     </div>
   );
 }
@@ -299,8 +383,9 @@ export function DatabasesPage(p: {
           {p.created.name}: <code>{p.created.user}</code> / <code class="secret">{p.created.password}</code> — shown once, store it now.
         </div>
       ) : null}
-      <Card title={t("Databases")}>
-        <table>
+      <Card title={t("All databases")}>
+        {p.data.databases.length ? null : <p class="muted">{t("No databases yet. Create one below, or add one to an app from its Database tab.")}</p>}
+        <table hidden={!p.data.databases.length}>
           <thead>
             <tr>
               <th>{t("Name")}</th>
@@ -508,7 +593,7 @@ export function BackupsPage(p: {
         })}
       </div>
 
-      <Card title={t("Backups")}>
+      <Card title={t("Backup jobs")}>
         {p.jobs.map((j) => (
           <details class="job">
             <summary>
@@ -733,7 +818,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
           </table>
         </Card>
       ) : null}
-      <Card title={t("Edge")}>
+      <Card title={t("Edge (Caddy)")}>
         <dl class="kv">
           <dt>Caddy</dt>
           <dd>{s.installed ? <Badge state={s.active ? "active" : "inactive"} /> : "not installed"}</dd>
@@ -828,7 +913,7 @@ export function EdgePage(p: { csrf: string; status: { installed: boolean; active
 
 export function SecurityPage({ findings }: { findings: { id: string; level: string; title: string; detail: string; fix?: string }[] }) {
   return (
-    <Card title={t("Security")}>
+    <Card title={t("Server checks")}>
       <p class="muted">{t("Everything here is read-only. Each fix is a command you run yourself.")}</p>
       <div class="findings">
         {findings.map((f) => (
@@ -1115,7 +1200,7 @@ export function ImportPage(p: {
 
 export function ActivityPage({ rows }: { rows: { at: number; actor: string; action: string; detail: string }[] }) {
   return (
-    <Card title={t("Activity")}>
+    <Card>
       <table class="compact">
         <thead>
           <tr>

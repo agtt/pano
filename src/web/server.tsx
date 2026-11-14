@@ -16,7 +16,7 @@ import { parseRange } from "./views/charts.tsx";
 import { assets } from "./assets.ts";
 import { AndroidDetail, AndroidPage, type AndroidBuildRow, type AndroidDetailView, type AndroidStatusView } from "./views/android.tsx";
 import { RunnerPage, type RunnerView } from "./views/runner.tsx";
-import { AppDetail, AppForm, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
+import { AppDetail, AppForm, AppHead, GitPage, type AppRow, type RepoOption } from "./views/apps.tsx";
 import { ContainerDetail, ContainerForm, ContainersPage } from "./views/containers.tsx";
 import { Dashboard, type DashData } from "./views/dashboard.tsx";
 import { ProjectDetail, ProjectsPage, type Proj } from "./views/projects.tsx";
@@ -47,6 +47,7 @@ import {
   RuntimesPage,
   SecurityPage,
   SiteForm,
+  SiteHead,
   type CpPlanView,
   type CpReportView,
 } from "./views/pages.tsx";
@@ -171,11 +172,13 @@ export function createWebApp() {
     return c.redirect("/login");
   });
 
-  const page = (c: Context<Env>, title: string, body: Child, status = 200) => {
+  /** `opts.head`: a page's own header (an app's name, state and actions); `false`: the body draws it. */
+  const page = (c: Context<Env>, title: string, body: Child, opts: number | { status?: number; head?: Child | false } = 200) => {
     const s = c.get("s");
     const flash = { ok: c.req.query("ok"), err: c.req.query("err") };
+    const { status = 200, head } = typeof opts === "number" ? { status: opts } : opts;
     return c.html(
-      <Layout title={title} path={new URL(c.req.url).pathname} csrf={s.csrf} user={s.user.username} flash={flash} trustUntil={trustOf(getCookie(c, cookieName(c)))?.until}>
+      <Layout title={title} path={new URL(c.req.url).pathname} csrf={s.csrf} user={s.user.username} flash={flash} trustUntil={trustOf(getCookie(c, cookieName(c)))?.until} head={head}>
         {body}
       </Layout>,
       status as 200,
@@ -231,7 +234,8 @@ export function createWebApp() {
       user: c.get("s").user.username,
       now: Math.floor(Date.now() / 1000),
     };
-    return page(c, t("Overview"), <Dashboard d={d} />);
+    // The greeting is the overview's header.
+    return page(c, t("Overview"), <Dashboard d={d} />, { head: false });
   });
 
   // ---- projects: apps and sites together
@@ -239,7 +243,19 @@ export function createWebApp() {
     const [appList, siteList, certs, moves] = await Promise.all([call("apps.list"), call("sites.list"), call("sites.certs").catch(() => []), call("projects.moves").catch(() => ({}))]);
     return { projects: groupProjects(appList, siteList, moves) as Proj[], certs, now: Math.floor(Date.now() / 1000) };
   };
-  app.get("/projects", async (c) => page(c, t("Projects"), <ProjectsPage {...await loadProjects()} />));
+  app.get("/projects", async (c) => {
+    const d = await loadProjects();
+    // The list's last-deploy column and WordPress tag: each managed app's newest deploy and a file check per PHP site,
+    // all at once; a slow or failing one just leaves its cell empty.
+    const apps = d.projects.flatMap((p) => p.apps).filter((a) => a.kind === "managed");
+    const php = d.projects.flatMap((p) => p.sites).filter((s) => s.kind === "php");
+    const [latest, wp] = await Promise.all([
+      Promise.all(apps.map((a) => call<AppRow>("apps.get", { name: a.name }).then((x) => [a.name, x.deploys?.[0]] as const, () => [a.name, undefined] as const))),
+      Promise.all(php.map((s) => call<WpDetectView>("wp.detect", { name: s.name }).then((x) => (x.installed ? s.name : ""), () => ""))),
+    ]);
+    const deploys = Object.fromEntries(latest.filter((x) => x[1]).map(([n, x]) => [n, { status: x!.status, started_at: x!.started_at, finished_at: x!.finished_at }]));
+    return page(c, t("Projects"), <ProjectsPage {...d} deploys={deploys} wordpress={wp.filter(Boolean)} />);
+  });
   app.get("/projects/:slug", async (c) => {
     const d = await loadProjects();
     const key = slugKey(c.req.param("slug"));
@@ -269,7 +285,7 @@ export function createWebApp() {
   app.get("/apps", (c) => c.redirect("/projects"));
   app.get("/apps/new", async (c) => {
     const [runtimes, repos] = await Promise.all([runtimeList(), call<RepoOption[]>("github.repos").catch(() => [])]);
-    return page(c, t("New app"), <Card title={t("New app")}><AppForm csrf={c.get("s").csrf} runtimes={runtimes} repos={repos} action="/apps" submit="Create" /></Card>);
+    return page(c, t("New app"), <Card><AppForm csrf={c.get("s").csrf} runtimes={runtimes} repos={repos} action="/apps" submit="Create" /></Card>);
   });
 
   // ---- git connections
@@ -429,7 +445,9 @@ export function createWebApp() {
       const hookUrl = hooks ? `https://${hooks}/hooks/github/${name}` : "(set a webhook domain on the Edge page)";
       const m = a.repo.match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
       const github = { connected: gh.connected, repo: m?.[1] ?? "" };
-      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={revealed?.scope} previewEnv={previewEnv} databases={databases} crons={crons} history={history} />);
+      return page(c, a.name, <AppDetail csrf={c.get("s").csrf} app={a} env={envVars} logs={logs} runtimes={runtimes} deployId={deploy} hookUrl={hookUrl} github={github} revealed={revealed?.scope} previewEnv={previewEnv} databases={databases} crons={crons} history={history} />, {
+        head: <AppHead app={a} csrf={c.get("s").csrf} />,
+      });
     } catch (e) {
       return c.redirect(err("/apps", e));
     }
@@ -558,8 +576,8 @@ export function createWebApp() {
 
   // ---- sites
   app.get("/sites", (c) => c.redirect("/projects"));
-  app.get("/sites/new", (c) => page(c, t("Sites"), <SiteForm csrf={c.get("s").csrf} />));
-  app.get("/sites/new-php", async (c) => page(c, t("Sites"), <PhpSiteNew csrf={c.get("s").csrf} versions={await call("php.versions")} />));
+  app.get("/sites/new", (c) => page(c, t("Proxy or static site"), <SiteForm csrf={c.get("s").csrf} />));
+  app.get("/sites/new-php", async (c) => page(c, t("PHP site"), <PhpSiteNew csrf={c.get("s").csrf} versions={await call("php.versions")} />));
   app.get("/sites/:name", async (c) => {
     const site = (await call<any[]>("sites.list")).find((s) => s.name === c.req.param("name"));
     if (!site) return c.redirect("/sites");
@@ -570,7 +588,7 @@ export function createWebApp() {
     ]);
     const wp = site.kind === "php" ? await call<WpDetectView>("wp.detect", { name: site.name }).catch(() => null) : null;
     const extra = wp ? <WordPressCard site={site.name} d={wp} csrf={c.get("s").csrf} /> : null;
-    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} extra={extra} />);
+    return page(c, site.name, <SiteForm site={site} csrf={c.get("s").csrf} versions={versions} logs={logs} extra={extra} />, { head: <SiteHead site={site} /> });
   });
   // ---- WordPress tools (wp-cli through the agent)
   const wpList = (x: unknown) => (Array.isArray(x) ? x : x ? [x] : []).map(String);
@@ -717,7 +735,7 @@ export function createWebApp() {
     try {
       return page(c, t("Databases"), <DatabasesPage csrf={c.get("s").csrf} data={await call("db.list")} />);
     } catch (e) {
-      return page(c, t("Databases"), <Card title={t("Databases")}><p class="flash err">{String((e as Error).message)}</p></Card>);
+      return page(c, t("Databases"), <Card><p class="flash err">{String((e as Error).message)}</p></Card>);
     }
   });
   app.post("/databases/create", async (c) => {
@@ -1001,7 +1019,7 @@ export function createWebApp() {
     const key = c.req.query("template") ?? "";
     const tpl = st.templates[key];
     const draft = tpl ? { name: key, image: tpl.image, port: tpl.port, volumes: tpl.volumes, env: tpl.env, memory_mb: tpl.memory_mb } : undefined;
-    return page(c, t("Containers"), <Card title="+ Container"><ContainerForm csrf={c.get("s").csrf} c={draft} note={tpl?.note} /></Card>);
+    return page(c, "+ Container", <Card><ContainerForm csrf={c.get("s").csrf} c={draft} note={tpl?.note} /></Card>);
   });
   app.post("/containers/save", act("/containers/new", async (c, f) => {
     const saved = await call("containers.save", f, actor(c));

@@ -1,7 +1,8 @@
 import { AppCharts, type History } from "./charts.tsx";
 import { formatProcesses, type ProcessSpec } from "../../shared/validate.ts";
 import { fmtBytes, fmtTime, t } from "../i18n.ts";
-import { Badge, Card, Csrf, DangerForm, Field } from "./layout.tsx";
+import { Icon } from "./icons.tsx";
+import { Badge, Card, Csrf, DangerForm, Field, PageHead, TabPanes } from "./layout.tsx";
 import { JobResult, type JobRow } from "./jobs.tsx";
 
 export type AppRow = {
@@ -216,6 +217,52 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
   );
 }
 
+/** The host to open: the app's first plain domain, or its first process route's host. */
+export function appHost(a: Pick<AppRow, "domains" | "processes">): string {
+  const hosts = a.processes?.length ? a.processes.flatMap((p) => p.routes.map((r) => r.split("/")[0]!)) : a.domains;
+  return hosts.find((h) => h && h !== "*" && !h.startsWith("*.")) ?? "";
+}
+
+/** The app page's header: name, state, where it answers, and Deploy / Rollback / Open. */
+export function AppHead({ app: a, csrf }: { app: AppRow; csrf: string }) {
+  const managed = a.kind === "managed";
+  const host = appHost(a);
+  return (
+    <PageHead
+      crumb={[["/projects", t("Projects")]]}
+      title={a.name}
+      sub={
+        <>
+          <Badge state={a.status.active} />
+          {host ? <span>{host}</span> : null}
+          <span class="muted">{managed ? `${a.runtime} ${a.runtime_version}` : a.external_unit.startsWith("pm2:") ? "PM2" : a.external_unit || t("external")}</span>
+        </>
+      }
+      actions={
+        <>
+          {host ? (
+            <a class="btn" href={`https://${host}`} target="_blank" rel="noopener noreferrer">
+              {t("Open")} <Icon name="external" size={14} />
+            </a>
+          ) : null}
+          {managed && a.active_slot ? (
+            <form method="post" action={`/apps/${a.name}/rollback`} title="Back to the previous release, kept on disk: no build, seconds">
+              <Csrf token={csrf} />
+              <button class="btn">↶ Rollback</button>
+            </form>
+          ) : null}
+          {managed ? (
+            <form method="post" action={`/apps/${a.name}/deploy`}>
+              <Csrf token={csrf} />
+              <button class="btn primary">{t("Deploy")}</button>
+            </form>
+          ) : null}
+        </>
+      }
+    />
+  );
+}
+
 export function AppDetail(p: {
   csrf: string;
   app: AppRow;
@@ -236,30 +283,18 @@ export function AppDetail(p: {
 }) {
   const a = p.app;
   const managed = a.kind === "managed";
-  return (
-    <div class="stack">
-      <EnvPending app={a} csrf={p.csrf} />
+
+  const overview = (
+    <>
       <Card
-        title={a.name}
+        title={t("Details")}
         actions={
           <div class="row">
-            {managed ? (
-              <form method="post" action={`/apps/${a.name}/deploy`}>
-                <Csrf token={p.csrf} />
-                <button class="btn primary">{t("Deploy")}</button>
-              </form>
-            ) : null}
-            {managed && a.active_slot ? (
-              <form method="post" action={`/apps/${a.name}/rollback`} title="Back to the previous release, kept on disk: no build, seconds">
-                <Csrf token={p.csrf} />
-                <button class="btn">↶ Rollback</button>
-              </form>
-            ) : null}
             {(a.external_unit.startsWith("pm2:") ? (["restart"] as const) : (["restart", "stop", "start"] as const)).map((act) => (
               <form method="post" action={`/apps/${a.name}/action`}>
                 <Csrf token={p.csrf} />
                 <input type="hidden" name="action" value={act} />
-                <button class="btn">{a.external_unit.startsWith("pm2:") ? t("Reload") : t(act[0]!.toUpperCase() + act.slice(1))}</button>
+                <button class="btn small">{a.external_unit.startsWith("pm2:") ? t("Reload") : t(act[0]!.toUpperCase() + act.slice(1))}</button>
               </form>
             ))}
           </div>
@@ -343,14 +378,50 @@ export function AppDetail(p: {
 
       {p.history ? <AppCharts h={p.history} app={a.name} limitMb={managed ? a.memory_mb : undefined} /> : null}
 
+      {managed && p.crons?.jobs.length ? (
+        <Card title="Cron">
+          <table>
+            <thead>
+              <tr>
+                <th>Schedule</th>
+                <th>Command</th>
+                <th>Last</th>
+                <th>Next</th>
+              </tr>
+            </thead>
+            <tbody>
+              {p.crons.jobs.map((j) => (
+                <tr>
+                  <td>
+                    <code>{j.schedule}</code>
+                  </td>
+                  <td class="small">
+                    <code>{j.command}</code>
+                  </td>
+                  <td class="small">
+                    <JobResult j={j} />
+                  </td>
+                  <td class="small muted">{j.armed ? fmtTime(j.next) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {p.crons.logs ? <pre class="log small">{p.crons.logs}</pre> : null}
+        </Card>
+      ) : null}
+    </>
+  );
+
+  const deploys = (
+    <>
       {p.deployId ? (
         <Card title={`Deploy #${p.deployId}`}>
           <pre class="log" data-deploy-log={`/apps/${a.name}/deploys/${p.deployId}/log`}></pre>
         </Card>
       ) : null}
 
-      {managed && a.deploys?.length ? (
-        <Card title={t("Deploy history")}>
+      <Card title={t("Deploy history")}>
+        {a.deploys?.length ? (
           <table class="compact">
             {a.deploys.map((d) => (
               <tr>
@@ -369,245 +440,260 @@ export function AppDetail(p: {
               </tr>
             ))}
           </table>
-        </Card>
-      ) : null}
-
-      <Card title={t("Logs")} actions={<a class="btn" href={`/apps/${a.name}`}>↻</a>}>
-        <pre class="log">{p.logs || "—"}</pre>
+        ) : (
+          <div class="empty">
+            <p>{t("No deploys yet. Deploy builds the branch and switches traffic when it is healthy.")}</p>
+            <form method="post" action={`/apps/${a.name}/deploy`}>
+              <Csrf token={p.csrf} />
+              <button class="btn primary">{t("Deploy")}</button>
+            </form>
+          </div>
+        )}
       </Card>
 
-      {managed ? (
-        <>
-          {p.crons?.jobs.length ? (
-            <Card title="Cron">
-              <table>
+      <Card title="Previews">
+        {a.preview_domain ? (
+          <>
+            {a.previews?.length ? (
+              <table class="compact">
                 <thead>
                   <tr>
-                    <th>Schedule</th>
-                    <th>Command</th>
-                    <th>Last</th>
-                    <th>Next</th>
+                    <th>{t("Branch")}</th>
+                    <th>{t("Status")}</th>
+                    <th>Commit</th>
+                    <th>{t("Expires")}</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {p.crons.jobs.map((j) => (
+                  {a.previews.map((pv) => (
                     <tr>
                       <td>
-                        <code>{j.schedule}</code>
+                        {pv.status === "live" ? <a href={`https://${pv.host}`} rel="noopener">{pv.branch}</a> : pv.branch}
+                        <div class="muted small">{pv.host}</div>
                       </td>
-                      <td class="small">
-                        <code>{j.command}</code>
+                      <td>
+                        <Badge state={pv.status === "live" ? "active" : pv.status} /> <a class="small" href={`/apps/${a.name}?deploy=${pv.deploy}`}>log</a>
+                        {pv.error ? <div class="muted small">{pv.error}</div> : null}
                       </td>
-                      <td class="small">
-                        <JobResult j={j} />
+                      <td>
+                        <code>{pv.commit.slice(0, 7)}</code>
                       </td>
-                      <td class="small muted">{j.armed ? fmtTime(j.next) : "—"}</td>
+                      <td class="muted small">{fmtTime(pv.expires_at)}</td>
+                      <td>
+                        <div class="row">
+                          <form method="post" action={`/apps/${a.name}/previews`}>
+                            <Csrf token={p.csrf} />
+                            <input type="hidden" name="branch" value={pv.branch} />
+                            <button class="btn">↻</button>
+                          </form>
+                          <form method="post" action={`/apps/${a.name}/previews/${pv.id}/delete`}>
+                            <Csrf token={p.csrf} />
+                            <button class="btn">{t("Delete")}</button>
+                          </form>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {p.crons.logs ? <pre class="log small">{p.crons.logs}</pre> : null}
-            </Card>
-          ) : null}
-
-          <Card title={t("Environment variables")}>
-            <form method="post" action={`/apps/${a.name}/env`}>
-              <Csrf token={p.csrf} />
-              <textarea name="env" rows={8} spellcheck={false} class="mono" placeholder="DATABASE_URL=postgres://...">
-                {Object.entries(p.env)
-                  .map(([k, val]) => `${k}=${val}`)
-                  .join("\n")}
-              </textarea>
-              <p class="muted small">
-                KEY=value, one per line. {p.revealed === "production" ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}{" "}
-                Saving needs a code; showing values and setting a variable that changes what runs (NODE_OPTIONS, LD_PRELOAD, PATH, a proxy…) need one every time,
-                also in the trusted window. A restart applies them; variables built into the code (NEXT_PUBLIC_*, VITE_*, …) need a redeploy.
-                {a.env_groups ? ` Also gets the shared variables of ${a.env_groups.split(",").join(", ")} (its own values win).` : ""}
-              </p>
-              <div class="row">
-                {/* Not required: in the trusted window a plain save needs none, but the field stays for the cases above. */}
-                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
-                <button class="btn">{t("Save")}</button>
-                {p.revealed === "production" ? null : (
-                  <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
-                    Show values
-                  </button>
-                )}
-              </div>
-            </form>
-            <form method="post" action={`/apps/${a.name}/database`} class="row">
-              <Csrf token={p.csrf} />
-              <select name="engine">
-                <option value="postgres">PostgreSQL → DATABASE_URL</option>
-                <option value="mariadb">MariaDB / MySQL → DATABASE_URL</option>
-                <option value="valkey">Valkey / Redis → REDIS_URL</option>
-              </select>
-              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
-              <button class="btn primary">+ Database</button>
-              <span class="muted small">Creates the database and its own user (server installed on first use), writes the URL here and restarts the app.</span>
-            </form>
-            {p.databases?.length ? (
-              <form method="post" action={`/apps/${a.name}/database/attach`} class="row">
-                <Csrf token={p.csrf} />
-                <select name="database">
-                  {p.databases.map((d) => (
-                    <option value={`${d.engine}:${d.name}`}>
-                      {d.engine === "postgres" ? "PostgreSQL" : "MariaDB"}: {d.name}
-                    </option>
-                  ))}
-                </select>
-                <input name="key" value="DATABASE_URL" class="short mono" pattern="[A-Za-z_][A-Za-z0-9_]*" required />
-                <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
-                <button class="btn">Connect existing</button>
-                <span class="muted small">An existing database (imported, or another app's): the app gets its own user for it, other users keep theirs.</span>
-              </form>
-            ) : null}
-          </Card>
-
-          {a.preview_domain ? (
-            <Card title="Preview environment">
-              <form method="post" action={`/apps/${a.name}/env`}>
-                <Csrf token={p.csrf} />
-                <input type="hidden" name="scope" value="preview" />
-                <textarea name="env" rows={4} spellcheck={false} class="mono" placeholder="STRIPE_SECRET_KEY=sk_test_...">
-                  {Object.entries(p.previewEnv ?? {})
-                    .map(([k, val]) => `${k}=${val}`)
-                    .join("\n")}
-                </textarea>
-                <p class="muted small">
-                  Values only previews get, over the app's own (a test payment key, a staging database). Never excluded by the prod-only list; the live app never
-                  sees them. Used from the next preview build.
-                </p>
-                <div class="row">
-                  <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
-                  <button class="btn">{t("Save")}</button>
-                  {p.revealed === "preview" ? null : (
-                    <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
-                      Show values
-                    </button>
-                  )}
-                </div>
-              </form>
-            </Card>
-          ) : null}
-
-          <Card title="Previews">
-            {a.preview_domain ? (
-              <>
-                {a.previews?.length ? (
-                  <table class="compact">
-                    <thead>
-                      <tr>
-                        <th>{t("Branch")}</th>
-                        <th>{t("Status")}</th>
-                        <th>Commit</th>
-                        <th>{t("Expires")}</th>
-                        <th></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {a.previews.map((pv) => (
-                        <tr>
-                          <td>
-                            {pv.status === "live" ? <a href={`https://${pv.host}`} rel="noopener">{pv.branch}</a> : pv.branch}
-                            <div class="muted small">{pv.host}</div>
-                          </td>
-                          <td>
-                            <Badge state={pv.status === "live" ? "active" : pv.status} /> <a class="small" href={`/apps/${a.name}?deploy=${pv.deploy}`}>log</a>
-                            {pv.error ? <div class="muted small">{pv.error}</div> : null}
-                          </td>
-                          <td>
-                            <code>{pv.commit.slice(0, 7)}</code>
-                          </td>
-                          <td class="muted small">{fmtTime(pv.expires_at)}</td>
-                          <td>
-                            <div class="row">
-                              <form method="post" action={`/apps/${a.name}/previews`}>
-                                <Csrf token={p.csrf} />
-                                <input type="hidden" name="branch" value={pv.branch} />
-                                <button class="btn">↻</button>
-                              </form>
-                              <form method="post" action={`/apps/${a.name}/previews/${pv.id}/delete`}>
-                                <Csrf token={p.csrf} />
-                                <button class="btn">{t("Delete")}</button>
-                              </form>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <p class="muted small">No previews yet.</p>
-                )}
-                <form method="post" action={`/apps/${a.name}/previews`} class="row">
-                  <Csrf token={p.csrf} />
-                  <input name="branch" placeholder="feature/login" required />
-                  <button class="btn primary">Preview branch</button>
-                  <span class="muted small">
-                    Own user, ports and data; env copied without the prod-only variables. Max {a.preview_max ?? 3}, kept {a.preview_ttl_days ?? 7} days after the last push.
-                  </span>
-                </form>
-              </>
             ) : (
-              <p class="muted small">Set a preview domain (a wildcard such as *.preview.example.com) in Settings to build pushed branches on their own host.</p>
+              <p class="muted small">No previews yet.</p>
             )}
-          </Card>
-
-          <Card title={`Git · ${t("Webhook")}`}>
-            {p.github.connected && p.github.repo ? (
-              <form method="post" action={`/apps/${a.name}/github-link`} class="row">
-                <Csrf token={p.csrf} />
-                <button class="btn primary">Link {p.github.repo}</button>
-                <span class="muted small">Adds a read-only deploy key and the push webhook on GitHub; deploys then show as a check on each commit.</span>
-              </form>
-            ) : p.github.repo ? (
-              <p class="muted small">
-                <a href="/git">Connect GitHub</a> to link this repository in one click, or set it up by hand below.
-              </p>
-            ) : null}
-            <p class="muted small">
-              {a.auto_deploy !== 0 ? `Every push to ${a.branch} deploys.` : "Automatic deploys are off: pushes are ignored."}
-              {a.preview_domain ? " Pushes to other branches build a preview; deleting a branch removes its preview." : ""}
-            </p>
-            <form method="post" action={`/apps/${a.name}/deploy-key`} class="row">
+            <form method="post" action={`/apps/${a.name}/previews`} class="row">
               <Csrf token={p.csrf} />
-              <button class="btn">Show deploy key</button>
-              <span class="muted small">Read-only deploy key for private repos (git@ URL): GitHub, GitLab, Gitea, Forgejo, Bitbucket.</span>
+              <input name="branch" placeholder="feature/login" required />
+              <button class="btn primary">Preview branch</button>
+              <span class="muted small">
+                Own user, ports and data; env copied without the prod-only variables. Max {a.preview_max ?? 3}, kept {a.preview_ttl_days ?? 7} days after the last push.
+              </span>
             </form>
-            <p class="small">
-              GitHub / Gitea / Forgejo webhook: <code>{p.hookUrl}</code> · <code>application/json</code> · event <code>push</code>
-              <br />
-              GitLab webhook: <code>{p.hookUrl.replace("/hooks/github/", "/hooks/gitlab/")}</code> · secret token = webhook secret · push events
-            </p>
-            <form method="post" action={`/apps/${a.name}/webhook-secret`} class="row">
-              <Csrf token={p.csrf} />
-              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" data-always />
-              <button class="btn">Show webhook secret</button>
-            </form>
-          </Card>
-
-          <Card title={t("Settings")}>
-            <AppForm csrf={p.csrf} app={a} runtimes={p.runtimes} action={`/apps/${a.name}/settings`} submit="Save" />
-          </Card>
-        </>
-      ) : null}
-
-      <Card title={t("Delete")} class="danger-zone">
-        <DangerForm
-          action={`/apps/${a.name}/delete`}
-          csrf={p.csrf}
-          name={a.name}
-          label={t("Delete")}
-          extra={
-            managed ? (
-              <label class="check">
-                <input type="checkbox" name="removeFiles" value="1" /> also remove files and the system user
-              </label>
-            ) : null
-          }
-        />
+          </>
+        ) : (
+          <p class="muted small">Set a preview domain (a wildcard such as *.preview.example.com) in Settings to build pushed branches on their own host.</p>
+        )}
       </Card>
+    </>
+  );
+
+  const environment = (
+    <>
+      <Card title={t("Environment variables")}>
+        <form method="post" action={`/apps/${a.name}/env`}>
+          <Csrf token={p.csrf} />
+          <textarea name="env" rows={8} spellcheck={false} class="mono" placeholder="DATABASE_URL=postgres://...">
+            {Object.entries(p.env)
+              .map(([k, val]) => `${k}=${val}`)
+              .join("\n")}
+          </textarea>
+          <p class="muted small">
+            KEY=value, one per line. {p.revealed === "production" ? "Values are shown because you asked; they are not cached." : "Values stay hidden (••••••••); a masked line is kept as it is."}{" "}
+            Saving needs a code; showing values and setting a variable that changes what runs (NODE_OPTIONS, LD_PRELOAD, PATH, a proxy…) need one every time,
+            also in the trusted window. A restart applies them; variables built into the code (NEXT_PUBLIC_*, VITE_*, …) need a redeploy.
+            {a.env_groups ? ` Also gets the shared variables of ${a.env_groups.split(",").join(", ")} (its own values win).` : ""}
+          </p>
+          <div class="row">
+            {/* Not required: in the trusted window a plain save needs none, but the field stays for the cases above. */}
+            <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
+            <button class="btn">{t("Save")}</button>
+            {p.revealed === "production" ? null : (
+              <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
+                Show values
+              </button>
+            )}
+          </div>
+        </form>
+      </Card>
+
+      {a.preview_domain ? (
+        <Card title="Preview environment">
+          <form method="post" action={`/apps/${a.name}/env`}>
+            <Csrf token={p.csrf} />
+            <input type="hidden" name="scope" value="preview" />
+            <textarea name="env" rows={4} spellcheck={false} class="mono" placeholder="STRIPE_SECRET_KEY=sk_test_...">
+              {Object.entries(p.previewEnv ?? {})
+                .map(([k, val]) => `${k}=${val}`)
+                .join("\n")}
+            </textarea>
+            <p class="muted small">
+              Values only previews get, over the app's own (a test payment key, a staging database). Never excluded by the prod-only list; the live app never
+              sees them. Used from the next preview build.
+            </p>
+            <div class="row">
+              <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always />
+              <button class="btn">{t("Save")}</button>
+              {p.revealed === "preview" ? null : (
+                <button class="btn" formaction={`/apps/${a.name}/env/reveal`}>
+                  Show values
+                </button>
+              )}
+            </div>
+          </form>
+        </Card>
+      ) : null}
+    </>
+  );
+
+  const database = (
+    <Card title={t("Database")}>
+      <form method="post" action={`/apps/${a.name}/database`} class="row">
+        <Csrf token={p.csrf} />
+        <select name="engine">
+          <option value="postgres">PostgreSQL → DATABASE_URL</option>
+          <option value="mariadb">MariaDB / MySQL → DATABASE_URL</option>
+          <option value="valkey">Valkey / Redis → REDIS_URL</option>
+        </select>
+        <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+        <button class="btn primary">+ Database</button>
+        <span class="muted small">Creates the database and its own user (server installed on first use), writes the URL here and restarts the app.</span>
+      </form>
+      {p.databases?.length ? (
+        <form method="post" action={`/apps/${a.name}/database/attach`} class="row">
+          <Csrf token={p.csrf} />
+          <select name="database">
+            {p.databases.map((d) => (
+              <option value={`${d.engine}:${d.name}`}>
+                {d.engine === "postgres" ? "PostgreSQL" : "MariaDB"}: {d.name}
+              </option>
+            ))}
+          </select>
+          <input name="key" value="DATABASE_URL" class="short mono" pattern="[A-Za-z_][A-Za-z0-9_]*" required />
+          <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" />
+          <button class="btn">Connect existing</button>
+          <span class="muted small">An existing database (imported, or another app's): the app gets its own user for it, other users keep theirs.</span>
+        </form>
+      ) : null}
+    </Card>
+  );
+
+  const logs = (
+    <Card title={t("Logs")} actions={<a class="btn small" href={`/apps/${a.name}#tab-logs`} data-reload title={t("Refresh")}>↻</a>}>
+      <pre class="log">{p.logs || "—"}</pre>
+    </Card>
+  );
+
+  const remove = (
+    <Card title={t("Delete")} class="danger-zone">
+      <DangerForm
+        action={`/apps/${a.name}/delete`}
+        csrf={p.csrf}
+        name={a.name}
+        label={t("Delete")}
+        extra={
+          managed ? (
+            <label class="check">
+              <input type="checkbox" name="removeFiles" value="1" /> also remove files and the system user
+            </label>
+          ) : null
+        }
+      />
+    </Card>
+  );
+
+  const settings = managed ? (
+    <>
+      <Card title={`Git · ${t("Webhook")}`}>
+        {p.github.connected && p.github.repo ? (
+          <form method="post" action={`/apps/${a.name}/github-link`} class="row">
+            <Csrf token={p.csrf} />
+            <button class="btn primary">Link {p.github.repo}</button>
+            <span class="muted small">Adds a read-only deploy key and the push webhook on GitHub; deploys then show as a check on each commit.</span>
+          </form>
+        ) : p.github.repo ? (
+          <p class="muted small">
+            <a href="/git">Connect GitHub</a> to link this repository in one click, or set it up by hand below.
+          </p>
+        ) : null}
+        <p class="muted small">
+          {a.auto_deploy !== 0 ? `Every push to ${a.branch} deploys.` : "Automatic deploys are off: pushes are ignored."}
+          {a.preview_domain ? " Pushes to other branches build a preview; deleting a branch removes its preview." : ""}
+        </p>
+        <form method="post" action={`/apps/${a.name}/deploy-key`} class="row">
+          <Csrf token={p.csrf} />
+          <button class="btn">Show deploy key</button>
+          <span class="muted small">Read-only deploy key for private repos (git@ URL): GitHub, GitLab, Gitea, Forgejo, Bitbucket.</span>
+        </form>
+        <p class="small">
+          GitHub / Gitea / Forgejo webhook: <code>{p.hookUrl}</code> · <code>application/json</code> · event <code>push</code>
+          <br />
+          GitLab webhook: <code>{p.hookUrl.replace("/hooks/github/", "/hooks/gitlab/")}</code> · secret token = webhook secret · push events
+        </p>
+        <form method="post" action={`/apps/${a.name}/webhook-secret`} class="row">
+          <Csrf token={p.csrf} />
+          <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} required class="short" data-always />
+          <button class="btn">Show webhook secret</button>
+        </form>
+      </Card>
+
+      <Card title={t("Settings")}>
+        <AppForm csrf={p.csrf} app={a} runtimes={p.runtimes} action={`/apps/${a.name}/settings`} submit="Save" />
+      </Card>
+      {remove}
+    </>
+  ) : (
+    remove
+  );
+
+  // A live deploy log opens Deploys; revealed values open Environment.
+  const open = p.revealed ? "env" : p.deployId ? "deploys" : "overview";
+  const panes = managed
+    ? [
+        { key: "overview", label: t("Overview"), body: overview },
+        { key: "deploys", label: t("Deploys"), body: deploys },
+        { key: "env", label: t("Environment"), body: environment },
+        { key: "database", label: t("Database"), body: database },
+        { key: "logs", label: t("Logs"), body: logs },
+        { key: "settings", label: t("Settings"), body: settings },
+      ]
+    : [
+        { key: "overview", label: t("Overview"), body: overview },
+        { key: "logs", label: t("Logs"), body: logs },
+        { key: "settings", label: t("Settings"), body: settings },
+      ];
+  return (
+    <div class="stack">
+      <EnvPending app={a} csrf={p.csrf} />
+      <TabPanes panes={panes} open={open} label={a.name} />
     </div>
   );
 }

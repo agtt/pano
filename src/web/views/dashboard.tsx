@@ -120,7 +120,7 @@ function Welcome({ d, list }: { d: DashData; list: Notice[] }) {
   return (
     <section class="welcome">
       <div>
-        <h2>{t("Welcome back, {user}").replace("{user}", d.user)}</h2>
+        <h1>{t("Welcome back, {user}").replace("{user}", d.user)}</h1>
         <p class="muted">{t("What would you like to do today?")}</p>
       </div>
       <a class={`pill ${level}`} href={list.length ? "#attention" : "/"}>
