@@ -12,15 +12,21 @@ import { fsPath, paths } from "../shared/config.ts";
  */
 export const stepUp = new AsyncLocalStorage<{ otp?: string; grant?: string; grantFor?: string; trust?: string; trustNew?: string }>();
 
-/** Only root can read it: lets `pano rpc` on the server skip the code. Never sent by the web process. */
-const cliToken = (() => {
-  if (process.getuid?.() !== 0) return "";
+/**
+ * Only root can read it: lets `pano rpc` on the server skip the code. Never sent by the web process.
+ * Read when first needed and kept once found: a first `pano install` calls the agent right after
+ * starting it, before it has written the file.
+ */
+let cliTokenValue = "";
+function cliTokenNow(): string {
+  if (cliTokenValue || process.getuid?.() !== 0) return cliTokenValue;
   try {
-    return readFileSync(fsPath(`${paths.secrets}/cli.token`), "utf8").trim();
+    cliTokenValue = readFileSync(fsPath(`${paths.secrets}/cli.token`), "utf8").trim();
   } catch {
-    return "";
+    // not there yet
   }
-})();
+  return cliTokenValue;
+}
 
 export class AgentError extends Error {}
 
@@ -30,7 +36,7 @@ export async function call<T = any>(method: string, params: Record<string, unkno
   const res = await fetch(`http://agent/rpc/${method}`, {
     method: "POST",
     unix: fsPath(paths.agentSocket),
-    headers: { "content-type": "application/json", ...(cliToken ? { "x-pano-cli": cliToken } : {}) },
+    headers: { "content-type": "application/json", ...(cliTokenNow() ? { "x-pano-cli": cliTokenNow() } : {}) },
     body: JSON.stringify({ params, actor, ...(s?.trust ? { trust: s.trust } : {}), ...(grant ? { grant } : s?.otp ? { otp: s.otp } : {}) }),
   } as RequestInit);
   const body = (await res.json().catch(() => ({ ok: false, error: `agent returned ${res.status}` }))) as { ok: boolean; result?: T; error?: string; grant?: string; trust?: string };

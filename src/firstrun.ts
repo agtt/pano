@@ -11,8 +11,13 @@ type Step = (argv: string[]) => { code: number; out: string };
 
 const run: Step = (argv) => {
   if (DRY_RUN) return { code: 0, out: "" };
-  const r = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
-  return { code: r.exitCode ?? 1, out: r.stdout.toString().trim() };
+  try {
+    const r = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
+    return { code: r.exitCode ?? 1, out: r.stdout.toString().trim() };
+  } catch {
+    // the program is not installed
+    return { code: 127, out: "" };
+  }
 };
 
 export async function waitForAgent(call: Call, seconds = 60) {
@@ -56,12 +61,15 @@ function mainIp(): string {
 
 /** A QR code drawn with text, when qrencode is there (or can be installed); "" otherwise. */
 function terminalQr(text: string): string {
-  if (run(["sh", "-c", "command -v qrencode"]).code !== 0) {
-    const apt = run(["sh", "-c", "command -v apt-get"]).code === 0;
-    run(apt ? ["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -q qrencode"] : ["dnf", "-y", "-q", "install", "qrencode"]);
+  const have = () => run(["sh", "-c", "command -v qrencode"]).code === 0;
+  if (!have()) {
+    if (run(["sh", "-c", "command -v apt-get"]).code === 0) run(["sh", "-c", "DEBIAN_FRONTEND=noninteractive apt-get install -y -q qrencode"]);
+    // RHEL family: qrencode is in EPEL (pano adds EPEL for coturn as well).
+    else if (run(["dnf", "-y", "-q", "install", "qrencode"]).code !== 0) run(["sh", "-c", "dnf -y -q install epel-release && dnf -y -q install qrencode"]);
   }
-  const r = Bun.spawnSync(["qrencode", "-t", "ANSIUTF8", "-m", "2", text], { stdout: "pipe", stderr: "pipe" });
-  return r.exitCode === 0 ? r.stdout.toString() : "";
+  if (!have()) return "";
+  const r = run(["qrencode", "-t", "ANSIUTF8", "-m", "2", text]);
+  return r.code === 0 ? r.out : "";
 }
 
 export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
@@ -83,6 +91,7 @@ export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
   setAdminSecret(username, secret);
   await ownWebDb();
 
+  console.log("Admin created. Starting the web server…");
   await waitForAgent(call);
   // The edge: on a server with no web server yet it simply starts; with one, the panel's Edge page moves it.
   let edge = "An existing web server holds :80/:443: open Server > Edge in the panel to move it behind pano.";
@@ -107,6 +116,7 @@ export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
     url = `https://${ts}`;
   }
 
+  console.log("Preparing the two-factor QR code…");
   const uri = otpauthUri(secret, username);
   const qr = terminalQr(uri);
   const ip = mainIp();
