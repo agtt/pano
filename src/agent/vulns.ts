@@ -31,7 +31,7 @@ import { installCaddy } from "./edge.ts";
 import { installedPhp, phpCli, upgradePhpPackages } from "./php.ts";
 import { nightlyUpdates as wordpressNightly } from "./wordpress.ts";
 import * as realtime from "./realtime.ts";
-import { DAYS, afterReboot, rebootNeeded, rebootNeededCached, rebootSettings, rebootStatus, safeReboot } from "./reboot.ts";
+import { DAYS, afterReboot, bootedAt, nextAutoNight, rebootNeeded, rebootNeededCached, rebootSettings, rebootStatus, safeReboot } from "./reboot.ts";
 import { installed as installedRuntimes } from "./runtimes.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
 import { exists, readText, run, writeAtomic } from "./sys.ts";
@@ -655,8 +655,14 @@ async function nightly() {
     await notify("🔁 a security update needs a reboot (kernel or core library); restart the server when traffic is low");
     return;
   }
-  if (new Date().getDay() !== r.day) {
-    await notify(`🔁 a security update needs a reboot; the automatic one is on ${DAYS[r.day]} night`);
+  const next = nextAutoNight(await bootedAt(), r.day);
+  if (next.toDateString() !== new Date().toDateString()) {
+    // Once per planned night, not every night until then.
+    const when = `${DAYS[next.getDay()]} ${next.toLocaleDateString("en-CA")}`;
+    if (settings.get("reboot.announced") !== when) {
+      settings.set("reboot.announced", when);
+      await notify(`🔁 a security update needs a reboot; the automatic one (at most monthly) is on the night of ${when}, 04:00–05:00`);
+    }
     return;
   }
   await safeReboot("auto-update", true).catch((e) => notify(`🟠 automatic reboot skipped: ${e instanceof Error ? e.message : e}`));

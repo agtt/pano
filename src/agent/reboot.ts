@@ -1,5 +1,6 @@
 // Reboots for kernel and core library updates: on request, or automatically in
-// the night window of one chosen weekday (off by default).
+// the night window of one chosen weekday (off by default), at most once a month:
+// only after 4 weeks without a reboot (a manual one counts too).
 //
 // Before: a reboot must actually be needed (automatic only), nothing may be
 // deploying, backing up or installing packages, /etc/fstab must have no errors
@@ -106,6 +107,21 @@ export const unitNames = (out: string) => out.split("\n").map((l) => l.trim().sp
 
 async function uptimeSec(): Promise<number> {
   return Number(((await readText("/proc/uptime")) ?? "0").split(" ")[0]) || 0;
+}
+
+export const bootedAt = async () => Date.now() - (await uptimeSec()) * 1000;
+
+/** Automatic reboots are at most monthly: the server must have run this long since its last boot. */
+export const AUTO_MIN_UPTIME_MS = 28 * 86_400_000;
+
+/** The night (local date, window 04:00) the automatic reboot may happen: the chosen weekday, 4 weeks after the boot at the earliest. */
+export function nextAutoNight(booted: number, day: number, now = Date.now()): Date {
+  const d = new Date(Math.max(now, booted + AUTO_MIN_UPTIME_MS));
+  // Past tonight's window (or 4 weeks are only up later today): from tomorrow.
+  if (d.getHours() >= 5 || (booted + AUTO_MIN_UPTIME_MS > now && d.getHours() >= 4)) d.setDate(d.getDate() + 1);
+  d.setHours(4, 0, 0, 0);
+  while (d.getDay() !== day) d.setDate(d.getDate() + 1);
+  return d;
 }
 
 function busyWork(): string {
@@ -224,8 +240,7 @@ export async function afterReboot() {
   checking = true;
   try {
     const p = JSON.parse(raw) as Pending;
-    const bootedAt = Date.now() - (await uptimeSec()) * 1000;
-    if (bootedAt < p.at) {
+    if ((await bootedAt()) < p.at) {
       // Not rebooted yet: the countdown, or a reboot that never came.
       if (rebooting || Date.now() - p.at < 15 * 60_000) return;
       await undoKernel(p, true);
@@ -289,5 +304,6 @@ export async function afterReboot() {
 }
 
 export async function rebootStatus() {
-  return { ...rebootSettings(), pending: await exists(PENDING), badKernel: settings.get("reboot.badKernel") ?? "" };
+  const s = rebootSettings();
+  return { ...s, next: nextAutoNight(await bootedAt(), s.day).getTime(), pending: await exists(PENDING), badKernel: settings.get("reboot.badKernel") ?? "" };
 }

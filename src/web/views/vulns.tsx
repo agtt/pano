@@ -21,7 +21,7 @@ export type VulnView = {
   patch: { os: boolean; php: boolean; edge: boolean };
   osAutomatic: boolean;
   rebootNeeded: boolean;
-  reboot?: { auto: boolean; day: number; pending: boolean; badKernel: string };
+  reboot?: { auto: boolean; day: number; next?: number; pending: boolean; badKernel: string };
   scanning: boolean;
   last: { at: number; findings: Finding[]; errors: string[]; packages: number } | null;
 };
@@ -52,7 +52,9 @@ export function VulnsCard({ v, csrf }: { v: VulnView; csrf: string }) {
         <>
           <p class="flash err">
             An installed security update needs a reboot (kernel or a core library).{" "}
-            {v.reboot?.auto ? `It happens on ${DAYS[v.reboot.day]} night (04:00–05:00), or reboot now.` : "Reboot when traffic is low."}
+            {v.reboot?.auto
+              ? `It happens on the night of ${v.reboot.next ? `${DAYS[new Date(v.reboot.next).getDay()]} ${new Date(v.reboot.next).toLocaleDateString("en-CA")}` : DAYS[v.reboot.day]} (04:00–05:00), or reboot now.`
+              : "Reboot when traffic is low."}
           </p>
           <form method="post" action="/security/vulns/reboot" class="row">
             <Csrf token={csrf} />
@@ -81,7 +83,7 @@ export function VulnsCard({ v, csrf }: { v: VulnView; csrf: string }) {
               </option>
             ))}
           </select>{" "}
-          night (04:00–05:00), with the same checks as "Reboot safely now"
+          night (04:00–05:00), at most once a month (4 weeks after the last reboot, a manual one included), with the same checks as "Reboot safely now"
         </label>
         <label class="check">
           <input type="checkbox" name="php" value="1" checked={v.patch.php} /> Install PHP patch releases nightly (same minor, sites move to them without

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fstabErrors, grubbyField, kernelOf, tailscaleTakesWebPorts, unitNames } from "../src/agent/reboot.ts";
+import { AUTO_MIN_UPTIME_MS, fstabErrors, grubbyField, kernelOf, nextAutoNight, tailscaleTakesWebPorts, unitNames } from "../src/agent/reboot.ts";
 import { VulnsCard } from "../src/web/views/vulns.tsx";
 
 test("grubby info and kernel paths", () => {
@@ -26,6 +26,19 @@ test("tailscale serve on the edge's ports", () => {
   expect(tailscaleTakesWebPorts("not json")).toBe(false);
 });
 
+test("automatic reboot: the chosen weekday, 4 weeks after the boot at the earliest", () => {
+  const at = (d: number, h = 0) => new Date(2026, 10, d, h).getTime(); // November 2026; the 22nd is a Sunday
+  const ymd = (x: Date) => `${x.getMonth() + 1}/${x.getDate()} ${x.getHours()}h`;
+  // Booted 18 Nov 00:24: 4 weeks are up on 16 Dec, the first Sunday after is 20 Dec.
+  expect(ymd(nextAutoNight(at(18, 0) + 24 * 60_000, 0, at(18, 1)))).toBe("12/20 4h");
+  // Up for 5 weeks: this Sunday's window, also while it runs.
+  expect(ymd(nextAutoNight(at(1) - 7 * 86_400_000, 0, at(22, 4) + 10 * 60_000))).toBe("11/22 4h");
+  // After the window: the next Sunday.
+  expect(ymd(nextAutoNight(at(1) - 7 * 86_400_000, 0, at(22, 6)))).toBe("11/29 4h");
+  // 4 weeks are up at 04:30 on a Sunday: too late for that night's run (04:00).
+  expect(ymd(nextAutoNight(at(22, 4) + 30 * 60_000 - AUTO_MIN_UPTIME_MS, 0, at(22, 4) + 10 * 60_000))).toBe("11/29 4h");
+});
+
 test("unit names from systemctl list-units", () => {
   expect(unitNames("crond.service loaded active running Command Scheduler\npano-edge.service loaded active running pano edge\n")).toEqual(["crond.service", "pano-edge.service"]);
 });
@@ -34,7 +47,8 @@ test("card: reboot now, automatic window, reboot under way", () => {
   const base = { patch: { os: true, php: true, edge: true }, osAutomatic: true, scanning: false, last: null };
   const needed = String(<VulnsCard csrf="c" v={{ ...base, rebootNeeded: true, reboot: { auto: true, day: 3, pending: false, badKernel: "" } }} />);
   expect(needed).toContain("/security/vulns/reboot");
-  expect(needed).toContain("Wednesday night");
+  expect(needed).toContain("night of Wednesday");
+  expect(needed).toContain("at most once a month");
   const pending = String(<VulnsCard csrf="c" v={{ ...base, rebootNeeded: true, reboot: { auto: false, day: 0, pending: true, badKernel: "6.1" } }} />);
   expect(pending).toContain("under way");
   expect(pending).not.toContain("/security/vulns/reboot");
