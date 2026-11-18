@@ -1,6 +1,8 @@
 import { fmtTime, t } from "../i18n.ts";
 import { Badge, Card, Csrf, Field } from "./layout.tsx";
 
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
 type Finding = {
   where: string;
   ecosystem: string;
@@ -19,6 +21,7 @@ export type VulnView = {
   patch: { os: boolean; php: boolean; edge: boolean };
   osAutomatic: boolean;
   rebootNeeded: boolean;
+  reboot?: { auto: boolean; day: number; pending: boolean; badKernel: string };
   scanning: boolean;
   last: { at: number; findings: Finding[]; errors: string[]; packages: number } | null;
 };
@@ -43,12 +46,42 @@ export function VulnsCard({ v, csrf }: { v: VulnView; csrf: string }) {
         wordpress.org. New high and critical findings go to Telegram. {v.last ? `Last check ${fmtTime(v.last.at)}, ${v.last.packages} packages.` : "Not checked yet."}
         {v.scanning ? " Checking…" : ""}
       </p>
-      {v.rebootNeeded ? <p class="flash err">An installed security update needs a reboot (kernel or a core library). Restart the server when traffic is low.</p> : null}
+      {v.reboot?.pending ? (
+        <p class="flash ok">A reboot is under way; its result goes to Telegram.</p>
+      ) : v.rebootNeeded ? (
+        <>
+          <p class="flash err">
+            An installed security update needs a reboot (kernel or a core library).{" "}
+            {v.reboot?.auto ? `It happens on ${DAYS[v.reboot.day]} night (04:00–05:00), or reboot now.` : "Reboot when traffic is low."}
+          </p>
+          <form method="post" action="/security/vulns/reboot" class="row">
+            <Csrf token={csrf} />
+            <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+            <button class="btn">Reboot safely now</button>
+          </form>
+          <p class="muted small">
+            Checked first (nothing deploying or installing, /etc/fstab, ports 80/443 free for the edge); a new kernel is tried once with the old one as the way back;
+            afterwards every service that ran before is checked and restarted if needed. About a minute of downtime.
+          </p>
+        </>
+      ) : null}
+      {v.reboot?.badKernel ? <p class="small muted">Kernel {v.reboot.badKernel} did not boot; automatic reboots skip it until a newer one is installed.</p> : null}
       <form method="post" action="/security/vulns/patch">
         <Csrf token={csrf} />
         <label class="check">
           <input type="checkbox" name="os" value="1" checked={v.patch.os} /> Install OS security updates daily (dnf-automatic
-          {v.osAutomatic ? ", running" : ""}); a needed reboot is reported, never done on its own
+          {v.osAutomatic ? ", running" : ""})
+        </label>
+        <label class="check">
+          <input type="checkbox" name="reboot" value="1" checked={!!v.reboot?.auto} /> Reboot by itself when an update needs it, on{" "}
+          <select name="rebootDay">
+            {DAYS.map((d, i) => (
+              <option value={String(i)} selected={(v.reboot?.day ?? 0) === i}>
+                {d}
+              </option>
+            ))}
+          </select>{" "}
+          night (04:00–05:00), with the same checks as "Reboot safely now"
         </label>
         <label class="check">
           <input type="checkbox" name="php" value="1" checked={v.patch.php} /> Install PHP patch releases nightly (same minor, sites move to them without

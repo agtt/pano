@@ -3,7 +3,8 @@
 //
 // - OS packages: pending security advisories from the distribution (dnf
 //   updateinfo); automatic security updates (dnf-automatic) install them daily
-//   and a reboot that a kernel or glibc fix needs is reported.
+//   and a reboot that a kernel or glibc fix needs is reported, or done in the
+//   night window of a chosen weekday when that is switched on (reboot.ts).
 // - PHP (Remi): patch releases of each installed minor are installed daily and
 //   the sites' pools reload on the new binary by themselves.
 // - The edge (Caddy): patch releases, or any 2.x release when the running one
@@ -30,6 +31,7 @@ import { installCaddy } from "./edge.ts";
 import { installedPhp, phpCli, upgradePhpPackages } from "./php.ts";
 import { nightlyUpdates as wordpressNightly } from "./wordpress.ts";
 import * as realtime from "./realtime.ts";
+import { DAYS, afterReboot, rebootNeeded, rebootNeededCached, rebootSettings, rebootStatus, safeReboot } from "./reboot.ts";
 import { installed as installedRuntimes } from "./runtimes.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
 import { exists, readText, run, writeAtomic } from "./sys.ts";
@@ -639,15 +641,6 @@ async function patchEdge(findings: Finding[]) {
   }
 }
 
-/** Reboot needed after kernel/glibc/systemd updates: reported, never done on its own. */
-let rebootCache: { at: number; value: boolean } | null = null;
-
-export async function rebootNeeded(): Promise<boolean> {
-  const r = await run(["dnf", "needs-restarting", "-r"], { check: false, quiet: true });
-  rebootCache = { at: Date.now(), value: r.code === 1 }; // after patching the page shows the fresh answer
-  return r.code === 1;
-}
-
 async function nightly() {
   const p = patchSettings();
   if (p.os && !(await run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false })).stdout.includes("enabled")) await applyOsPatching(true);
@@ -656,7 +649,17 @@ async function nightly() {
   const result = await scan();
   await patchUrgent(result.findings);
   if (p.edge && (await exists(paths.caddy))) await patchEdge(result.findings);
-  if (await rebootNeeded()) await notify("🔁 a security update needs a reboot (kernel or core library); restart the server when traffic is low");
+  if (!(await rebootNeeded())) return;
+  const r = rebootSettings();
+  if (!r.auto) {
+    await notify("🔁 a security update needs a reboot (kernel or core library); restart the server when traffic is low");
+    return;
+  }
+  if (new Date().getDay() !== r.day) {
+    await notify(`🔁 a security update needs a reboot; the automatic one is on ${DAYS[r.day]} night`);
+    return;
+  }
+  await safeReboot("auto-update", true).catch((e) => notify(`🟠 automatic reboot skipped: ${e instanceof Error ? e.message : e}`));
 }
 
 /** Patches and a scan now, as at night. */
@@ -665,19 +668,13 @@ export function patchNow(actor: string) {
   void nightly().catch((e) => notify(`🔴 patching failed: ${e instanceof Error ? e.message : e}`));
 }
 
-// `dnf needs-restarting` starts the whole dnf (Python, package database): seconds on a busy
-// server. Only updates change its answer, so the page reuses it for 10 minutes.
-async function rebootNeededCached(): Promise<boolean> {
-  if (rebootCache && Date.now() - rebootCache.at < 600_000) return rebootCache.value;
-  return rebootNeeded().catch(() => false);
-}
-
 export async function vulnStatus() {
-  const [timer, reboot] = await Promise.all([run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false }), rebootNeededCached()]);
+  const [timer, reboot, rs] = await Promise.all([run(["systemctl", "is-enabled", "dnf-automatic.timer"], { check: false }), rebootNeededCached(), rebootStatus()]);
   return {
     patch: patchSettings(),
     osAutomatic: timer.stdout.trim() === "enabled",
     rebootNeeded: reboot,
+    reboot: rs,
     last: lastScan(),
     scanning: !!scanning,
   };
@@ -691,7 +688,9 @@ export function startVulns() {
       .then(() => settings.set("patch.osApplied", "1"))
       .catch((e) => console.error(`[agent] dnf-automatic: ${e}`));
   }
+  void afterReboot();
   setInterval(() => {
+    void afterReboot();
     const now = new Date();
     const day = now.toISOString().slice(0, 10);
     if (now.getHours() === 4 && settings.get("vulns.nightly") !== day) {

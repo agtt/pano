@@ -1351,8 +1351,12 @@ export function createWebApp() {
   }));
   app.post("/security/vulns/patch", act("/security", async (c, f) => {
     needOtp(c, f.otp);
-    await call("vulns.patch", { os: f.os === "1", php: f.php === "1", edge: f.edge === "1" }, actor(c));
+    await call("vulns.patch", { os: f.os === "1", php: f.php === "1", edge: f.edge === "1", reboot: f.reboot === "1", rebootDay: Number(f.rebootDay ?? 0) }, actor(c));
     return "Automatic updates saved";
+  }));
+  app.post("/security/vulns/reboot", act("/security", async (c, f) => {
+    needOtp(c, f.otp);
+    return await call<string>("vulns.reboot", {}, actor(c));
   }));
   app.post("/security/guard", act("/security", async (c, f) => {
     needOtp(c, f.otp);

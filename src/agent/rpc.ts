@@ -26,6 +26,7 @@ import * as queues from "./queues.ts";
 import * as realtime from "./realtime.ts";
 import * as firewall from "./firewall.ts";
 import * as turn from "./turn.ts";
+import * as reboot from "./reboot.ts";
 import * as recovery from "./recovery.ts";
 import * as tune from "./tune.ts";
 import * as vulns from "./vulns.ts";
@@ -440,8 +441,12 @@ export const methods: Record<string, Handler> = {
   "vulns.scan": () => {
     void vulns.scan().catch(() => {});
   },
-  "vulns.patch": (p, actor) => vulns.setPatching({ os: !!p.os, php: !!p.php, edge: !!p.edge }, actor),
+  "vulns.patch": async (p, actor) => {
+    if (p.reboot !== undefined) reboot.setRebootSettings({ auto: !!p.reboot, day: p.rebootDay ?? 0 }, actor);
+    await vulns.setPatching({ os: !!p.os, php: !!p.php, edge: !!p.edge }, actor);
+  },
   "vulns.patchNow": (_p, actor) => vulns.patchNow(actor),
+  "vulns.reboot": (_p, actor) => reboot.safeReboot(actor),
 
   // ---- realtime (Pusher-compatible)
   "realtime.status": () => realtime.realtimeStatus(),

@@ -92,7 +92,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Optional default-deny inbound firewall (own nftables table, off by default since providers like Hetzner have one): SSH, 80/443, panel only if public, WireGuard, TURN and your extra ports; rolls itself back after 2 minutes unless confirmed from the panel.
 - The panel answers only to its own address, localhost, the VPN address and names in `PANO_WEB_HOSTS` (DNS-rebinding guard).
 - Containers run their image by digest (resolved on save, re-resolved only by "Update image"); optional read-only root filesystem.
-- Vulnerabilities: nightly scan of OS advisories, app/site lockfiles (OSV.dev), Node.js, PHP, WordPress core; Telegram alerts; automatic OS security updates (no surprise reboots), PHP patch releases, edge updates with rollback (only releases out for a few days); findings in CISA KEV or with EPSS ≥ 10% are marked urgent and patched within 6 hours.
+- Vulnerabilities: nightly scan of OS advisories, app/site lockfiles (OSV.dev), Node.js, PHP, WordPress core; Telegram alerts; automatic OS security updates (reboots only on request or in an opt-in weekly night window, with a fallback kernel and a post-boot service check), PHP patch releases, edge updates with rollback (only releases out for a few days); findings in CISA KEV or with EPSS ≥ 10% are marked urgent and patched within 6 hours.
 - Security audit page (public ports, firewall, SSH, DB bind, leftovers) with exact fix commands; full audit log.
 
 **Private access**
