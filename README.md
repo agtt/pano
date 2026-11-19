@@ -105,6 +105,29 @@ From source: `bun install && bun run build`, copy `dist/pano` to the server and 
 2. Fix the warnings (WordPress `X-Forwarded-Proto` snippet, ask URL for catch-all sites).
 3. **Edge** → *Install Caddy* → check the Caddyfile preview.
 4. **Edge** → *Cutover*: OpenLiteSpeed moves to `127.0.0.1:8088` (PHP sites keep running behind the edge), Caddy takes :80/:443,
+### Supported systems
+
+AlmaLinux/Rocky 9, Debian 11–13, Ubuntu 22.04/24.04 (systemd, root access).
+
+PHP sites additionally need the edge's **no-symlink view**: the site files are bind-mounted read-only with `nosymfollow`, so a link a
+site plants (to a TLS key, to another site's `wp-config.php`) is never followed by the edge. That takes Linux 5.10+ (the
+`nosymfollow` flag) **and util-linux 2.38+**: mount 2.37 knows the option but drops it on a bind mount (fixed upstream in util-linux
+commit `36a3923`, "mount: Allow bind-mounting with nosymfollow"). pano checks the mount in `/proc/*/mountinfo`, not the version, so a
+distribution that backports the fix works too.
+
+| System | Kernel | util-linux | PHP sites |
+|---|---|---|---|
+| Debian 12 / 13 | 6.1 / 6.12 | 2.38.1 / 2.41 | served |
+| Ubuntu 24.04 | 6.8 | 2.39.3 | served |
+| Ubuntu 22.04 | 5.15 | 2.37.2 | held offline |
+| AlmaLinux/Rocky 9 | 5.14 | 2.37.4 | held offline |
+| Debian 11 | 5.10 | 2.36.1 | held offline |
+
+Where the view cannot be mounted pano fails closed: every PHP site answers `503`, the Security page shows it as a failure and each agent
+start (and every day) sends an alert. Apps, proxy and static sites, and sites kept on OpenLiteSpeed are not affected. To serve PHP sites
+there anyway, accepting that a site can read other sites' files and TLS keys through a symlink until the daily sweep removes it, root sets
+`PANO_EDGE_FOLLOW_LINKS=1` in `/etc/pano/pano.env` and restarts `pano-agent`.
+
    every domain is probed. If Caddy fails to start the old config is restored automatically; *Rollback* undoes it any time.
 5. **Sites** → a legacy site → *Move to pano PHP*, one site at a time (revert any time). When no legacy site is left,
    OpenLiteSpeed can be stopped.

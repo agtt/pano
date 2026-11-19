@@ -171,13 +171,21 @@ export async function audit(): Promise<Finding[]> {
     f.push(
       (await edgeViewMounted()) && (!/^[1-9]\d*$/.test(pid) || (await edgeViewMounted(pid)))
         ? { id: "edge-links", level: "ok", title: "The edge never follows symlinks in site files", detail: `Sites are served from a read-only, nosymfollow view (${EDGE_VIEW}).` }
-        : {
-            id: "edge-links",
-            level: "warn",
-            title: "The edge can follow symlinks that sites create",
-            detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and a mount/util-linux that knows the option). A site could link to another site's files or a TLS key and fetch them over HTTP; links that lead out of a site are removed once a day, which only narrows that window.`,
-            fix: `Upgrade to a distribution with Linux 5.10+ (Debian 12, Ubuntu 22.04, AlmaLinux/Rocky 9) and reboot; pano switches over by itself (check: systemctl status ${EDGE_VIEW_UNIT}).`,
-          },
+        : env.edgeFollowLinks
+          ? {
+              id: "edge-links",
+              level: "fail",
+              title: "The edge can follow symlinks that sites create",
+              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and util-linux 2.38+) and PANO_EDGE_FOLLOW_LINKS=1 serves PHP sites from the real paths anyway. A site could link to another site's files or a TLS key and fetch them over HTTP; links that lead out of a site are removed once a day, which only narrows that window.`,
+              fix: `Upgrade to Debian 12+ or Ubuntu 24.04 (util-linux 2.38+) and reboot, then remove PANO_EDGE_FOLLOW_LINKS from ${paths.etc}/pano.env (check: systemctl status ${EDGE_VIEW_UNIT}).`,
+            }
+          : {
+              id: "edge-links",
+              level: "fail",
+              title: "PHP sites are offline: the edge cannot read them safely",
+              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and util-linux 2.38+). Without it a site could link to another site's files or a TLS key and fetch them over HTTP, so every PHP site answers 503 instead.`,
+              fix: `Upgrade to Debian 12+ or Ubuntu 24.04 (util-linux 2.38+) and reboot; pano switches over by itself (check: systemctl status ${EDGE_VIEW_UNIT}). Accepting the risk instead: PANO_EDGE_FOLLOW_LINKS=1 in ${paths.etc}/pano.env, then restart pano-agent.`,
+            },
     );
   }
 

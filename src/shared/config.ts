@@ -64,6 +64,12 @@ export const env = {
   olsBackendPort: Number(process.env.PANO_OLS_BACKEND_PORT ?? 8088),
   /** Set when the UI is reached over plain HTTP (dev, Tailscale): drops the Secure cookie flag. */
   insecureCookies: process.env.PANO_INSECURE_COOKIES === "1",
+  /**
+   * Without the edge's no-symlink view (util-linux before 2.38 or Linux before 5.10) PHP sites are held
+   * offline. Set to 1 (root, in pano.env) to serve them from the real paths anyway: a site can then link
+   * to another site's files or a TLS key and fetch them over HTTP until the daily sweep removes the link.
+   */
+  edgeFollowLinks: process.env.PANO_EDGE_FOLLOW_LINKS === "1",
   /** Fallback when neither the visitor's choice nor the browser's languages match one pano speaks. */
   lang: (process.env.PANO_LANG === "tr" ? "tr" : "en") as "tr" | "en",
 };

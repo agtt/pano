@@ -12,9 +12,9 @@ import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { basename, dirname } from "node:path";
-import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
+import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { notify } from "./alerts.ts";
-import { applyEdge, edgeInstalled, edgeSettings, refreshEdgeView } from "./edge.ts";
+import { applyEdge, edgeInstalled, edgeSettings, heldByEdge, refreshEdgeView } from "./edge.ts";
 import { appUser } from "./apps.ts";
 import { removeOutsideLinks, siteUser } from "./php.ts";
 import { apps, audit, settings, sites, state } from "./state.ts";
@@ -553,13 +553,21 @@ export async function shieldStatus() {
 
 /**
  * The edge reads PHP sites through its no-symlink view (edge.ts EDGE_VIEW); this also brings existing
- * installs onto it. Where the kernel cannot do that (before Linux 5.10), the edge would follow a link a site
- * plants to a TLS key or another site's files, so links leading out of a site are removed instead (as the
- * site's user, see removeOutsideLinks). A stopgap: a link lives until the next sweep.
+ * installs onto it. Where the server cannot mount it (Linux before 5.10, util-linux before 2.38), PHP sites
+ * are held offline and every agent start and day says so on the alert channel. Only with
+ * PANO_EDGE_FOLLOW_LINKS=1 does the edge read the real paths; it would follow a link a site plants to a TLS
+ * key or another site's files, so links leading out of a site are removed (as the site's user, see
+ * removeOutsideLinks). A stopgap: a link lives until the next sweep.
  */
 export async function guardSiteLinks() {
   settings.set("shield.linkGuard", String(Date.now()));
   if (DRY_RUN || (await refreshEdgeView()) || !(await edgeInstalled())) return;
+  const held = heldByEdge(sites.list(), false, env.edgeFollowLinks).filter((s) => s.kind === "php" && s.enabled && s.domains.length);
+  if (held.length) {
+    audit("agent", "edge.view.missing", { held: held.map((s) => s.name) });
+    await notify(viewMissingAlert(held.map((s) => s.name)));
+  }
+  if (!env.edgeFollowLinks) return;
   const removed: string[] = [];
   for (const s of sites.list().filter((x) => x.kind === "php")) {
     const gone = await removeOutsideLinks(s.name).catch((e) => {
@@ -569,6 +577,15 @@ export async function guardSiteLinks() {
     removed.push(...gone.map((w) => `${s.name}: ${w}`));
   }
   if (removed.length) await notify(`🔗 shield: ${removed.length} symlinks leading out of sites removed (this kernel cannot keep the edge from following them)\n${removed.slice(0, 8).join("\n")}`);
+}
+
+/** The alert when PHP sites are held offline because the edge view cannot be mounted. */
+export function viewMissingAlert(names: string[]): string {
+  return (
+    `⛔ edge: ${names.length} PHP site(s) are offline (503): this server cannot mount the site files read-only with nosymfollow ` +
+    `(needs Linux 5.10+ and util-linux 2.38+), and without that the edge could be made to serve TLS keys or other sites' files.\n` +
+    `${names.slice(0, 8).join(", ")}${names.length > 8 ? ", …" : ""}\nFix: upgrade the OS (Debian 12+, Ubuntu 24.04) and reboot; see the Security page.`
+  );
 }
 
 /** Every minute: login brute force. Hourly: changed files. Weekly: full scan. Daily: reputation lists, site links. */

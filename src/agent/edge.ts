@@ -168,13 +168,37 @@ function routeLines(routes: Route[], notFound = false): string[] {
 // php_fastcgi splits into the script x.php and a path info).
 const PHP_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp|ini|log|sh|env|dist|config)$|/composer\.(json|lock)$|/wp-content/uploads/.*\.(php\d?|phtml|phar)(/|$))`;
 
+/** Dotfiles and dumps/backups are never served from a static root either (.env, .git, a forgotten .sql). */
+const STATIC_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp)$)`;
+
 /**
  * Where the edge reads site files: a read-only bind of the sites directory mounted nosymfollow
- * (Linux 5.10+), so a link a site plants (to a TLS key, another site's wp-config.php) is never
- * followed. Without it (older kernel) the edge reads the real paths and a daily sweep removes links
+ * (Linux 5.10+ and util-linux 2.38+), so a link a site plants (to a TLS key, another site's
+ * wp-config.php) is never followed. Without it PHP sites are held offline (HELD_BODY), unless root
+ * set PANO_EDGE_FOLLOW_LINKS=1: then the edge reads the real paths and a daily sweep removes links
  * that lead out of a site (shield.ts).
  */
 export const EDGE_VIEW = "/srv/pano/edgeview";
+
+/** pano's own tree: apps, sites, the edge view, Python static files, containers. */
+const PANO_SRV = "/srv/pano";
+
+/** A static root the edge must never publish: inside pano's own tree, or a directory above it ("/srv"). */
+export function forbiddenStaticRoot(root: string): boolean {
+  const r = root.replace(/\/+/g, "/").replace(/(.)\/$/, "$1");
+  return r === PANO_SRV || r.startsWith(`${PANO_SRV}/`) || r === "/" || PANO_SRV.startsWith(`${r}/`);
+}
+
+/**
+ * Sites whose files the edge cannot serve safely, held offline: a static root in pano's own tree, and,
+ * without the no-symlink view (and without PANO_EDGE_FOLLOW_LINKS=1), every PHP site.
+ */
+export function heldByEdge(list: Site[], view: boolean, followLinks: boolean): Site[] {
+  return list.filter((s) => (s.kind === "static" && forbiddenStaticRoot(s.root)) || (s.kind === "php" && !(view && viewPath(s.root)) && !followLinks));
+}
+
+/** What a site answers when the edge cannot serve its files safely: a fixed 503, nothing read from disk. */
+const HELD_BODY = ["\theader Retry-After 3600", '\trespond "Service temporarily unavailable" 503'];
 
 /** systemd's unit name for a mount at a path (as `systemd-escape --path --suffix=mount`). */
 export function mountUnitName(path: string): string {
@@ -220,10 +244,14 @@ const ASSET_CACHE = [
 /** A live preview, as the synthetic app the deploy code built (see previewApp), and the app it belongs to. */
 export type EdgePreview = { parent: string; app: App };
 
-/** edgeView: the no-symlink view of the sites directory is mounted (see EDGE_VIEW). */
-export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[]; previews?: EdgePreview[]; edgeView?: boolean }): string {
+/**
+ * edgeView: the no-symlink view of the sites directory is mounted (see EDGE_VIEW); without it PHP sites
+ * are held offline unless followLinks (PANO_EDGE_FOLLOW_LINKS=1) serves them from the real paths.
+ */
+export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: EdgeSettings; certs: Set<string>; banned?: string[]; previews?: EdgePreview[]; edgeView?: boolean; followLinks?: boolean }): string {
   const { settings: s } = input;
   const view = !!input.edgeView;
+  const held = new Set(heldByEdge(input.sites, view, !!input.followLinks).map((x) => x.name));
   const out: string[] = [
     "# Managed by pano. Every change here is overwritten; edit through the panel.",
     "{",
@@ -328,8 +356,11 @@ export function renderCaddyfile(input: { apps: App[]; sites: Site[]; settings: E
       // Imported PHP/static/rewrite-heavy sites stay on OpenLiteSpeed, now on localhost only.
       // Caddy adds X-Forwarded-For/-Proto/-Host and keeps the Host header.
       body = [`\treverse_proxy 127.0.0.1:${env.olsBackendPort}`];
+    } else if (held.has(site.name)) {
+      // Fail closed: without the no-symlink view the edge would read the real paths (and follow links).
+      body = HELD_BODY;
     } else if (site.kind === "static") {
-      body = [`\troot * ${(view && viewPath(site.root)) || site.root}`, ...ASSET_CACHE, "\tfile_server"];
+      body = [`\troot * ${site.root}`, "\t@pano_deny {", `\t\tpath_regexp ${STATIC_DENY}`, "\t\tnot path /.well-known/*", "\t}", "\trespond @pano_deny 404", ...ASSET_CACHE, "\tfile_server"];
     } else if (site.kind === "php") {
       body = phpLines(site, view);
     } else {
@@ -390,7 +421,7 @@ export async function buildCaddyfile(): Promise<string> {
     const parent = appStore.get(pv.app);
     return parent ? [{ parent: parent.name, app: previewApp(parent, pv) }] : [];
   });
-  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned, previews, edgeView: await edgeViewMounted() });
+  return renderCaddyfile({ apps: appStore.list(), sites: siteStore.list(), settings: edgeSettings(), certs, banned, previews, edgeView: await edgeViewMounted(), followLinks: env.edgeFollowLinks });
 }
 
 /**
@@ -488,8 +519,11 @@ export async function installCaddy(version?: string): Promise<string> {
   return ver;
 }
 
-/** The edge's unit; with the view it needs the mount and cannot see the real sites directory at all. */
-export function edgeUnit(view: boolean): string {
+/**
+ * The edge's unit. It never sees the real sites directory: with the view it reads that (and requires the
+ * mount), without it PHP sites are held offline. Only realSites (PANO_EDGE_FOLLOW_LINKS=1, no view) lets it in.
+ */
+export function edgeUnit(view: boolean, realSites = false): string {
   return `[Unit]
 Description=pano edge (Caddy)
 After=network-online.target${view ? ` ${EDGE_VIEW_UNIT}` : ""}
@@ -527,7 +561,7 @@ ProtectClock=true
 ProtectKernelLogs=true
 ProtectHostname=true
 ReadWritePaths=${paths.edgeData} ${paths.accessLogs}
-${view ? `InaccessiblePaths=-${paths.sites}\n` : ""}LimitNOFILE=1048576
+${realSites ? "" : `InaccessiblePaths=-${paths.sites}\n`}LimitNOFILE=1048576
 TimeoutStopSec=30s
 Restart=on-failure
 
@@ -554,7 +588,8 @@ WantedBy=multi-user.target
 
 /**
  * Mounts the view and checks the kernel really applied nosymfollow. When it did not (Linux before
- * 5.10, or a mount that drops the option), the mount is left off and the edge reads the real paths.
+ * 5.10, or util-linux before 2.38, whose mount drops the option on a bind), the mount is left off and
+ * PHP sites are held offline (see EDGE_VIEW).
  */
 async function ensureEdgeView(): Promise<boolean> {
   await ensureDir(paths.sites, 0o755);
@@ -574,7 +609,7 @@ export async function setupEdgeUnit(): Promise<boolean> {
   await ensureDir(paths.certs, 0o750);
   await run(["chgrp", EDGE_USER, fsPath(paths.certs)], { check: false });
   const view = await ensureEdgeView();
-  await writeAtomic(`${paths.systemd}/pano-edge.service`, edgeUnit(view), 0o644);
+  await writeAtomic(`${paths.systemd}/pano-edge.service`, edgeUnit(view, !view && env.edgeFollowLinks), 0o644);
   await run(["systemctl", "daemon-reload"]);
   // Off only once the edge no longer requires it (stopping a required unit stops the edge too).
   if (!view) await run(["systemctl", "disable", "--now", EDGE_VIEW_UNIT], { check: false });
@@ -592,7 +627,7 @@ export async function refreshEdgeView(): Promise<boolean> {
   const view = await setupEdgeUnit();
   // Paths first, so the restarted edge starts on a config that matches its unit.
   await applyEdge().catch((e) => console.error(`[agent] edge view: ${e instanceof Error ? e.message : e}`));
-  if (before !== edgeUnit(view) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
+  if (before !== edgeUnit(view, !view && env.edgeFollowLinks) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
     await run(["systemctl", "restart", "pano-edge"], { check: false });
   }
   return view;

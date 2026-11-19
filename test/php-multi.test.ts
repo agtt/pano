@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { REDIS_COMMAND, renderQuadlet, repoOf, runRef, TEMPLATES, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
-import { EDGE_VIEW_UNIT, VIEW_MOUNT, edgeUnit, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
+import { EDGE_VIEW_UNIT, VIEW_MOUNT, edgeUnit, heldByEdge, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
+import { viewMissingAlert } from "../src/agent/shield.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
 import { renderFpmConf, renderPhpIni, renderPhpUnit } from "../src/agent/php.ts";
 import type { App, Site } from "../src/agent/state.ts";
@@ -47,7 +48,7 @@ describe("edge: multi-process apps and php sites", () => {
     root: "/srv/pano/sites/blog.example.org/public", ask_url: "", php_version: "8.5", source: "pano", deny_paths: ["/private", "/wp-content/uploads/wc-logs"],
     converted_from: null, created_at: 0, suspended_reason: "", suspended_at: 0, http_redirect: 1, www_apex: 0,
   } as Site;
-  const out = renderCaddyfile({ apps: [app], sites: [php], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set() });
+  const out = renderCaddyfile({ apps: [app], sites: [php], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView: true });
 
   test("hosts with different routes get their own blocks", () => {
     expect(out).toContain("www.example.com {\n\timport pano_common\n\treverse_proxy 127.0.0.1:4102");
@@ -61,7 +62,7 @@ describe("edge: multi-process apps and php sites", () => {
     expect(out).not.toContain(":0");
   });
   test("php sites go to their own pool, with deny rules first", () => {
-    expect(out).toContain("root * /srv/pano/sites/blog.example.org/public");
+    expect(out).toContain("root * /srv/pano/edgeview/blog.example.org/public");
     expect(out).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock");
     expect(out).toContain("@pano_deny_dirs path /private /private/* /wp-content/uploads/wc-logs /wp-content/uploads/wc-logs/*");
     expect(out.indexOf("respond @pano_deny 404")).toBeLessThan(out.indexOf("php_fastcgi"));
@@ -73,8 +74,43 @@ describe("edge: multi-process apps and php sites", () => {
     expect(viewed).toContain("root * /srv/pano/edgeview/blog.example.org/public");
     expect(viewed).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock {\n\t\ttry_files {path} {path}/index.php {path}/index.html {path}/index.htm index.php\n\t\troot /srv/pano/sites/blog.example.org/public\n\t}");
     expect(viewed).not.toContain("root * /srv/pano/sites/");
-    // A root outside the sites directory is served as it is.
+    // A root outside the sites directory is served as it is, without dotfiles or dumps.
     expect(viewed).toContain("root * /var/www/files");
+    const files = viewed.slice(viewed.indexOf("files.example.org {"));
+    expect(files).toContain("path_regexp (?i)(/\\.|\\.(sql|bak|old|orig|swp)$)");
+    expect(files.indexOf("respond @pano_deny 404")).toBeLessThan(files.indexOf("file_server"));
+  });
+  test("without the view PHP sites are held offline (N2): no file_server, no PHP, nothing read from the real paths", () => {
+    const st = { ...php, name: "files", kind: "static", domains: ["files.example.org"], root: "/var/www/files" } as Site;
+    const off = renderCaddyfile({ apps: [], sites: [php, st], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set() });
+    const blog = off.slice(off.indexOf("blog.example.org {"), off.indexOf("files.example.org {"));
+    expect(blog).toContain('respond "Service temporarily unavailable" 503');
+    expect(blog).not.toContain("file_server");
+    expect(blog).not.toContain("php_fastcgi");
+    expect(off).not.toContain("/srv/pano/sites/");
+    // A static root elsewhere does not depend on the view.
+    expect(off).toContain("root * /var/www/files");
+    expect(heldByEdge([php, st], false, false).map((x) => x.name)).toEqual(["blog.example.org"]);
+    expect(heldByEdge([php, st], true, false)).toEqual([]);
+    // Only root's PANO_EDGE_FOLLOW_LINKS=1 serves them from the real paths.
+    const follow = renderCaddyfile({ apps: [], sites: [php], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), followLinks: true });
+    expect(follow).toContain("root * /srv/pano/sites/blog.example.org/public");
+    expect(heldByEdge([php], false, true)).toEqual([]);
+  });
+  test("a static root in pano's own tree is never published, view or not", () => {
+    const bad = { ...php, name: "steal", kind: "static", domains: ["steal.example"], root: "/srv/pano/sites/blog.example.org/public" } as Site;
+    for (const edgeView of [true, false]) {
+      const o = renderCaddyfile({ apps: [], sites: [bad], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView });
+      expect(o).not.toContain("file_server");
+      expect(o).toContain('respond "Service temporarily unavailable" 503');
+    }
+  });
+  test("the alert names the held sites and the fix", () => {
+    const msg = viewMissingAlert(["a.example", "b.example"]);
+    expect(msg).toContain("2 PHP site(s) are offline");
+    expect(msg).toContain("util-linux 2.38+");
+    expect(msg).toContain("a.example, b.example");
+    expect(viewMissingAlert(Array.from({ length: 10 }, (_, i) => `s${i}`))).toContain(", …");
   });
 });
 
@@ -92,7 +128,9 @@ describe("edge view", () => {
     expect(on).toContain("InaccessiblePaths=-/srv/pano/sites\n");
     const off = edgeUnit(false);
     expect(off).not.toContain("Requires=");
-    expect(off).not.toContain("InaccessiblePaths");
+    // Without the view PHP sites are held offline, so the real sites stay out of the edge's reach.
+    expect(off).toContain("InaccessiblePaths=-/srv/pano/sites\n");
+    expect(edgeUnit(false, true)).not.toContain("InaccessiblePaths");
     expect(VIEW_MOUNT).toContain("Options=bind,ro,nosymfollow");
     expect(VIEW_MOUNT).toContain("Where=/srv/pano/edgeview");
   });
