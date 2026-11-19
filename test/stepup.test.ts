@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { env } from "../src/shared/config.ts";
-import { forbiddenStaticRoot } from "../src/agent/edge.ts";
+import { forbiddenStaticRoot, restartThenApply } from "../src/agent/edge.ts";
 import { grantValid, issueGrant } from "../src/agent/otp.ts";
 import { FRESH_ONLY, alwaysAsk, changesRuntimeEnv, methods, needsOtp } from "../src/agent/rpc.ts";
 import { sites, type Site } from "../src/agent/state.ts";
@@ -111,4 +111,22 @@ describe("sites.save and db.grant (N1)", () => {
     for (const port of [env.webPort, env.askPort, env.hookPort])
       await expect(methods["sites.save"]!({ ...save, routes: `/ 127.0.0.1:${port}` }, "tester")).rejects.toThrow("pano's own port");
   });
+});
+
+test("a new PHP site or a WordPress install always asks (R1)", async () => {
+  for (const m of ["sites.createPhp", "wp.install"]) {
+    expect(FRESH_ONLY.has(m)).toBe(true);
+    expect(await alwaysAsk(m, { name: "r1.example" })).toBe(true);
+  }
+});
+
+test("on a view switch the edge restarts before the config moves onto the view (R2)", async () => {
+  const order: string[] = [];
+  const restart = async () => void order.push("restart");
+  const apply = async () => void order.push("apply");
+  await restartThenApply(true, restart, apply);
+  expect(order).toEqual(["restart", "apply"]);
+  order.length = 0;
+  await restartThenApply(false, restart, apply);
+  expect(order).toEqual(["apply"]);
 });

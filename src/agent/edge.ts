@@ -639,22 +639,35 @@ export async function setupEdgeUnit(): Promise<boolean> {
 }
 
 /**
+ * Restart first, config second: a running edge's mount namespace is a copy made when it started, and
+ * nosymfollow set later (the lock) does not reach it, while a new mount does. Reloading onto view paths
+ * before the restart would let that edge read through a view that still follows links. In between, the
+ * restarted edge serves the old config, which never names the view without the flag (real paths are hidden
+ * from it, held sites stay held).
+ */
+export async function restartThenApply(needRestart: boolean, restart: () => Promise<unknown>, apply: () => Promise<unknown>) {
+  if (needRestart) await restart();
+  await apply();
+}
+
+/**
  * At agent start and daily (shield.ts): brings existing installs onto the view, and back to the real
  * paths if the view is gone (a kernel that cannot nosymfollow after a reboot: the edge, which requires
- * the mount, would not start). The edge restarts only when its unit changed.
+ * the mount, would not start). The edge restarts only when its unit changed or its copy of the view lacks
+ * the flag (it was set after the edge started).
  */
 export async function refreshEdgeView(): Promise<boolean> {
   if (DRY_RUN || !(await edgeInstalled())) return false;
   const before = await readText(`${paths.systemd}/pano-edge.service`);
   const view = await setupEdgeUnit();
-  // Paths first, so the restarted edge starts on a config that matches its unit.
-  await applyEdge().catch((e) => console.error(`[agent] edge view: ${e instanceof Error ? e.message : e}`));
-  // Also when the running edge's own copy of the view lacks the flag (it was set after the edge started).
   const pid = (await showUnits(["pano-edge.service"], ["MainPID"])).get("pano-edge.service")?.MainPID ?? "0";
   const stale = view && /^[1-9]\d*$/.test(pid) && !(await edgeViewMounted(pid));
-  if ((stale || before !== edgeUnit(view, !view && env.edgeFollowLinks)) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
-    await run(["systemctl", "restart", "pano-edge"], { check: false });
-  }
+  const enabled = (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled";
+  await restartThenApply(
+    enabled && (stale || before !== edgeUnit(view, !view && env.edgeFollowLinks)),
+    () => run(["systemctl", "restart", "pano-edge"], { check: false }),
+    () => applyEdge().catch((e) => console.error(`[agent] edge view: ${e instanceof Error ? e.message : e}`)),
+  );
   return view;
 }
 
