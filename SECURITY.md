@@ -42,7 +42,8 @@ Please give us the chance to release a fix before you disclose details publicly.
 
 Releases are built by `.github/workflows/release.yml` from a `vX.Y.Z` tag and signed with a key held as the `PANO_RELEASE_KEY` secret;
 the installer and `pano update` accept only artifacts whose `SHA256SUMS` carries a valid signature from the public key built into them.
-Because anyone who can push a tag can trigger a signed build, the recommended maintainer setup is:
+Because anyone who can push a tag can trigger a signed build, the release job runs in the `release` environment, which needs a
+maintainer's approval before it starts. The recommended maintainer setup is:
 
 - `PANO_RELEASE_KEY` lives in a GitHub **environment** (for example `release`) with a **required reviewer** and deployments limited
   to `v*` tags, instead of being a repository secret; the release job then declares `environment: release`, so no signature is made
