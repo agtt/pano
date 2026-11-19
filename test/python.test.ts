@@ -1,16 +1,17 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { renderUnit, teardownUnits, validateAppInput } from "../src/agent/apps.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
+import { migrate } from "../src/agent/pydeploy.ts";
 import { readRepo, snapshotStatic, uninstallPython } from "../src/agent/python.ts";
 import { installed, installedAll, runtimeBin } from "../src/agent/runtimes.ts";
-import { alwaysAsk, methods } from "../src/agent/rpc.ts";
+import { alwaysAsk, changesRuntimeEnv, methods } from "../src/agent/rpc.ts";
 import { previewApp, type App } from "../src/agent/state.ts";
 import { fsPath, paths } from "../src/shared/config.ts";
 import {
-  PY_DEFAULTS, POETRY_SPEC, STATIC_PROBE, afterUninstall, defaultWorkers, detectPython, djangoArgv, djangoProbeArgv, formatPyStatic, hasHashes, insideDir, installMode,
+  PY_DEFAULTS, POETRY_SPEC, isPreviewName, sharedStoreKeys, STATIC_PROBE, afterUninstall, defaultWorkers, detectPython, djangoArgv, djangoProbeArgv, formatPyStatic, hasHashes, insideDir, installMode,
   installSteps, listPython, liveStatic, nativePackages, parsePyStatic, parseStaticProbe, pbsAsset, pickPython, pickRequirements, projectNames, pythonCronScript, pythonStartScript,
   requirementNames, serverCommand, serverInstallStep, serverPackage, shq, staticDir, triOn, trustedDownload, uvAsset, validatePython, type PyRepo,
 } from "../src/shared/python.ts";
@@ -405,6 +406,89 @@ describe("Python settings decide what runs: changing them asks for a code", () =
   });
 });
 
+
+describe("previews never migrate a store they share with production", () => {
+  const plan = { mode: "requirements", requirements: "r.txt", django: true, app: null, deps: new Set<string>() } as never;
+  const ctx = (name: string, py_migrate: string, shared: string[] = []) => {
+    const ran: string[][] = [];
+    const logs: string[] = [];
+    const c = {
+      app: { name, py_migrate } as App, dir: "/r", workdir: "/r", path: "/usr/bin", cache: "/c", log: (l: string) => void logs.push(l), step: () => {},
+      sb: async (argv: string[]) => void ran.push(argv), sharedStoreKeys: shared,
+    };
+    return { c, ran, logs };
+  };
+
+  test("names and shared keys", () => {
+    expect([isPreviewName("pv_12"), isPreviewName("pv_x"), isPreviewName("web"), isPreviewName("app-pv_1")]).toEqual([true, false, false, false]);
+    const prod = { DATABASE_URL: "postgres://u:p@db/x", DB_HOST: "10.0.0.1", SECRET_KEY: "s", REDIS_URL: "redis://r", DEBUG: "0" };
+    expect(sharedStoreKeys({ DATABASE_URL: "postgres://u:p@db/x", DB_HOST: "10.0.0.1", SECRET_KEY: "s", REDIS_URL: "redis://other", DEBUG: "0" }, prod)).toEqual(["DATABASE_URL", "DB_HOST"]);
+    expect(sharedStoreKeys({ DATABASE_URL: "sqlite:///preview.db" }, prod)).toEqual([]);
+    expect(sharedStoreKeys({}, prod)).toEqual([]);
+  });
+
+  test("a live app migrates (auto or on); a preview does not unless Always and nothing is shared", async () => {
+    const live = ctx("hub", "auto");
+    await migrate(live.c as never, plan);
+    expect(live.ran).toEqual([["/r/.venv/bin/python", "manage.py", "migrate", "--noinput"]]);
+
+    const auto = ctx("pv_3", "auto");
+    await migrate(auto.c as never, plan);
+    expect(auto.ran).toEqual([]);
+    expect(auto.logs.join()).toContain("migrate skipped");
+
+    const on = ctx("pv_3", "on");
+    await migrate(on.c as never, plan);
+    expect(on.ran).toHaveLength(1);
+
+    const shared = ctx("pv_3", "on", ["DATABASE_URL"]);
+    await migrate(shared.c as never, plan);
+    expect(shared.ran).toEqual([]);
+    expect(shared.logs.join()).toContain("shares DATABASE_URL with production");
+
+    const off = ctx("hub", "off");
+    await migrate(off.c as never, plan);
+    expect(off.ran).toEqual([]);
+  });
+});
+
+describe("static copies end with the Python runtime; UV_* is a Python-only runtime variable", () => {
+  const settings = { email: "", behindCloudflare: false, hooksDomain: "" };
+  test("an app that is no longer Python serves no static copy", () => {
+    const a = { name: "hub", kind: "managed", domains: ["h.example.com"], runtime: "node", active_slot: "a", port_a: 4100, port_b: 4101, processes: [], http_redirect: 1, static_live: '["/static"]' } as unknown as App;
+    expect(renderCaddyfile({ apps: [a], sites: [], settings, certs: new Set() })).not.toContain("file_server");
+  });
+
+  test("updating to another runtime clears static_live and the copies", async () => {
+    const { apps } = await import("../src/agent/state.ts");
+    const { updateApp } = await import("../src/agent/apps.ts");
+    apps.insert({ name: "pyswitch", kind: "managed", runtime: "python", runtime_version: "3.14.2", repo: "https://github.com/a/b.git", domains: ["s.example.com"], active_slot: "a", static_live: '["/static"]' } as never);
+    mkdirSync(fsPath(`${paths.static}/pyswitch/a/0`), { recursive: true });
+    const quiet = spyOn(console, "log").mockImplementation(() => {});
+    await updateApp("pyswitch", validateAppInput({ name: "pyswitch", domains: "s.example.com", runtime: "node", runtime_version: "24.1.0", repo: "https://github.com/a/b.git" }), "t");
+    quiet.mockRestore();
+    expect(apps.get("pyswitch")!.static_live).toBe("");
+    expect(existsSync(fsPath(`${paths.static}/pyswitch`))).toBe(false);
+    apps.remove("pyswitch");
+  });
+
+  test("UV_/PIP_/VIRTUAL_ENV ask for a code only for Python apps", async () => {
+    const { apps } = await import("../src/agent/state.ts");
+    expect(changesRuntimeEnv({ UV_THREADPOOL_SIZE: "8" }, {})).toBe(false);
+    expect(changesRuntimeEnv({ UV_INDEX_URL: "https://evil" }, {}, true)).toBe(true);
+    expect(changesRuntimeEnv({ PIP_INDEX_URL: "https://evil" }, {}, true)).toBe(true);
+    expect(changesRuntimeEnv({ PIP_INDEX_URL: "https://evil" }, {})).toBe(false);
+    expect(changesRuntimeEnv({ LD_PRELOAD: "/x" }, {})).toBe(true);
+    apps.insert({ name: "uvnode", kind: "managed", runtime: "node", runtime_version: "24.1.0", domains: [] } as never);
+    apps.insert({ name: "uvpy", kind: "managed", runtime: "python", runtime_version: "3.14.2", domains: [] } as never);
+    expect(await alwaysAsk("apps.env.set", { name: "uvnode", vars: { UV_THREADPOOL_SIZE: "8" } })).toBe(false);
+    expect(await alwaysAsk("apps.env.set", { name: "uvpy", vars: { UV_INDEX_URL: "https://evil" } })).toBe(true);
+    expect(await alwaysAsk("apps.env.set", { name: "uvpy", vars: { SECRET: "x" } })).toBe(false);
+    apps.remove("uvnode");
+    apps.remove("uvpy");
+  });
+});
+
 describe("repository reading and static snapshot (real files)", () => {
   const tmp = mkdtempSync(join(fsPath("/"), "pyrepo-"));
   const logical = (p: string) => p.slice(fsPath("/").length - 1);
@@ -420,7 +504,7 @@ describe("repository reading and static snapshot (real files)", () => {
     writeFileSync(join(dir, ".venv/pyproject.toml"), "evil");
     writeFileSync(join(tmp, "secret"), "root only");
     symlinkSync(join(tmp, "secret"), join(dir, "pyproject.toml"));
-    const r = await readRepo(logical(dir), "");
+    const r = await readRepo(logical(dir), "", logical(tmp));
     expect([...r.files].sort()).toEqual(["manage.py", "requirements/base.txt"]);
     expect(r.texts["manage.py"]).toContain("DJANGO_SETTINGS_MODULE");
     expect(r.texts["pyproject.toml"]).toBeUndefined();
@@ -446,5 +530,69 @@ describe("repository reading and static snapshot (real files)", () => {
     expect(readdirSync(out).sort()).toEqual(["a.js", "css"]);
     expect(readFileSync(join(out, "css/app.css"), "utf8")).toBe("body{}");
     expect(existsSync(join(out, "outside.txt"))).toBe(false);
+  });
+
+  test("a directory swapped for a link while the copy runs is never followed (the file is skipped)", async () => {
+    const rel = join(tmp, "release2");
+    const src = join(rel, "staticfiles");
+    mkdirSync(join(src, "pages"), { recursive: true });
+    writeFileSync(join(src, "pages/shadow"), "tenant copy");
+    writeFileSync(join(src, "ok.css"), "ok");
+    const secretDir = join(tmp, "rootonly");
+    mkdirSync(secretDir, { recursive: true });
+    writeFileSync(join(secretDir, "shadow"), "root:$6$secret");
+    let swapped = false;
+    const r = await snapshotStatic(logical(src), logical(rel), `${paths.static}/swap/a/0`, {
+      beforeOpen: (path) => {
+        // The name list of pages/ was read already; now the directory becomes a link to a root-only one.
+        if (!swapped && path.endsWith("pages/shadow")) {
+          swapped = true;
+          renameSync(join(src, "pages"), join(rel, "pages-moved"));
+          symlinkSync(secretDir, join(src, "pages"));
+        }
+      },
+    });
+    expect(swapped).toBe(true);
+    const out = fsPath(`${paths.static}/swap/a/0`);
+    expect(existsSync(join(out, "pages/shadow"))).toBe(false);
+    expect(readFileSync(join(out, "ok.css"), "utf8")).toBe("ok");
+    expect(r.files).toBe(1);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    // and nothing anywhere in the copy holds the secret
+    const all = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? all(join(d, e.name)) : [join(d, e.name)]));
+    for (const f of all(out)) expect(readFileSync(f, "utf8")).not.toContain("$6$secret");
+  });
+
+  test("a static directory outside the releases is refused, also in development", async () => {
+    const rel = join(tmp, "release3");
+    mkdirSync(rel, { recursive: true });
+    const outside = join(tmp, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "x.css"), "x");
+    symlinkSync(outside, join(rel, "staticfiles"));
+    await expect(snapshotStatic(logical(join(rel, "staticfiles")), logical(rel), `${paths.static}/out/a/0`)).rejects.toThrow();
+    await expect(snapshotStatic(logical(outside), logical(rel), `${paths.static}/out/a/0`)).rejects.toThrow(/outside the release/);
+    expect(existsSync(fsPath(`${paths.static}/out`))).toBe(false);
+  });
+
+  test("files not owned by the app are not copied", async () => {
+    const rel = join(tmp, "release4");
+    const src = join(rel, "sf");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "a.css"), "a");
+    const r = await snapshotStatic(logical(src), logical(rel), `${paths.static}/uid/a/0`, { uid: 1 << 30 });
+    expect(r.files).toBe(0);
+    expect(r.skipped).toBe(1);
+  });
+
+  test("configuration files read through a linked directory are ignored", async () => {
+    const dir = join(tmp, "repo2");
+    const real = join(tmp, "realreqs");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, "prod.txt"), "mysqlclient");
+    symlinkSync(real, join(dir, "reqs"));
+    const r = await readRepo(logical(dir), "reqs/prod.txt", logical(dir));
+    expect(r.texts["reqs/prod.txt"]).toBeUndefined();
   });
 });
