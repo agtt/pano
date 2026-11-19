@@ -58,20 +58,26 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
 - **2FA is enforced by the agent, not the UI.** TOTP secrets live root-only with the agent; the web process can ask whether a code is right
   but cannot make one (5 wrong codes lock the user for 15 minutes, each code works once). Root's `pano rpc` uses a root-only token instead.
   - *Trusted window.* Signing in or any verified code trusts that admin's session for 15 minutes (or until "Lock"): routine guarded actions
-    (saving env values, domains, sites, databases for an app, backup jobs, shield settings, …) skip the code.
+    (saving env values, an app's domains, a site's redirect/www/TLS options or removing one of its domains, databases for an app, backup
+    jobs, shield settings, suspending, a safe reboot, …) skip the code.
   - *Always ask.* These take only a code sent with that very call, never the window or a grant: revealing a secret (env and shared values,
     container env, webhook/realtime/TURN secrets, Valkey URL, backup key, recovery kit, WordPress or database password resets); changing
     what runs (creating an app; repository, branch, directory, runtime, commands, processes, crons, shared groups or build isolation of an app;
     a variable such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH` or a proxy; site crons, containers, Android projects, restoring a quarantined
-    file); the network and its locks (VPN devices and locks, firewall off or ports, Cloudflare lock, guard, remote database access); lasting
-    access (runner on and keys, GitHub token, backup destination, cPanel import, alert channel, admins); and deleting, restoring or cutover.
+    file); what a site is (creating one, its kind, static root, proxy routes and redirects, adding or moving a domain, using another site's
+    certificate); the network and its locks (VPN devices and locks, firewall off or ports, Cloudflare lock, guard, remote database access);
+    lasting access (runner on and keys, GitHub token, backup destination, cPanel import, alert channel, admins, granting a database user
+    access to a database); and deleting, restoring or cutover.
   - *Grants.* A verified code also returns a 60 s grant, good only for repeating that same call (method and params), never for an always-ask one.
-  - *What this guarantees.* A compromised `pano-web` cannot read secrets, plant code into an app or open the network on its own, not even
-    right after an admin signs in. Inside a trusted window it can make the routine changes above, which apps act on (an ordinary variable
-    such as a mail host is one). The code still travels through it, so it can spend a code the admin types on one always-ask action of its
-    own choosing instead of the admin's. Adding an admin, a runner key, a VPN device, a remote database user, a GitHub token or a backup
-    destination, turning the runner on, exporting the backup key or recovery kit, resetting an admin's 2FA and changing the alert channel
-    are therefore also reported on Telegram (when alerts are set up), before the action runs.
+  - *What this guarantees.* A compromised `pano-web` cannot read secrets, plant code into an app, publish a directory, send a domain's
+    visitors to a port or address of its choosing, give a database user it knows access to an existing database or open the network on
+    its own, not even right after an admin signs in. Inside a trusted window it can make the routine changes above, which apps act on (an
+    ordinary variable such as a mail host is one; a domain removed from a site and added to an app reaches that app's own code). Static
+    roots are never inside pano's own directories (`/srv/pano`: other sites, apps, containers) and no route points at pano's own ports.
+    The code still travels through it, so it can spend a code the admin types on one always-ask action of its own choosing instead of the
+    admin's. Adding an admin, a runner key, a VPN device, a remote database user, a GitHub token or a backup destination, turning the
+    runner on, exporting the backup key or recovery kit, resetting an admin's 2FA and changing the alert channel are therefore also
+    reported on Telegram (when alerts are set up), before the action runs.
 - **Env values are masked.** The UI shows keys and `••••••••`; a masked line is kept as is when saving. "+ Database" creates the database and
   its own user and writes `DATABASE_URL`/`REDIS_URL` straight into the app's env: the password never passes through the browser.
 - **Secrets:** R2 secret and backup key are root-only files and write-only from the UI. Every action is in the audit log.
@@ -99,12 +105,6 @@ Options: `PANO_VERSION=x.y.z` installs a given release, `PANO_NO_EDGE=1` leaves 
 
 From source: `bun install && bun run build`, copy `dist/pano` to the server and run `./pano install` as root.
 
-## Migrating from CyberPanel
-
-1. **Import** → *Scan server* → review → *Import selected*. CyberPanel keeps serving.
-2. Fix the warnings (WordPress `X-Forwarded-Proto` snippet, ask URL for catch-all sites).
-3. **Edge** → *Install Caddy* → check the Caddyfile preview.
-4. **Edge** → *Cutover*: OpenLiteSpeed moves to `127.0.0.1:8088` (PHP sites keep running behind the edge), Caddy takes :80/:443,
 ### Supported systems
 
 AlmaLinux/Rocky 9, Debian 11–13, Ubuntu 22.04/24.04 (systemd, root access).
@@ -128,6 +128,12 @@ start (and every day) sends an alert. Apps, proxy and static sites, and sites ke
 there anyway, accepting that a site can read other sites' files and TLS keys through a symlink until the daily sweep removes it, root sets
 `PANO_EDGE_FOLLOW_LINKS=1` in `/etc/pano/pano.env` and restarts `pano-agent`.
 
+## Migrating from CyberPanel
+
+1. **Import** → *Scan server* → review → *Import selected*. CyberPanel keeps serving.
+2. Fix the warnings (WordPress `X-Forwarded-Proto` snippet, ask URL for catch-all sites).
+3. **Edge** → *Install Caddy* → check the Caddyfile preview.
+4. **Edge** → *Cutover*: OpenLiteSpeed moves to `127.0.0.1:8088` (PHP sites keep running behind the edge), Caddy takes :80/:443,
    every domain is probed. If Caddy fails to start the old config is restored automatically; *Rollback* undoes it any time.
 5. **Sites** → a legacy site → *Move to pano PHP*, one site at a time (revert any time). When no legacy site is left,
    OpenLiteSpeed can be stopped.

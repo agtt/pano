@@ -301,8 +301,12 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
             <input type="checkbox" name="www_apex" value="1" checked={s?.www_apex === 1} /> {t("Send www to the bare domain")}
             <small class="muted"> {t("www.example.com answers with a permanent redirect to example.com.")}</small>
           </label>
+          <p class="muted small">
+            {t("A new site, another kind, root or route, and an added domain need a new code every time, also in the trusted window.")}
+          </p>
           <div class="actions">
-            <Otp />
+            {/* An existing site: redirect/www/TLS options alone need none in the trusted window, so the field is not required there. */}
+            {s ? <input name="otp" inputmode="numeric" pattern="[0-9]{6}" placeholder={t("Authenticator code")} class="short" data-always /> : <Otp always />}
             <button class="btn primary">{t("Save")}</button>
           </div>
         </form>

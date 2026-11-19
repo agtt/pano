@@ -1,7 +1,9 @@
 // The complete list of things the web UI can ask the root agent to do. Each
 // handler validates its own input; there is no generic "run command" method.
 
-import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, parseSiteRoutes, v } from "../shared/validate.ts";
+import { realpath } from "node:fs/promises";
+import { env, fsPath } from "../shared/config.ts";
+import { DEFAULT_PHP, PHP_EOL, PHP_VERSIONS, formatProcesses, parseSiteRoutes, v, type SiteRoute } from "../shared/validate.ts";
 import { addAdmin, adminNames, checkOtp, endTrust, removeAdmin, resetAdmin } from "./otp.ts";
 import * as alerts from "./alerts.ts";
 import * as android from "./android.ts";
@@ -17,7 +19,7 @@ import * as github from "./github.ts";
 import * as guard from "./guard.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
-import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, installCaddy, setupEdgeUnit } from "./edge.ts";
+import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, forbiddenStaticRoot, installCaddy, setupEdgeUnit } from "./edge.ts";
 import { siteCerts } from "./certs.ts";
 import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
@@ -100,6 +102,8 @@ export const FRESH_ONLY = new Set([
   // secrets: shown, or set to a value the caller knows
   "apps.env.reveal", "envGroups.reveal", "containers.env.reveal", "apps.webhookSecret", "realtime.app.reveal", "turn.reveal", "services.valkeyUrl",
   "backup.key.export", "recovery.kit", "wp.resetPassword", "db.password",
+  // a database user gets every privilege on an existing (a tenant's) database
+  "db.grant",
   // which code runs (as an app, a site, a container or with the Android signing key)
   "apps.create", "sites.crons", "containers.save", "android.project.save", "shield.restore",
   // the network and the locks
@@ -129,6 +133,30 @@ function changedAppFields(p: P): string[] {
   }
   const norm = (a: Pick<appsOps.AppInput, (typeof CODE_FIELDS)[number]>, k: (typeof CODE_FIELDS)[number]) => JSON.stringify(k === "processes" ? formatProcesses(a.processes) : a[k]);
   return CODE_FIELDS.filter((k) => norm(next, k) !== norm(cur, k));
+}
+
+const routeKey = (r: SiteRoute) => [r.path, r.upstream || "", r.redirect || "", r.redirect ? (r.code ?? 301) : 0].join(" ");
+
+/**
+ * Whether a sites.save call changes what a site is rather than how it is served: a new site, another kind,
+ * static root, proxy route or redirect, an added (or moved) domain, or another site's certificate. Each one
+ * can publish files or send a domain's visitors somewhere new, so it always asks. Redirect/www/TLS options
+ * and removing a domain stay routine. An invalid name changes nothing (the handler rejects it).
+ */
+export function structuralSiteChange(p: P): boolean {
+  let name: string;
+  try {
+    name = v.siteName(p.name);
+  } catch {
+    return false;
+  }
+  const prev = sites.get(name);
+  if (!prev || p.kind !== prev.kind || p.cert_from) return true;
+  if (parseDomains(p.domains).some((d) => !prev.domains.includes(d))) return true;
+  const dir = (x: string) => x.replace(/(.)\/+$/, "$1");
+  if (prev.kind === "static" && dir(v.pathUnder(p.root, STATIC_PARENTS)) !== dir(prev.root)) return true;
+  if (prev.kind === "proxy" && parseSiteRoutes(p.routes).map(routeKey).join("\n") !== prev.routes.map(routeKey).join("\n")) return true;
+  return false;
 }
 
 export function needsOtp(method: string, p: P): boolean {
@@ -163,6 +191,7 @@ export async function alwaysAsk(method: string, p: P): Promise<boolean> {
   if (FRESH_ONLY.has(method)) return true;
   try {
     if (method === "apps.update") return changedAppFields(p).some((k) => (RUN_FIELDS as readonly string[]).includes(k));
+    if (method === "sites.save") return structuralSiteChange(p);
     if (method === "apps.env.set") {
       const cur = await appsOps.getEnv(p.name, envScope(p.scope));
       return changesRuntimeEnv(unmask(p.vars, cur), cur, pythonApp(p.name));
@@ -631,6 +660,9 @@ export const methods: Record<string, Handler> = {
     if (!["legacy", "static", "proxy", "php"].includes(kind)) throw new Error("invalid kind");
     const clean = parseDomains(p.domains);
     const routes = kind === "proxy" ? parseSiteRoutes(p.routes) : [];
+    // pano's own listeners (the panel, the certificate ask endpoint, webhooks) are never a site's backend.
+    const own = new Set([env.webPort, env.askPort, env.hookPort].map(String));
+    for (const r of routes) if (r.upstream && own.has(r.upstream.split(":")[1]!)) throw new Error(`route ${r.path}: ${r.upstream} is pano's own port`);
     // move: the domains leave the other sites in the same edge change (no moment where nobody serves them).
     const moving = p.move ? sites.list().filter((s) => s.name !== name && s.domains.some((d) => clean.includes(d))) : [];
     const taken = allDomains();
@@ -649,8 +681,7 @@ export const methods: Record<string, Handler> = {
       name,
       kind,
       domains: clean,
-      // The edge runs with ProtectHome, so static roots live outside /home.
-      root: kind === "static" ? v.pathUnder(p.root, ["/srv", "/var/www"]) : (prev?.root ?? ""),
+      root: kind === "static" ? await staticRoot(p.root) : (prev?.root ?? ""),
       routes,
       ask_url: askUrl,
       php_version: prev?.php_version ?? "",
@@ -790,6 +821,22 @@ export const methods: Record<string, Handler> = {
   "import.cpanel.apply": (p, actor) =>
     cpanel.applyArchive(String(p.file ?? ""), { sites: (p.sites ?? []).map(String), databases: (p.databases ?? []).map(String) }, actor),
 };
+
+/** The edge runs with ProtectHome, so static roots live outside /home. */
+const STATIC_PARENTS = ["/srv", "/var/www"];
+
+/**
+ * A static site's root: under /srv or /var/www, never pano's own tree (other sites' and apps' homes, the
+ * edge view, Python static files, containers) or a directory above it, also not through a symlink.
+ */
+async function staticRoot(x: unknown): Promise<string> {
+  const root = v.pathUnder(x, STATIC_PARENTS);
+  const real = await realpath(fsPath(root))
+    .then((r) => r.slice(fsPath("").length) || "/")
+    .catch(() => root);
+  if (forbiddenStaticRoot(root) || forbiddenStaticRoot(real)) throw new Error("a static root cannot be inside pano's own directories (/srv/pano) or above them");
+  return root;
+}
 
 function parseDomains(x: unknown): string[] {
   const list = (Array.isArray(x) ? x : String(x ?? "").split(/[\s,]+/)).filter(Boolean).map(String);

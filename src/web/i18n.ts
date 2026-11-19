@@ -361,6 +361,8 @@ const tr: Record<string, string> = {
   "Turn off only if Cloudflare SSL is “Flexible” or the app redirects itself.": "Yalnızca Cloudflare SSL “Flexible” ise ya da uygulama yönlendirmeyi kendisi yapıyorsa kapat.",
   "Send www to the bare domain": "www'yi çıplak alan adına gönder",
   "www.example.com answers with a permanent redirect to example.com.": "www.example.com kalıcı yönlendirmeyle example.com'a gider.",
+  "A new site, another kind, root or route, and an added domain need a new code every time, also in the trusted window.":
+    "Yeni site, başka tür, kök dizin ya da rota ve eklenen alan adı, güvenli pencerede de her seferinde yeni kod ister.",
   "One per line: a path and a local port, or a path, “redirect”, the target and the code. {uri} keeps the path and query.":
     "Her satıra bir tane: yol ve yerel port, ya da yol, “redirect”, hedef ve kod. {uri} yolu ve sorguyu korur.",
 };

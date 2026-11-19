@@ -1,6 +1,9 @@
-import { expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { env } from "../src/shared/config.ts";
+import { forbiddenStaticRoot } from "../src/agent/edge.ts";
 import { grantValid, issueGrant } from "../src/agent/otp.ts";
-import { alwaysAsk, changesRuntimeEnv, needsOtp } from "../src/agent/rpc.ts";
+import { FRESH_ONLY, alwaysAsk, changesRuntimeEnv, methods, needsOtp } from "../src/agent/rpc.ts";
+import { sites, type Site } from "../src/agent/state.ts";
 import { registeredDomain, wildcardAllowed } from "../src/agent/main.ts";
 
 test("a grant is good only for the method and params its code was checked for", () => {
@@ -50,4 +53,62 @@ test("wildcard certificates: 5 new names an hour per wildcard, 20 a week per reg
   expect(ok("*.c.cap.example", "x.c.cap.example", t0 + 5 * h)).toBe(false); // 20 this week
   expect(ok("*.other.example", "x.other.example", t0 + 5 * h)).toBe(true); // another domain is not affected
   expect(ok("*.c.cap.example", "x.c.cap.example", t0 + 8 * 24 * h)).toBe(true); // a week later
+});
+
+describe("sites.save and db.grant (N1)", () => {
+  const base = (over: Partial<Site>): Site =>
+    ({
+      name: "n1.example", kind: "proxy", domains: ["n1.example"], root: "", routes: [{ path: "/", upstream: "127.0.0.1:3000" }], ask_url: "", php_version: "", tls_cert: "",
+      tls_key: "", source: "pano", enabled: 1, on_demand_tls: 0, deny_paths: [], converted_from: null, crons: [], created_at: 0, http_redirect: 1, www_apex: 0, ...over,
+    }) as Site;
+  const save = { name: "n1.example", kind: "proxy", domains: "n1.example", routes: "/ 127.0.0.1:3000" };
+  afterEach(() => {
+    for (const n of ["n1.example", "n1-static", "n1-other"]) sites.remove(n);
+  });
+
+  test("granting a database user always asks", async () => {
+    expect(FRESH_ONLY.has("db.grant")).toBe(true);
+    expect(await alwaysAsk("db.grant", { db: "victim", user: "evil" })).toBe(true);
+  });
+
+  test("structural site changes always ask; redirect/www/TLS options and removing a domain stay routine", async () => {
+    // a new site
+    expect(await alwaysAsk("sites.save", save)).toBe(true);
+    sites.upsert(base({ domains: ["n1.example", "www.n1.example"] }));
+    const same = { ...save, domains: "n1.example, www.n1.example" };
+    expect(await alwaysAsk("sites.save", same)).toBe(false);
+    expect(await alwaysAsk("sites.save", { ...same, http_redirect: "0", www_apex: "1", on_demand_tls: true })).toBe(false);
+    expect(await alwaysAsk("sites.save", { ...save, domains: "n1.example" })).toBe(false);
+    expect(needsOtp("sites.save", same)).toBe(true);
+    // what the site is, or where its visitors go
+    for (const change of [
+      { kind: "static", root: "/var/www/n1" },
+      { domains: "n1.example, www.n1.example, victim.example" },
+      { domains: "n1.example, victim.example", move: true },
+      { routes: "/ 127.0.0.1:3001" },
+      { routes: "/ 127.0.0.1:3000\n/api 127.0.0.1:3002" },
+      { routes: "/ redirect https://elsewhere.example{uri}" },
+      { cert_from: "n1-other" },
+    ])
+      expect(await alwaysAsk("sites.save", { ...same, ...change })).toBe(true);
+    // unreadable input fails closed
+    expect(await alwaysAsk("sites.save", { ...same, routes: "nonsense" })).toBe(true);
+  });
+
+  test("a static site's root: changing it asks, pano's own directories are refused", async () => {
+    sites.upsert(base({ name: "n1-static", kind: "static", domains: ["n1-static.example"], root: "/var/www/n1", routes: [] }));
+    const st = { name: "n1-static", kind: "static", domains: "n1-static.example", root: "/var/www/n1/" };
+    expect(await alwaysAsk("sites.save", st)).toBe(false);
+    expect(await alwaysAsk("sites.save", { ...st, root: "/var/www/n2" })).toBe(true);
+    for (const root of ["/srv/pano/sites/victim/public", "/srv/pano/apps/web", "/srv/pano/edgeview/victim/public", "/srv/pano/static/web", "/srv/pano/containers/x", "/srv/pano", "/srv"]) {
+      expect(forbiddenStaticRoot(root)).toBe(true);
+      await expect(methods["sites.save"]!({ ...st, root }, "tester")).rejects.toThrow("pano's own directories");
+    }
+    for (const root of ["/var/www/n1", "/srv/www/n1", "/srv/panorama"]) expect(forbiddenStaticRoot(root)).toBe(false);
+  });
+
+  test("a proxy route never points at pano's own ports", async () => {
+    for (const port of [env.webPort, env.askPort, env.hookPort])
+      await expect(methods["sites.save"]!({ ...save, routes: `/ 127.0.0.1:${port}` }, "tester")).rejects.toThrow("pano's own port");
+  });
 });
