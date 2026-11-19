@@ -30,7 +30,7 @@ MCowBQYDK2VwAyEA9lt4OZWuOwWbBaaBlgtzcuzVwi3T/LZDJTpM0Q3wa8Y=
 
 # The oldest release a plain install (no PANO_VERSION) accepts. The release workflow raises it to
 # each new release; a validly signed but old release (known holes) is refused, not installed.
-MIN_VERSION="0.1.0"
+MIN_VERSION="0.1.1"
 
 fail() { printf 'pano install: %s\n' "$1" >&2; exit 1; }
 # version_lt A B: succeeds when A is an older release than B (major.minor.patch, a leading v and any -pre/+build ignored).
