@@ -302,7 +302,8 @@ export function createWebApp() {
   const runtimeList = () => call<{ runtime: string; version: string }[]>("runtimes.list");
   const appParams = (f: Record<string, any>) => {
     const [runtime, runtime_version] = String(f.runtime_ref ?? "").split("@");
-    return { ...f, runtime, runtime_version };
+    // "Python (new version)": the version comes from its own field.
+    return { ...f, runtime, runtime_version: runtime === "python" && !runtime_version ? f.python_version : runtime_version };
   };
 
   app.get("/apps", (c) => c.redirect("/projects"));
@@ -1091,7 +1092,8 @@ export function createWebApp() {
   // ---- runtimes
   app.get("/runtimes", async (c) => {
     const [installed, available, php] = await Promise.all([call("runtimes.list"), call("runtimes.available").catch(() => null), call("php.versions")]);
-    return page(c, t("Runtimes"), <RuntimesPage csrf={c.get("s").csrf} installed={installed} available={available} php={php} />);
+    const pythonAvailable = c.req.query("python") === "1" ? await call<string[]>("runtimes.availablePython").catch(() => []) : null;
+    return page(c, t("Runtimes"), <RuntimesPage csrf={c.get("s").csrf} installed={installed} available={available} php={php} pythonAvailable={pythonAvailable} />);
   });
   app.post("/runtimes/php/install", act("/runtimes", async (c, f) => {
     await call("php.install", { version: f.version }, actor(c));

@@ -36,6 +36,14 @@ export type AppRow = {
   preview_env_exclude?: string;
   env_groups?: string;
   http_redirect?: number;
+  /** Python apps */
+  py_server?: string;
+  py_app?: string;
+  py_requirements?: string;
+  py_collectstatic?: string;
+  py_migrate?: string;
+  py_static?: string;
+  py_workers?: number;
   suspended?: number;
   suspended_reason?: string;
   suspended_at?: number;
@@ -119,6 +127,9 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
   const a = p.app ?? {};
   const opts = p.runtimes.map((r) => `${r.runtime}@${r.version}`);
   const current = a.runtime ? `${a.runtime}@${a.runtime_version}` : opts[0];
+  // Python is optional: "new version" installs it (and uv) when this app first deploys; a pinned one not yet installed stays selectable.
+  const choices = [...opts, ...(current && current !== "python@" && !opts.includes(current) ? [current] : [])];
+  const pythonMinor = a.runtime === "python" ? (a.runtime_version ?? "").split(".").slice(0, 2).join(".") : "";
   return (
     <form method="post" action={p.action} class="grid-form">
       <Csrf token={p.csrf} />
@@ -128,11 +139,14 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
         <span>{t("Runtime")}</span>
         <select name="runtime_ref" required>
           {opts.length ? null : <option value="">— install a runtime first —</option>}
-          {opts.map((o) => (
+          {choices.map((o) => (
             <option value={o} selected={o === current}>
               {o.replace("@", " ")}
             </option>
           ))}
+          <option value="python@" selected={current === "python@"}>
+            Python (new version, installed on first deploy)
+          </option>
         </select>
       </label>
       <label class="field">
@@ -163,6 +177,60 @@ export function AppForm(p: { csrf: string; app?: Partial<AppRow>; runtimes: { ru
           (no port, never runs twice). Empty start: detected. With processes, Domains and Start command above are not used.
         </small>
       </label>
+      <details class="wide" open={a.runtime === "python"}>
+        <summary>{t("Python apps (optional)")}</summary>
+        <div class="grid-form">
+        <small class="muted wide">
+          Django, FastAPI, Flask or any WSGI/ASGI app. Dependencies go into a virtualenv per release (uv.lock, poetry.lock, requirements.txt or pyproject.toml, locked
+          where a lock exists); gunicorn (WSGI) or uvicorn (ASGI) listens on 127.0.0.1. Leave a field empty to detect it. Install, Build and Start command above
+          still win when set; use $PORT in a start command.
+        </small>
+      <Field label="Python version" name="python_version" value={pythonMinor} placeholder="3.13" hint="Only for the Python option above: 3.13 (newest patch, pinned at the first deploy) or 3.13.5" />
+      <Field label="Python app" name="py_app" value={a.py_app ?? ""} placeholder="config.wsgi:application" hint="module:attribute. Empty: Django's wsgi.py, or app/main.py, app.py ..." />
+      <label class="field">
+        <span>{t("Server")}</span>
+        <select name="py_server">
+          {[["auto", "Detect (gunicorn for WSGI, uvicorn for ASGI)"], ["gunicorn", "gunicorn (WSGI)"], ["uvicorn", "uvicorn (ASGI)"]].map(([val, label]) => (
+            <option value={val} selected={(a.py_server ?? "auto") === val}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <Field label="Requirements file" name="py_requirements" value={a.py_requirements ?? ""} placeholder="requirements/production.txt" hint="Empty: uv.lock, poetry.lock, requirements.txt, requirements/production.txt ..., then pyproject.toml" />
+      <Field label="Workers" name="py_workers" type="number" value={a.py_workers ?? 0} hint="0: from the memory limit (about 384 MB per worker)" />
+      {[
+        ["py_collectstatic", "Django collectstatic", a.py_collectstatic],
+        ["py_migrate", "Django migrate", a.py_migrate],
+      ].map(([name, label, val]) => (
+        <label class="field">
+          <span>{t(label!)}</span>
+          <select name={name}>
+            {[["auto", "Auto (when manage.py is found)"], ["on", "Always"], ["off", "Never"]].map(([o, text]) => (
+              <option value={o} selected={(val ?? "auto") === o}>
+                {text}
+              </option>
+            ))}
+          </select>
+          {name === "py_migrate" ? (
+            <small class="muted">Runs once per deploy before the traffic switch; if it fails, nothing is switched. Keep migrations compatible with the running release; a rollback does not undo them.</small>
+          ) : (
+            <small class="muted">Runs in the build with the app's variables. Skipped when you set a Build command.</small>
+          )}
+        </label>
+      ))}
+      <label class="field wide">
+        <span>{t("Static files")}</span>
+        <textarea name="py_static" rows={2} class="mono" spellcheck={false} placeholder={"/static | staticfiles"}>
+          {a.py_static ?? ""}
+        </textarea>
+        <small class="muted">
+          URL prefix | directory, one per line. The edge serves these files itself, from a copy made at each deploy. Empty: for Django, STATIC_URL and STATIC_ROOT are read after
+          collectstatic. Uploaded media is not served this way: keep it in DATA_DIR and serve it from the app or object storage.
+        </small>
+      </label>
+        </div>
+      </details>
       <Field label="Ask URL (catch-all TLS)" name="ask_url" value={a.ask_url} placeholder="http://127.0.0.1:4100/api/tls-ask" hint="for a * route" />
       <label class="check">
         <input type="hidden" name="auto_deploy" value="0" />

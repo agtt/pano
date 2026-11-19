@@ -10,8 +10,10 @@
 import { constants } from "node:fs";
 import { appendFile, open, readdir, type FileHandle } from "node:fs/promises";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { cpus } from "node:os";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { envSnapshot, groupList, mergeEnv, normalizeGroups } from "../shared/env.ts";
+import { PY_DEFAULTS, liveStatic, pythonCronScript, staticDir, pythonStartScript, validatePython, type PyFields } from "../shared/python.ts";
 import { normalizeEnvExclude, PREVIEW_MAX_DEFAULT, PREVIEW_TTL_DEFAULT, validatePreviewDomain } from "../shared/preview.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
@@ -22,6 +24,7 @@ import { parsePm2Ref, pm2App, pm2Logs, pm2Reload } from "./pm2.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
+import type { PyBuilt, PyCtx } from "./pydeploy.ts";
 import { ensureDir, exists, randomToken, readText, remove, removeAs, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
 
 export const appUser = (name: string) => `app-${name}`;
@@ -37,7 +40,7 @@ const deployLog = (id: number) => `${paths.deployLogs}/${id}.log`;
 
 // ---- create / update / delete ----------------------------------------------
 
-export type AppInput = {
+export type AppInput = PyFields & {
   name: string;
   domains: string[];
   runtime: Runtime;
@@ -69,14 +72,15 @@ export const flag = (x: unknown, missing: 0 | 1): number => (x === undefined ? m
 
 export function validateAppInput(x: Record<string, unknown>): AppInput {
   const processes = Array.isArray(x.processes) ? parseProcesses(x.processes.join("\n")) : parseProcesses(String(x.processes ?? ""));
+  const runtime = v.runtime(x.runtime ?? "node");
   const askUrl = String(x.ask_url ?? "").trim();
   if (askUrl && !/^http:\/\/127\.0\.0\.1:\d{2,5}\/[A-Za-z0-9._~\/-]*$/.test(askUrl)) throw new Error("ask URL must be http://127.0.0.1:PORT/path");
   return {
     name: v.appName(x.name),
     // With processes, routes live on each process and the app-level fields are unused.
     domains: processes.length || !x.domains ? [] : v.domains(x.domains),
-    runtime: v.runtime(x.runtime ?? "node"),
-    runtime_version: v.version(x.runtime_version),
+    runtime,
+    runtime_version: v.runtimeVersion(runtime, x.runtime_version),
     repo: v.gitUrl(x.repo),
     branch: v.branch(x.branch || "main"),
     root_dir: v.subdir(x.root_dir),
@@ -100,6 +104,8 @@ export function validateAppInput(x: Record<string, unknown>): AppInput {
     env_groups: normalizeGroups(x.env_groups),
     // On unless turned off: plain HTTP is redirected to HTTPS.
     http_redirect: flag(x.http_redirect, 1),
+    // Python settings: other runtimes keep the defaults, so Node.js and Bun apps are untouched.
+    ...(runtime === "python" ? validatePython(x) : PY_DEFAULTS),
   };
 }
 
@@ -198,6 +204,8 @@ export async function teardownUnits(name: string, removeFiles: boolean) {
     await remove(`${paths.systemd}/${file}`);
   }
   await run(["systemctl", "daemon-reload"], { check: false });
+  // Copies of collected static files for the edge (Python apps); derived data, gone with the app or preview.
+  await remove(`${paths.static}/${name}`);
   if (removeFiles) {
     // What the app could write goes first, as the app's user (see removeAs); root then removes only its
     // own layout (run/, shared/, slot links) and whatever the user could not.
@@ -226,12 +234,21 @@ async function unitFiles(name: string): Promise<string[]> {
 
 // ---- systemd ---------------------------------------------------------------
 
+/** Loaded only when a Python app needs it (and never on a server without one). */
+const pyModule = () => import("./python.ts");
+const pyDeploy = () => import("./pydeploy.ts");
+
 /**
  * PATH for builds and processes. Monorepos often mix runtimes (bun as package
  * manager, node to run Next.js), so the newest installed version of the other
  * runtime follows the app's pinned one.
  */
 async function toolPath(app: App): Promise<string> {
+  // Python apps get uv and their Python only: no Node.js or Bun is installed or put on PATH for them.
+  if (app.runtime === "python") {
+    const uv = await pyModule().then((m) => m.uvDir());
+    return [...(uv ? [uv] : []), runtimeBin(app.runtime, app.runtime_version), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
+  }
   const dirs = [runtimeBin(app.runtime, app.runtime_version)];
   const other = (await installed()).find((r) => r.runtime !== app.runtime);
   if (other) dirs.push(runtimeBin(other.runtime, other.version));
@@ -279,6 +296,14 @@ SystemCallErrorNumber=ENOSYS
 /** Shared variable groups, read by systemd (as root) before the app's own .env, which wins. */
 const groupEnvLines = (app: App) => groupList(app.env_groups ?? "").map((g) => `EnvironmentFile=-${groupFile(g)}\n`).join("");
 
+/** The fixed Environment= line of a process: Node.js and Bun apps as they always were, Python apps without Node variables. */
+function processEnv(app: App, home: string): string {
+  const common = `HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data`;
+  return app.runtime === "python"
+    ? `Environment=PYTHONUNBUFFERED=1 HOSTNAME=127.0.0.1 ${common}`
+    : `Environment=NODE_ENV=production HOSTNAME=127.0.0.1 ${common} NEXT_TELEMETRY_DISABLED=1`;
+}
+
 export function renderUnit(app: App, p: Process, path: string): string {
   const home = appHome(app.name);
   const sub = [app.root_dir, p.dir].filter(Boolean).join("/");
@@ -296,7 +321,7 @@ Group=${appUser(app.name)}
 WorkingDirectory=${home}/slot-%i${sub ? `/${sub}` : ""}
 ${groupEnvLines(app)}EnvironmentFile=-${home}/shared/.env
 EnvironmentFile=${home}/run/${key}-%i.env
-Environment=NODE_ENV=production HOSTNAME=127.0.0.1 HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data NEXT_TELEMETRY_DISABLED=1
+${processEnv(app, home)}
 Environment=PATH=${path}
 ExecStart=${home}/run/${key}-%i.sh
 Restart=always
@@ -339,7 +364,7 @@ export async function writeUnits(app: App, deploy?: { slot: "a" | "b"; starts: M
     const start = deploy.starts.get(p.name) || "bun run start";
     await writeAtomic(
       runFile(app.name, p, deploy.slot, "sh"),
-      `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:${rootBin}:$PATH"\nexec ${start}\n`,
+      app.runtime === "python" ? pythonStartScript(`${home}/slot-${deploy.slot}`, start) : `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:${rootBin}:$PATH"\nexec ${start}\n`,
       0o755,
     );
   }
@@ -376,7 +401,9 @@ export async function rollback(name: string, actor: string) {
   for (const p of procs.filter(isWeb)) await run(["systemctl", "restart", unitName(name, p, to)]);
   for (const p of procs.filter(isWeb)) await healthCheck(app, p, to, log);
   // The older build's env is not known: no redeploy hint until the next deploy.
-  apps.update(name, { active_slot: to, current_release: release, env_running: envSnapshot(await effectiveEnv(app)), env_built: "" });
+  // A Python app's static files are per slot: the older release serves the ones it had, or none.
+  const noStatic = app.runtime === "python" && !!liveStatic(app.static_live).length && !(await exists(staticDir(name, to, 0)));
+  apps.update(name, { active_slot: to, current_release: release, env_running: envSnapshot(await effectiveEnv(app)), env_built: "", ...(noStatic ? { static_live: "" } : {}) });
   await run(["ln", "-sfn", fsPath(`${home}/slot-${to}`), fsPath(`${home}/current`)]);
   for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(name, p, to)], { check: false });
   await applyEdge();
@@ -416,6 +443,11 @@ const cronBase = (app: string, i: number) => `pano-cron-${app}-${i}`;
 /** The timers of an app's cron jobs. */
 export const cronTimers = (app: App) => app.crons.map((_, i) => `${cronBase(app.name, i)}.timer`);
 
+const cronEnv = (app: App, home: string) =>
+  app.runtime === "python"
+    ? `Environment=PYTHONUNBUFFERED=1 HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data`
+    : `Environment=NODE_ENV=production HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data`;
+
 /** One timer + oneshot service per job, in the live release, with the app's user, env and sandbox. Never two runs at once. */
 export async function writeCrons(app: App) {
   const home = appHome(app.name);
@@ -429,7 +461,11 @@ export async function writeCrons(app: App) {
   const dir = `${home}/current${app.root_dir ? `/${app.root_dir}` : ""}`;
   for (const [i, c] of app.crons.entries()) {
     const base = cronBase(app.name, i);
-    await writeAtomic(`${home}/run/cron-${i}.sh`, `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:$PATH"\n${c.command}\n`, 0o755);
+    await writeAtomic(
+      `${home}/run/cron-${i}.sh`,
+      app.runtime === "python" ? pythonCronScript(`${home}/current`, c.command) : `#!/bin/sh\nset -e\nPATH="$PWD/node_modules/.bin:$PATH"\n${c.command}\n`,
+      0o755,
+    );
     await writeAtomic(
       `${paths.systemd}/${base}.service`,
       `[Unit]
@@ -441,7 +477,7 @@ User=${appUser(app.name)}
 Group=${appUser(app.name)}
 WorkingDirectory=${dir}
 ${groupEnvLines(app)}EnvironmentFile=-${home}/shared/.env
-Environment=NODE_ENV=production HOME=${home} XDG_CACHE_HOME=${home}/cache DATA_DIR=${home}/data PANO_CRON=${i}
+${cronEnv(app, home)} PANO_CRON=${i}
 Environment=PATH=${path}
 ExecStart=${home}/run/cron-${i}.sh
 TimeoutStartSec=1h
@@ -645,14 +681,27 @@ async function deploy(app: App, id: number, target: DeployTarget) {
   let binPath = await toolPath(app);
   let commit = "";
   let builtEnv = "";
+  const py = app.runtime === "python";
+  let staticLive: string[] = [];
 
   try {
     await ensureAppHome(app.name); // brings homes made before the root-owned layout up to date
     await target.prepare?.();
-    if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
+    if (py) {
+      // Python is optional: installed here, the first time an app that needs it deploys (checksum-verified, see python.ts).
+      await step(`python ${app.runtime_version} runtime and uv`);
+      const pinned = await (await pyModule()).ensurePython(app.runtime_version, log);
+      if (pinned !== app.runtime_version) {
+        // "3.14" is pinned to the exact patch it resolved to; a preview keeps its parent's setting and only uses the pin for this build.
+        target.update({ runtime_version: pinned });
+        app = { ...app, runtime_version: pinned };
+        await log(`pinned python ${pinned}`);
+      }
+      binPath = await toolPath(app);
+    } else if (!(await exists(runtimeBin(app.runtime, app.runtime_version)))) {
       throw new Error(`${app.runtime} ${app.runtime_version} is not installed (Runtimes page)`);
     }
-    if (app.runtime !== "bun" && !(await installed()).some((r) => r.runtime === "bun")) {
+    if (!py && app.runtime !== "bun" && !(await installed()).some((r) => r.runtime === "bun")) {
       await step("install bun (package manager)");
       const { bun } = await available();
       if (!bun[0]) throw new Error("cannot reach github.com to fetch bun");
@@ -674,10 +723,10 @@ async function deploy(app: App, id: number, target: DeployTarget) {
       await run(["ln", "-sfn", fsPath(`${home}/shared/.env`), fsPath(`${d}/.env`)], { user, check: false });
     }
 
-    const plan = await detectPlan(app, workdir);
+    const plan = py ? null : await detectPlan(app, workdir);
     // One Next.js build cache per process, outside the releases: faster rebuilds, no copy per release.
     // An isolated build cannot reach it and starts empty.
-    for (const p of app.build_isolated ? [] : procs) {
+    for (const p of app.build_isolated || py ? [] : procs) {
       const d = p.dir ? `${workdir}/${p.dir}` : workdir;
       if (!(await readText(`${d}/package.json`))?.includes('"next"')) continue;
       // cache/ is the app's: created as the app, never chmod'ed by root through a path it can swap.
@@ -685,26 +734,52 @@ async function deploy(app: App, id: number, target: DeployTarget) {
       await run(["mkdir", "-p", "-m", "0750", fsPath(`${d}/.next`)], { user }); // inside the repo: as the app, never as root
       await run(["ln", "-sfn", fsPath(`${home}/cache/next-${p.name || "main"}`), fsPath(`${d}/.next/cache`)], { user, check: false });
     }
-    if (plan.install) {
-      await step(plan.install);
-      await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false, release: dir });
+    if (plan) {
+      if (plan.install) {
+        await step(plan.install);
+        await sandbox(app, ["/bin/sh", "-c", plan.install], { cwd: workdir, env: { PATH: binPath }, onLine: log, envFile: false, release: dir });
+      }
+      // What this build and the new processes read; compared later to tell what a restart or redeploy would change.
+      builtEnv = envSnapshot(await effectiveEnv(app));
+      if (plan.build) {
+        await step(plan.build);
+        await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true, release: dir });
+      }
     }
-    // What this build and the new processes read; compared later to tell what a restart or redeploy would change.
-    builtEnv = envSnapshot(await effectiveEnv(app));
-    if (plan.build) {
-      await step(plan.build);
-      await sandbox(app, ["/bin/sh", "-c", plan.build], { cwd: workdir, env: { PATH: binPath, NODE_ENV: "production" }, onLine: log, envFile: true, release: dir });
+    // Python: dependencies into this release's virtualenv, Django collectstatic.
+    const pyCtx: PyCtx | null = py
+      ? {
+          app, dir, workdir, path: binPath, cache: app.build_isolated ? isolatedCache(dir) : `${home}/cache`, log, step,
+          sb: (argv, o) => sandbox(app, argv, { cwd: workdir, onLine: o.onLine ?? log, envFile: o.envFile, release: dir, env: { PATH: binPath, ...o.env } }),
+        }
+      : null;
+    let built: PyBuilt | null = null;
+    if (pyCtx) {
+      builtEnv = envSnapshot(await effectiveEnv(app));
+      built = await (await pyDeploy()).buildPython(pyCtx);
     }
     // An isolated build's caches go with it; installed packages stay (hard links).
     if (app.build_isolated) await removeAs(isolatedCache(dir), user);
-    if (!app.processes.length && plan.start !== app.start_cmd) {
+    if (plan && !app.processes.length && plan.start !== app.start_cmd) {
       target.update({ start_cmd: plan.start });
       app = target.get()!;
     }
     const starts = new Map<string, string>();
     for (const p of procsOf(app)) {
-      starts.set(p.name, p.start || (p.name ? await detectStart(app.runtime, p.dir ? `${workdir}/${p.dir}` : workdir, plan.pm) : plan.start));
-      if (p.name) await log(`process ${p.name}: ${starts.get(p.name)}`);
+      if (built) {
+        // A named process needs its own start command; the unnamed one is the detected web server.
+        if (!p.start && p.name) throw new Error(`process ${p.name} needs a start command`);
+        starts.set(p.name, p.start || (await pyDeploy()).startFor(built.plan, app, p.memory_mb, cpus().length));
+      } else starts.set(p.name, p.start || (p.name ? await detectStart(app.runtime, p.dir ? `${workdir}/${p.dir}` : workdir, plan!.pm) : plan!.start));
+      if (p.name || built) await log(`process ${p.name || "web"}: ${starts.get(p.name)}`);
+    }
+    if (pyCtx && built) {
+      const mod = await pyDeploy();
+      // The server (gunicorn/uvicorn) in the venv, then the release step, then static files for the edge:
+      // all before anything of the new release starts, so a failure here leaves the live release alone.
+      await mod.ensureServers(pyCtx, starts.values());
+      await mod.migrate(pyCtx, built.plan);
+      staticLive = await mod.publishStatic(pyCtx, slot, built.maps);
     }
     await writeUnits(app, { slot, starts });
 
@@ -722,7 +797,7 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     if (!now) throw new Error("removed while it was building");
     // Suspended while it was building: never switch traffic to it (the failure path stops the new slot).
     if (now.suspended) throw new Error("suspended while it was building");
-    target.update({ active_slot: slot, current_release: release, env_running: builtEnv, env_built: builtEnv });
+    target.update({ active_slot: slot, current_release: release, env_running: builtEnv, env_built: builtEnv, ...(py ? { static_live: JSON.stringify(staticLive) } : {}) });
     await run(["ln", "-sfn", fsPath(`${home}/slot-${slot}`), fsPath(`${home}/current`)]);
     await writeCrons(target.get()!);
     for (const p of procs.filter(isWeb)) await run(["systemctl", "enable", unitName(app.name, p, slot)], { check: false });
@@ -752,6 +827,7 @@ async function deploy(app: App, id: number, target: DeployTarget) {
       await run(["systemctl", "stop", ...procs.map((p) => unitName(app.name, p, slot))], { check: false });
       // A release that never went live is only disk space.
       await removeAs(dir, user).catch(() => {});
+      if (py) await remove(`${paths.static}/${app.name}/${slot}`).catch(() => {});
     }
     deploys.finish(id, { status: "failed", error: msg.slice(0, 500) });
     if (!target.quiet) void notify(`🔴 deploy of ${app.name} failed: ${msg.slice(0, 300)}`);

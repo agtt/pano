@@ -6,6 +6,7 @@
 
 import { readdir } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
+import { liveStatic, staticDir } from "../shared/python.ts";
 import { remoteDomains } from "./remotedb-config.ts";
 import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { cloudflareRanges } from "./cloudflare.ts";
@@ -131,6 +132,13 @@ export function appRoutes(a: App): Map<string, Route[]> {
       add(i < 0 ? r : r.slice(0, i), i < 0 ? "/" : r.slice(i), port);
     }
   }
+  // Collected static files (Python apps): the edge answers these paths itself, on every host of the app.
+  const urls = a.active_slot ? liveStatic(a.static_live) : [];
+  if (urls.length) {
+    for (const host of [...out.keys()]) {
+      urls.forEach((url, i) => out.set(host, [...out.get(host)!, { path: url, upstream: "", static: staticDir(a.name, a.active_slot, i) }]));
+    }
+  }
   return out;
 }
 
@@ -140,11 +148,14 @@ function routeLines(routes: Route[], notFound = false): string[] {
   const out: string[] = [];
   // A redirect route answers itself; the target was checked by parseSiteRoutes (no spaces, quotes or braces but {uri}).
   // The "*" matcher is needed: Caddy would read a target starting with "/" as a path matcher.
-  const action = (r: Route) => (r.redirect ? `\t\tredir * ${r.redirect} ${r.code ?? 301}` : `\t\treverse_proxy ${r.upstream}`);
+  const action = (r: Route, prefix = "") =>
+    r.static
+      ? [`\t\turi strip_prefix ${prefix}`, `\t\troot * ${r.static}`, '\t\theader ?Cache-Control "public, max-age=3600"', "\t\tfile_server"].join("\n")
+      : r.redirect ? `\t\tredir * ${r.redirect} ${r.code ?? 301}` : `\t\treverse_proxy ${r.upstream}`;
   sorted.forEach((r, i) => {
     if (r.path === "/") return;
     const prefix = r.path.replace(/\/$/, "");
-    out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, action(r), "\t}");
+    out.push(`\t@route${i} path ${prefix} ${prefix}/*`, `\thandle @route${i} {`, action(r, prefix), "\t}");
   });
   const root = sorted.find((r) => r.path === "/");
   if (root) out.push("\thandle {", action(root), "\t}");

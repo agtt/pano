@@ -47,6 +47,7 @@ export function appType(a: ProjAppRow): TypeTag {
   if (a.kind === "managed") {
     // No framework is stored: the commands tell Next.js apart; auto-detected ones count as their runtime.
     if (/(^|[\s/])next(\s|$)/.test(`${a.build_cmd ?? ""} ${a.start_cmd ?? ""}`)) return { label: "Next.js", tone: "js" };
+    if (a.runtime === "python") return { label: "Python", tone: "web" };
     return { label: a.runtime === "bun" ? "Bun" : "Node", tone: "js" };
   }
   return a.external_unit.startsWith("pm2:") ? { label: "PM2", tone: "ext" } : { label: t("External"), tone: "ext" };

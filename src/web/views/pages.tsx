@@ -686,6 +686,8 @@ export function RuntimesPage(p: {
   installed: { runtime: string; version: string; inUse: boolean }[];
   available: { node: { version: string; lts: string | false }[]; bun: string[] } | null;
   php: PhpVersion[];
+  /** newest patch of each Python minor; null until the admin asks (a GitHub call), [] when unreachable */
+  pythonAvailable?: string[] | null;
 }) {
   const have = new Set(p.installed.map((r) => `${r.runtime}@${r.version}`));
   const InstallBtn = ({ rt, ver, label }: { rt: string; ver: string; label?: string }) =>
@@ -792,6 +794,35 @@ export function RuntimesPage(p: {
             </tr>
           ))}
         </table>
+      </Card>
+      <Card title="Python">
+        <p class="muted small">
+          Optional: nothing of Python (no interpreter, no uv, no build packages) is installed or runs until you install a version here or deploy your first Python
+          app. Interpreters are python-build-standalone builds checked against the release's SHA-256 list, side by side like Node.js; packages come from uv into one
+          virtualenv per release, never from the system's Python or pip. Delete the last version and uv goes with it (build packages such as gcc stay).
+        </p>
+        <form method="post" action="/runtimes/install" class="row">
+          <Csrf token={p.csrf} />
+          <input type="hidden" name="runtime" value="python" />
+          <input name="version" placeholder="3.13 or 3.13.5" required autocomplete="off" spellcheck={false} />
+          <button class="btn small">{t("Install")}</button>
+        </form>
+        {p.pythonAvailable ? (
+          <table class="compact">
+            {p.pythonAvailable.map((ver) => (
+              <tr>
+                <td>Python {ver}</td>
+                <td>
+                  <InstallBtn rt="python" ver={ver} />
+                </td>
+              </tr>
+            ))}
+          </table>
+        ) : (
+          <p class="small">
+            <a href="/runtimes?python=1">Show installable versions</a> (asks github.com)
+          </p>
+        )}
       </Card>
     </div>
   );

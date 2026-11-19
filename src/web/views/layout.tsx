@@ -36,7 +36,7 @@ export const NAV: NavItem[] = [
       { href: "/services", label: "Services", find: "mariadb postgres valkey redis realtime turn" },
       { href: "/jobs", label: "Jobs", find: "cron queues workers" },
       { href: "/containers", label: "Containers", find: "docker podman" },
-      { href: "/runtimes", label: "Runtimes", find: "node bun php versions" },
+      { href: "/runtimes", label: "Runtimes", find: "node bun python php versions" },
     ],
   },
   {

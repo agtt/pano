@@ -113,7 +113,7 @@ export const ENV_MASK = "••••••••";
 /** App fields that decide what runs as the app (and so can read its secrets): changing one always asks. */
 // preview_env_exclude decides which secrets branch code receives; env_groups hands shared secrets to the app's code.
 // build_isolated: turning it off lets install scripts reach the deploy key and data again.
-const RUN_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "preview_env_exclude", "env_groups", "build_isolated"] as const;
+const RUN_FIELDS = ["repo", "branch", "root_dir", "runtime", "runtime_version", "install_cmd", "build_cmd", "start_cmd", "processes", "crons", "preview_env_exclude", "env_groups", "build_isolated", "py_server", "py_app", "py_requirements", "py_collectstatic", "py_migrate", "py_static", "py_workers"] as const;
 /** Where the app is served: guarded, but routine (the trusted window covers it). */
 const CODE_FIELDS = [...RUN_FIELDS, "domains", "ask_url", "preview_domain", "http_redirect"] as const;
 
@@ -142,7 +142,7 @@ export function needsOtp(method: string, p: P): boolean {
  * (NODE_OPTIONS=--import=data:..., LD_PRELOAD, a proxy, a CA file): setting one is planting code.
  */
 const RUNTIME_ENV =
-  /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|BUN_.*|DENO_.*|LD_.*|DYLD_.*|PATH|PYTHON.*|PERL5?LIB|PERL5OPT|RUBYOPT|RUBYLIB|GEM_HOME|GEM_PATH|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|PHPRC|PHP_INI_SCAN_DIR|BASH_ENV|ENV|SHELLOPTS|PS4|GIT_.*|NPM_CONFIG_.*|YARN_.*|COREPACK_.*|GCONV_PATH|HOSTALIASES|LOCALDOMAIN|RES_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i;
+  /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|BUN_.*|DENO_.*|LD_.*|DYLD_.*|PATH|PYTHON.*|VIRTUAL_ENV|UV_.*|PIP_.*|PERL5?LIB|PERL5OPT|RUBYOPT|RUBYLIB|GEM_HOME|GEM_PATH|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|PHPRC|PHP_INI_SCAN_DIR|BASH_ENV|ENV|SHELLOPTS|PS4|GIT_.*|NPM_CONFIG_.*|YARN_.*|COREPACK_.*|GCONV_PATH|HOSTALIASES|LOCALDOMAIN|RES_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i;
 
 /** True when the new variables add or change a runtime variable. */
 export const changesRuntimeEnv = (next: Record<string, string>, cur: Record<string, string>) =>
@@ -374,11 +374,13 @@ export const methods: Record<string, Handler> = {
   // ---- runtimes
   "runtimes.list": async () => {
     const used = new Set(apps.list().map((a) => `${a.runtime}@${a.runtime_version}`));
-    return (await runtimes.installed()).map((r) => ({ ...r, inUse: used.has(`${r.runtime}@${r.version}`) }));
+    return (await runtimes.installedAll()).map((r) => ({ ...r, inUse: used.has(`${r.runtime}@${r.version}`) }));
   },
   "runtimes.available": () => runtimes.available(),
+  // Python is optional: only asked for when the admin opens the list (a GitHub call), never on a plain page load.
+  "runtimes.availablePython": async () => (await import("./python.ts")).availablePython(),
   "runtimes.install": async (p, actor) => {
-    await runtimes.install(v.runtime(p.runtime), p.version);
+    await runtimes.install(v.runtime(p.runtime), p.runtime === "python" ? v.pythonVersion(p.version) : p.version);
     audit(actor, "runtime.install", { runtime: p.runtime, version: p.version });
   },
   "runtimes.uninstall": async (p, actor) => {
