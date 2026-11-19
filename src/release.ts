@@ -31,6 +31,14 @@ export function parseSums(text: string): Map<string, string> {
 /** The `# pano vX.Y.Z` line the release workflow writes first into SHA256SUMS. */
 export const signedTag = (sums: string) => sums.match(/^# pano (v[0-9][\w.+-]*)$/m)?.[1] ?? null;
 
+/** -1, 0 or 1 comparing the leading x.y.z of two versions (a leading v is ignored). */
+export function cmpVersion(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(/[.-]/).slice(0, 3).map(Number);
+  const pb = b.replace(/^v/, "").split(/[.-]/).slice(0, 3).map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
+  return 0;
+}
+
 export function assetName(arch: string = process.arch): string {
   if (arch === "x64") return "pano-linux-x64";
   if (arch === "arm64") return "pano-linux-arm64";
@@ -49,8 +57,13 @@ async function gh(url: string, accept: string): Promise<Response> {
   return res;
 }
 
-/** Downloads the latest release's binary for this arch into a fresh temp dir, verified against SHA256SUMS. */
-export async function fetchLatest(): Promise<{ file: string; sha: string; tag: string; cleanup: () => Promise<void> }> {
+type Latest = { upToDate: true; tag: string } | { upToDate: false; file: string; sha: string; tag: string; cleanup: () => Promise<void> };
+
+/**
+ * Downloads the latest release's binary for this arch into a fresh temp dir, verified against SHA256SUMS.
+ * With `running`, a signed release that is not newer is reported as up to date and its binary is not downloaded.
+ */
+export async function fetchLatest(running?: string): Promise<Latest> {
   const repo = process.env.PANO_REPO ?? "agtt/pano";
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("PANO_REPO must look like owner/name");
   const rel = (await (await gh(`https://api.github.com/repos/${repo}/releases/latest`, "application/vnd.github+json")).json()) as { tag_name: string; assets: Asset[] };
@@ -67,6 +80,7 @@ export async function fetchLatest(): Promise<{ file: string; sha: string; tag: s
   if (signedTag(text) !== rel.tag_name) throw new Error(`the signed SHA256SUMS is for ${signedTag(text) ?? "no release"}, not ${rel.tag_name}`);
   const sha = parseSums(text).get(bin);
   if (!sha) throw new Error(`${bin} is not listed in SHA256SUMS of ${rel.tag_name}`);
+  if (running && cmpVersion(rel.tag_name, running) <= 0) return { upToDate: true, tag: rel.tag_name };
   const dir = await mkdtemp(`${tmpdir()}/pano-update-`);
   const cleanup = () => rm(dir, { recursive: true, force: true });
   try {
@@ -74,7 +88,7 @@ export async function fetchLatest(): Promise<{ file: string; sha: string; tag: s
     if (new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== sha) throw new Error(`${bin} does not match SHA256SUMS`);
     const file = `${dir}/${bin}`;
     await Bun.write(file, bytes);
-    return { file, sha, tag: rel.tag_name, cleanup };
+    return { upToDate: false, file, sha, tag: rel.tag_name, cleanup };
   } catch (e) {
     await cleanup();
     throw e;

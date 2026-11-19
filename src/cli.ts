@@ -131,7 +131,12 @@ async function main() {
       if (args.includes("--latest")) {
         if (file || sha) fail(usage);
         const { fetchLatest } = await import("./release.ts");
-        const rel = await fetchLatest();
+        // --allow-downgrade also reinstalls the running release
+        const rel = await fetchLatest(allowDowngrade ? undefined : VERSION);
+        if (rel.upToDate) {
+          console.log(`pano ${VERSION} is up to date (latest release ${rel.tag})`);
+          break;
+        }
         console.log(`latest release ${rel.tag}, checksum verified`);
         try {
           await update(rel.file, rel.sha, allowDowngrade);

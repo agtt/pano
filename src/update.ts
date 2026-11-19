@@ -8,6 +8,7 @@
 
 import { Database } from "bun:sqlite";
 import { chmod, copyFile, rename, rm } from "node:fs/promises";
+import { cmpVersion } from "./release.ts";
 import { VERSION, fsPath, paths } from "./shared/config.ts";
 
 const BIN = fsPath(`${paths.bin}/pano`);
@@ -17,14 +18,6 @@ const STATE_PREV = fsPath(`${paths.data}/state.db.prev`);
 
 const sh = (argv: string[]) => Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe" });
 const exists = (p: string) => Bun.file(p).exists();
-
-/** -1, 0 or 1 comparing the leading x.y.z of two versions. */
-function cmpVersion(a: string, b: string): number {
-  const pa = a.split(/[.-]/).slice(0, 3).map(Number);
-  const pb = b.split(/[.-]/).slice(0, 3).map(Number);
-  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0) ? -1 : 1;
-  return 0;
-}
 
 export async function update(src: string, sha: string, allowDowngrade = false) {
   if (process.getuid?.() !== 0) throw new Error("run as root");
