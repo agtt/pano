@@ -1,11 +1,11 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { renderUnit, teardownUnits, validateAppInput } from "../src/agent/apps.ts";
 import { renderCaddyfile } from "../src/agent/edge.ts";
 import { migrate } from "../src/agent/pydeploy.ts";
-import { readRepo, snapshotStatic, uninstallPython } from "../src/agent/python.ts";
+import { readRepo, snapshotStatic, stageInstall, uninstallPython } from "../src/agent/python.ts";
 import { installed, installedAll, runtimeBin } from "../src/agent/runtimes.ts";
 import { alwaysAsk, changesRuntimeEnv, methods } from "../src/agent/rpc.ts";
 import { previewApp, type App } from "../src/agent/state.ts";
@@ -594,5 +594,66 @@ describe("repository reading and static snapshot (real files)", () => {
     symlinkSync(real, join(dir, "reqs"));
     const r = await readRepo(logical(dir), "reqs/prod.txt", logical(dir));
     expect(r.texts["reqs/prod.txt"]).toBeUndefined();
+  });
+
+  test("a directory swapped for a link to another tree is never walked: no names of it appear, nothing is copied", async () => {
+    const rel = join(tmp, "release5");
+    const src = join(rel, "staticfiles");
+    mkdirSync(join(src, "a/b"), { recursive: true });
+    writeFileSync(join(src, "a/b/x.css"), "x");
+    const other = join(tmp, "tenants");
+    mkdirSync(join(other, "b/other-tenant-dir"), { recursive: true });
+    writeFileSync(join(other, "b/secret"), "s");
+    let swapped = false;
+    const dest = `${paths.static}/dirswap/a/0`;
+    const r = await snapshotStatic(logical(src), logical(rel), dest, {
+      beforeOpen: (path) => {
+        if (!swapped && path.endsWith("staticfiles/a/b")) {
+          swapped = true;
+          renameSync(join(src, "a"), join(rel, "a-moved"));
+          symlinkSync(other, join(src, "a"));
+        }
+      },
+    });
+    expect(swapped).toBe(true);
+    expect(r.files).toBe(0);
+    const out = fsPath(dest);
+    expect(existsSync(join(out, "a/b/other-tenant-dir"))).toBe(false);
+    expect(existsSync(join(out, "a/b/secret"))).toBe(false);
+  });
+
+  test("the walk is capped: too many directories or too slow aborts instead of stalling the queue", async () => {
+    const rel = join(tmp, "release6");
+    const src = join(rel, "sf");
+    for (const d of ["1", "2", "3", "4"]) mkdirSync(join(src, d), { recursive: true });
+    await expect(snapshotStatic(logical(src), logical(rel), `${paths.static}/cap/a/0`, { maxDirs: 3 })).rejects.toThrow(/too many directories/);
+    await expect(snapshotStatic(logical(src), logical(rel), `${paths.static}/cap/a/0`, { maxMs: -1 })).rejects.toThrow(/too slow/);
+    expect((await snapshotStatic(logical(src), logical(rel), `${paths.static}/cap/a/0`)).skipped).toBe(0);
+  });
+
+  test("runtime installs: stale staging directories are swept, a final directory without its main file is replaced", async () => {
+    const parent = join(tmp, "runtimes/python");
+    mkdirSync(parent, { recursive: true });
+    mkdirSync(join(parent, ".stage-old"));
+    mkdirSync(join(parent, ".stage-new"));
+    const old = new Date(Date.now() - 2 * 3_600_000);
+    utimesSync(join(parent, ".stage-old"), old, old);
+    mkdirSync(join(parent, "3.14.9/bin"), { recursive: true }); // half-extracted: no bin/python3
+    writeFileSync(join(parent, "3.14.9/bin/leftover"), "x");
+    await stageInstall(logical(join(parent, "3.14.9")), "bin/python3", async (stage) => {
+      mkdirSync(fsPath(`${stage}/bin`), { recursive: true });
+      writeFileSync(fsPath(`${stage}/bin/python3`), "#!");
+    });
+    expect(existsSync(join(parent, ".stage-old"))).toBe(false);
+    expect(existsSync(join(parent, ".stage-new"))).toBe(true);
+    expect(existsSync(join(parent, "3.14.9/bin/python3"))).toBe(true);
+    expect(existsSync(join(parent, "3.14.9/bin/leftover"))).toBe(false);
+    // a complete one stays as it is
+    await stageInstall(logical(join(parent, "3.14.9")), "bin/python3", async (stage) => {
+      mkdirSync(fsPath(`${stage}/bin`), { recursive: true });
+      writeFileSync(fsPath(`${stage}/bin/python3`), "second");
+    });
+    expect(readFileSync(join(parent, "3.14.9/bin/python3"), "utf8")).toBe("#!");
+    expect(readdirSync(parent).filter((n) => n.startsWith(".stage-")).sort()).toEqual([".stage-new"]);
   });
 });

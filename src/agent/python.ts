@@ -91,18 +91,30 @@ async function once<T>(key: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Staging directories a crashed install left (older than an hour, so one still being filled is safe). */
+async function sweepStale(parent: string) {
+  for (const name of await readdir(fsPath(parent)).catch(() => [] as string[])) {
+    if (!name.startsWith(".stage-")) continue;
+    const st = await lstat(fsPath(`${parent}/${name}`)).catch(() => null);
+    if (st && Date.now() - st.mtimeMs > 3_600_000) await remove(`${parent}/${name}`);
+  }
+}
+
 /**
  * Extracts into a staging directory (ignored by every listing), checks it, then renames it into place:
  * a crash half way leaves no directory that looks installed, and a failure never touches a directory
  * another install finished meanwhile.
  */
-async function stageInstall(final: string, probe: string, fetchInto: (stage: string, tmp: string) => Promise<void>) {
+export async function stageInstall(final: string, probe: string, fetchInto: (stage: string, tmp: string) => Promise<void>) {
   const stage = `${dirname(final)}/.stage-${randomToken(6)}`;
   const tmp = `${paths.data}/tmp/${randomToken(6)}`;
+  await sweepStale(dirname(final));
   try {
     await fetchInto(stage, tmp);
     if (!DRY_RUN && !(await exists(`${stage}/${probe}`))) throw new Error(`the archive has no ${probe}`);
-    if (await exists(final)) return;
+    if (await exists(`${final}/${probe}`)) return;
+    // A directory without its main file is what a crash or a manual delete left: replaced, not trusted.
+    await remove(final);
     await rename(fsPath(stage), fsPath(final));
   } finally {
     await remove(stage);
@@ -182,10 +194,14 @@ const MAX_TEXT = 512 * 1024;
 async function fdPath(fh: FileHandle, path: string): Promise<string> {
   try {
     return await readlink(`/proc/self/fd/${fh.fd}`);
-  } catch {
+  } catch (e) {
+    // On Linux a descriptor without a readable path is not trusted (never a path lookup that could be redirected).
+    if (process.platform === "linux") throw e;
     return realpath(path);
   }
 }
+/** How to name the directory an open descriptor holds: through /proc on Linux, by path in development. */
+const viaFd = (fh: FileHandle, path: string) => (process.platform === "linux" ? `/proc/self/fd/${fh.fd}` : fsPath(path));
 const under = (path: string, root: string) => path.startsWith(root + "/");
 
 /**
@@ -274,10 +290,13 @@ const MAX_FILES = 100_000;
 const MAX_BYTES = 4 * 1024 ** 3;
 
 export type SnapshotOptions = {
-  /** only files owned by this uid (the app's user) are copied */
+  /** only files and directories owned by this uid (the app's user) are used */
   uid?: number;
-  /** called before each file is opened; tests swap directories for links here */
+  /** called before each file or directory is opened; tests swap directories for links here */
   beforeOpen?: (path: string) => void | Promise<void>;
+  /** limits (defaults: 20000 directories, 120 s): a swap to / or /proc must not stall the build queue */
+  maxDirs?: number;
+  maxMs?: number;
 };
 
 /**
@@ -339,24 +358,47 @@ export async function snapshotStatic(src: string, allowedRoot: string, dest: str
   await remove(dest);
   await ensureDir(dest, 0o755);
   const out = { files: 0, bytes: 0, skipped: 0 };
+  const maxDirs = opts.maxDirs ?? 20_000;
+  const deadline = Date.now() + (opts.maxMs ?? 120_000);
+  let dirs = 0;
+  /**
+   * A directory is opened (no link followed) and checked like a file: a directory owned by the app, and by
+   * its descriptor's own path under `root`. Only then its destination is created and its names listed, through
+   * the descriptor, so what is listed is what was checked. Directories and time are capped.
+   */
   const walk = async (from: string, to: string, depth: number) => {
-    const names = await readdir(fsPath(from)).catch(() => [] as string[]);
-    for (const name of names) {
-      if (name.startsWith(".") || /[\0\n\r]/.test(name)) {
+    if (++dirs > maxDirs || Date.now() > deadline) throw new Error("static files: too many directories or too slow (is the directory a link to somewhere else?)");
+    let dir: FileHandle | undefined;
+    try {
+      await opts.beforeOpen?.(from);
+      dir = await open(fsPath(from), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      const st = await dir.stat();
+      if (!st.isDirectory() || (opts.uid !== undefined && st.uid !== opts.uid) || !under(await fdPath(dir, fsPath(from)), root)) {
         out.skipped++;
-        continue;
+        return;
       }
-      const st = await lstat(fsPath(`${from}/${name}`)).catch(() => null);
-      if (st?.isDirectory() && depth < 24) {
-        await ensureDir(`${to}/${name}`, 0o755);
-        await walk(`${from}/${name}`, `${to}/${name}`, depth + 1);
-      } else if (st?.isFile() && st.size <= MAX_FILE && out.files < MAX_FILES && out.bytes + st.size <= MAX_BYTES) {
-        const size = await copyChecked(`${from}/${name}`, `${to}/${name}`, root, opts);
-        if (size !== null) {
-          out.files++;
-          out.bytes += size;
+      await ensureDir(to, 0o755);
+      const names = await readdir(viaFd(dir, from));
+      for (const name of names) {
+        if (name.startsWith(".") || /[\0\n\r]/.test(name)) {
+          out.skipped++;
+          continue;
+        }
+        const st = await lstat(`${viaFd(dir, from)}/${name}`).catch(() => null);
+        if (st?.isDirectory() && depth < 24) await walk(`${from}/${name}`, `${to}/${name}`, depth + 1);
+        else if (st?.isFile() && st.size <= MAX_FILE && out.files < MAX_FILES && out.bytes + st.size <= MAX_BYTES) {
+          const size = await copyChecked(`${from}/${name}`, `${to}/${name}`, root, opts);
+          if (size !== null) {
+            out.files++;
+            out.bytes += size;
+          } else out.skipped++;
         } else out.skipped++;
-      } else out.skipped++;
+      }
+    } catch (e) {
+      if ((e as Error).message?.startsWith("static files:")) throw e;
+      out.skipped++;
+    } finally {
+      await dir?.close().catch(() => {});
     }
   };
   await walk(src, dest, 0);

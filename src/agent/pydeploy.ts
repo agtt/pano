@@ -5,7 +5,7 @@
 
 import { lstat } from "node:fs/promises";
 import { dirname } from "node:path";
-import { fsPath, paths } from "../shared/config.ts";
+import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import {
   PY_DEFAULTS, defaultWorkers, isPreviewName, detectPython, djangoArgv, djangoProbeArgv, hasHashes, insideDir, installSteps, parsePyStatic, parseStaticProbe, serverCommand,
   serverInstallStep, serverPackage, staticDir, triOn, uvEnv, type PyPlan, type PyStep,
@@ -87,9 +87,9 @@ export async function buildPython(c: PyCtx): Promise<PyBuilt> {
   // Django: collectstatic with the app's env (settings read it). "auto" does not fail the deploy: many
   // projects have no STATIC_ROOT; "on" is the admin's word and does.
   let collected = false;
-  // Previews serve no collected static files (the edge does not publish them), so they do not collect any.
+  // Previews collect too when configured (WhiteNoise, manifest storage need the files); only the copy for the edge is skipped.
   const preview = isPreviewName(app.name);
-  if (!preview && triOn(app.py_collectstatic, plan.django && !app.build_cmd)) {
+  if (triOn(app.py_collectstatic, plan.django && !app.build_cmd)) {
     if (!plan.django) throw new Error("collectstatic needs a Django project (manage.py)");
     await c.step("collectstatic");
     try {
@@ -169,7 +169,9 @@ export async function publishStatic(c: PyCtx, slot: "a" | "b", maps: { url: stri
       c.log(`static files: ${m.src} does not exist, ${m.url} is left to the app`);
       continue;
     }
+    // Fail closed: without the app's uid nothing can be told apart from files that are not its own.
     const owner = await lookupUser(`app-${c.app.name}`);
+    if (!owner && !DRY_RUN) throw new Error(`cannot look up the system user of ${c.app.name}`);
     const r = await snapshotStatic(m.src, dirname(c.dir), staticDir(c.app.name, slot, urls.length), { uid: owner?.uid });
     c.log(`static files ${m.url}: ${r.files} files (${Math.round(r.bytes / 1024)} KB) served by the edge${r.skipped ? `, ${r.skipped} skipped (links, dot files, too large)` : ""}`);
     urls.push(m.url);
