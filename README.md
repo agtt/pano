@@ -82,6 +82,10 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
   its own user and writes `DATABASE_URL`/`REDIS_URL` straight into the app's env: the password never passes through the browser.
 - **Secrets:** R2 secret and backup key are root-only files and write-only from the UI. Every action is in the audit log.
 - **Independent of CyberPanel.** pano keeps its own binary, runtimes, Caddy, users and units; CyberPanel/OS updates do not change them.
+- **Signed releases.** The installer and `pano update` run only artifacts listed in a `SHA256SUMS` signed by the release key. The
+  release workflow signs whatever a `v*` tag points at, so keep that key in a GitHub environment with a required reviewer and limit who
+  can push tags ([SECURITY.md](SECURITY.md#releases)).
+- **Reporting a vulnerability:** privately through GitHub's "Report a vulnerability" (Security tab); see [SECURITY.md](SECURITY.md).
 
 ## Install (AlmaLinux/Rocky 9, Debian/Ubuntu)
 
