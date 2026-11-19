@@ -108,7 +108,7 @@ if command -v openssl >/dev/null 2>&1 && openssl pkeyutl -help 2>&1 | grep -q ra
 elif [ "${PANO_INSECURE_SKIP_SIGNATURE:-}" = "1" ]; then
   echo "warning: PANO_INSECURE_SKIP_SIGNATURE=1, the release signature was not checked (only the checksum)"
 else
-  fail "checking the release signature needs OpenSSL 3 (apt install openssl / dnf install openssl), or PANO_INSECURE_SKIP_SIGNATURE=1 to skip it"
+  fail "checking the release signature needs OpenSSL 3 (apt install openssl / dnf install openssl; AlmaLinux/Rocky 9, Debian 12+ and Ubuntu 22.04+ have it, Debian 11 is not supported), or PANO_INSECURE_SKIP_SIGNATURE=1 to skip it"
 fi
 # The signed file names its release: an old signed release cannot be served as the one asked for.
 SIGNED_TAG="$(sed -n 's/^# pano \(v[0-9][A-Za-z0-9.+-]*\)$/\1/p' "$TMP/SHA256SUMS" | head -n 1)"
