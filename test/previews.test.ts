@@ -131,6 +131,7 @@ describe("preview state and edge", () => {
     webhook_secret: "s", upstream: "", external_unit: "", processes: [], ask_url: "", auto_deploy: 1, build_isolated: 0, crons: [], preview_domain: "*.pv.example.com", preview_max: 3,
     preview_ttl_days: 7, preview_env_exclude: "", env_groups: "", env_running: "", env_built: "", created_at: 0, updated_at: 0,
     http_redirect: 1, suspended: 0, suspended_reason: "", suspended_at: 0, suspended_units: [],
+    py_server: "auto", py_app: "", py_requirements: "", py_collectstatic: "auto", py_migrate: "auto", py_static: "", py_workers: 0, static_live: "",
   } as App;
 
   test("settings validate; defaults apply", () => {
