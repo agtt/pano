@@ -6,6 +6,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { APP_PORT_BASE, fsPath, paths } from "../shared/config.ts";
 import { pvName } from "../shared/preview.ts";
+import type { PyServer, PyTri } from "../shared/python.ts";
 import type { ProcessSpec, SiteRoute } from "../shared/validate.ts";
 
 export type App = {
@@ -53,11 +54,11 @@ export type App = {
   /** 1: plain HTTP is redirected to HTTPS (default); 0: also served on plain HTTP (Cloudflare "Flexible" SSL, apps that redirect themselves) */
   http_redirect: number;
   /** Python apps (shared/python.ts PyFields; the defaults mean nothing for other runtimes) */
-  py_server: string;
+  py_server: PyServer;
   py_app: string;
   py_requirements: string;
-  py_collectstatic: string;
-  py_migrate: string;
+  py_collectstatic: PyTri;
+  py_migrate: PyTri;
   py_static: string;
   py_workers: number;
   /** URL prefixes (JSON array) the edge serves from the live release's collected static files; "" for apps without */

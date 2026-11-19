@@ -7,9 +7,9 @@ import { lstat } from "node:fs/promises";
 import { fsPath, paths } from "../shared/config.ts";
 import {
   PY_DEFAULTS, defaultWorkers, detectPython, djangoArgv, djangoProbeArgv, hasHashes, insideDir, installSteps, parsePyStatic, parseStaticProbe, serverCommand,
-  serverInstallStep, serverPackage, staticDir, triOn, uvEnv, type PyPlan, type PyServer, type PyStep, type PyTri,
+  serverInstallStep, serverPackage, staticDir, triOn, uvEnv, type PyPlan, type PyStep,
 } from "../shared/python.ts";
-import { ensureBuildPackages, readRepo, snapshotStatic } from "./python.ts";
+import { ensureBuildPackages, readRepo, snapshotStatic, uvDir } from "./python.ts";
 import { exists, remove } from "./sys.ts";
 import type { App } from "./state.ts";
 
@@ -29,6 +29,12 @@ export type PyCtx = {
   step: (s: string) => void | Promise<void>;
   sb: PySandbox;
 };
+
+/**
+ * systemd-run looks the command up in its own PATH, not the one given to the unit: uv is called by
+ * its absolute path (the pinned directory under /opt/pano/runtimes/uv).
+ */
+const withUv = async (argv: string[]): Promise<string[]> => (argv[0] === "uv" ? [`${await uvDir()}/uv`, ...argv.slice(1)] : argv);
 
 export const venvDir = (release: string) => `${release}/.venv`;
 
@@ -64,7 +70,7 @@ export async function buildPython(c: PyCtx): Promise<PyBuilt> {
   if (plan.mode === "none" && !app.install_cmd) c.log("no requirements.txt, pyproject.toml, uv.lock or poetry.lock: no dependencies installed");
   for (const s of steps) {
     await c.step(s.label);
-    await c.sb(s.argv, { env: { ...s.env, PATH: c.path }, envFile: false, onLine: c.log });
+    await c.sb(await withUv(s.argv), { env: { ...s.env, PATH: c.path }, envFile: false, onLine: c.log });
   }
   if (app.install_cmd) {
     await c.step(app.install_cmd);
@@ -78,7 +84,7 @@ export async function buildPython(c: PyCtx): Promise<PyBuilt> {
   // Django: collectstatic with the app's env (settings read it). "auto" does not fail the deploy: many
   // projects have no STATIC_ROOT; "on" is the admin's word and does.
   let collected = false;
-  if (triOn(app.py_collectstatic as PyTri, plan.django && !app.build_cmd)) {
+  if (triOn(app.py_collectstatic, plan.django && !app.build_cmd)) {
     if (!plan.django) throw new Error("collectstatic needs a Django project (manage.py)");
     await c.step("collectstatic");
     try {
@@ -116,7 +122,7 @@ async function staticMaps(c: PyCtx, plan: PyPlan, collected: boolean): Promise<{
 /** The start command: the admin's, or the detected server. Throws with what to set when nothing is known. */
 export function startFor(plan: PyPlan, app: App, memoryMb: number, cpus: number): string {
   if (!plan.app) throw new Error('cannot find the WSGI/ASGI application: set "Python app" (module:attribute, e.g. config.wsgi:application) or a start command');
-  return serverCommand(plan.app, (app.py_server || PY_DEFAULTS.py_server) as PyServer, app.py_workers || defaultWorkers(memoryMb, cpus));
+  return serverCommand(plan.app, app.py_server || PY_DEFAULTS.py_server, app.py_workers || defaultWorkers(memoryMb, cpus));
 }
 
 /** gunicorn/uvicorn missing from the dependencies: installed last, and the log says so. */
@@ -126,7 +132,7 @@ export async function ensureServers(c: PyCtx, starts: Iterable<string>) {
     const s = serverInstallStep(pkg as "gunicorn" | "uvicorn", { venv: venvDir(c.dir), cache: c.cache });
     await c.step(s.label);
     c.log(`${pkg} is not in your dependencies: add it to your requirements to pin its version`);
-    await c.sb(s.argv, { env: { ...s.env, PATH: c.path }, envFile: false, onLine: c.log });
+    await c.sb(await withUv(s.argv), { env: { ...s.env, PATH: c.path }, envFile: false, onLine: c.log });
   }
 }
 
@@ -137,7 +143,7 @@ export async function ensureServers(c: PyCtx, starts: Iterable<string>) {
  * (add before you remove); a rollback does not undo them.
  */
 export async function migrate(c: PyCtx, plan: PyPlan) {
-  if (!triOn(c.app.py_migrate as PyTri, plan.django)) return;
+  if (!triOn(c.app.py_migrate, plan.django)) return;
   if (!plan.django) throw new Error("migrate needs a Django project (manage.py)");
   await c.step("migrate (before the traffic switch)");
   await c.sb(djangoArgv(venvDir(c.dir), "migrate"), { env: venvEnv(c), envFile: true, onLine: c.log });
