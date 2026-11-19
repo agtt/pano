@@ -94,14 +94,17 @@ curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh
 No questions. When it finishes it prints:
 
 - how to open the panel: an SSH tunnel line, or an HTTPS address on your tailnet when the server runs Tailscale;
-- the `admin` password (shown once) and a QR code for your authenticator app;
+- the `admin` password (shown once) and a QR code for your authenticator app. They go to standard output: when the installer runs from
+  cloud-init or another logged session they also stay in that log (`/var/log/cloud-init-output.log`), so reset them there with
+  `pano admin admin` afterwards;
 - whether the web server started: on a server with nothing on ports 80/443, Caddy starts right away and sites get HTTPS automatically. A server that already runs a web server (CyberPanel, nginx, Apache) keeps it until you move it from the panel (Server > Edge).
 
 Then add sites and apps in the panel and connect backup storage (Backups).
 
 Later updates: `pano update --latest` (download, verify the signature, update, keep the previous version for `pano update-rollback`). Running the installer again also updates; it never touches the admin, the edge or the panel address a second time.
 
-Options: `PANO_VERSION=x.y.z` installs a given release, `PANO_NO_EDGE=1` leaves ports 80/443 alone. Releases are checked against the signed `SHA256SUMS` before anything runs.
+Options: `PANO_VERSION=x.y.z` installs a given release, `PANO_NO_EDGE=1` leaves ports 80/443 alone, `PANO_NO_TAILSCALE=1` does not publish
+the panel with `tailscale serve` (otherwise every device and user of the tailnet, shared nodes included, reaches the login page). Releases are checked against the signed `SHA256SUMS` before anything runs.
 
 From source: `bun install && bun run build`, copy `dist/pano` to the server and run `./pano install` as root.
 

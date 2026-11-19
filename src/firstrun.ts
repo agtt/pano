@@ -114,9 +114,9 @@ export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
     }
   }
 
-  // Tailscale: the panel gets an HTTPS name on the tailnet, reachable from your devices only.
+  // Tailscale: the panel gets an HTTPS name on the tailnet, reachable by every device and user of that tailnet.
   let url = "";
-  const ts = run(["sh", "-c", "command -v tailscale"]).code === 0 ? tailscaleName(run(["tailscale", "status", "--json"]).out, run(["tailscale", "serve", "status"]).out) : "";
+  const ts = process.env.PANO_NO_TAILSCALE !== "1" && run(["sh", "-c", "command -v tailscale"]).code === 0 ? tailscaleName(run(["tailscale", "status", "--json"]).out, run(["tailscale", "serve", "status"]).out) : "";
   if (ts && run(["tailscale", "serve", "--bg", "7800"]).code === 0) {
     const file = fsPath(`${paths.etc}/pano.env`);
     await writeFile(file, withWebHost(await readFile(file, "utf8"), ts), { mode: 0o600 });
@@ -131,7 +131,7 @@ export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
   console.log(`
 pano is ready.
 
-  Panel      ${url ? `${url}   (Tailscale: only your own devices reach it)\n             or ` : ""}ssh -L 7800:127.0.0.1:7800 root@${ip}   then open http://127.0.0.1:7800
+  Panel      ${url ? `${url}   (Tailscale: every device and user of your tailnet reaches the login)\n             or ` : ""}ssh -L 7800:127.0.0.1:7800 root@${ip}   then open http://127.0.0.1:7800
   Username   ${username}
   Password   ${password}
              Shown only now: put it in your password manager.
