@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { REDIS_COMMAND, renderQuadlet, repoOf, runRef, TEMPLATES, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
-import { EDGE_VIEW_UNIT, VIEW_MOUNT, edgeUnit, heldByEdge, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
+import { EDGE_VIEW_UNIT, VIEW_LOCK, VIEW_MOUNT, edgeUnit, heldByEdge, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
 import { viewMissingAlert } from "../src/agent/shield.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
 import { renderFpmConf, renderPhpIni, renderPhpUnit } from "../src/agent/php.ts";
@@ -108,7 +108,7 @@ describe("edge: multi-process apps and php sites", () => {
   test("the alert names the held sites and the fix", () => {
     const msg = viewMissingAlert(["a.example", "b.example"]);
     expect(msg).toContain("2 PHP site(s) are offline");
-    expect(msg).toContain("util-linux 2.38+");
+    expect(msg).toContain("Linux 5.10+");
     expect(msg).toContain("a.example, b.example");
     expect(viewMissingAlert(Array.from({ length: 10 }, (_, i) => `s${i}`))).toContain(", …");
   });
@@ -126,6 +126,11 @@ describe("edge view", () => {
     expect(on).toContain("Requires=srv-pano-edgeview.mount");
     expect(on).toContain("After=network-online.target srv-pano-edgeview.mount");
     expect(on).toContain("InaccessiblePaths=-/srv/pano/sites\n");
+    expect(on).toContain("Requires=srv-pano-edgeview.mount pano-edgeview-lock.service");
+    expect(VIEW_LOCK).toContain("Before=pano-edge.service");
+    expect(VIEW_LOCK).toContain("ExecStart=/opt/pano/bin/pano edge-view-lock");
+    // In the host's mount namespace: no sandboxing that would give the unit a namespace of its own.
+    expect(VIEW_LOCK).not.toMatch(/Protect|Private|ReadOnlyPaths|InaccessiblePaths/);
     const off = edgeUnit(false);
     expect(off).not.toContain("Requires=");
     // Without the view PHP sites are held offline, so the real sites stay out of the edge's reach.

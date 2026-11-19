@@ -10,7 +10,8 @@ import { liveStatic, staticDir } from "../shared/python.ts";
 import { remoteDomains } from "./remotedb-config.ts";
 import { apps as appStore, previewApp, previews as previewStore, procsOf, settings, sites as siteStore, type App, type Route, type Site } from "./state.ts";
 import { cloudflareRanges } from "./cloudflare.ts";
-import { ensureDir, exists, readRootOwned, readText, remove, run, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, readRootOwned, readText, remove, run, showUnits, writeAtomic } from "./sys.ts";
+import { mountOptions, viewLocked } from "./viewlock.ts";
 
 export const EDGE_USER = "pano-edge";
 
@@ -173,7 +174,7 @@ const STATIC_DENY = String.raw`(?i)(/\.|\.(sql|bak|old|orig|swp)$)`;
 
 /**
  * Where the edge reads site files: a read-only bind of the sites directory mounted nosymfollow
- * (Linux 5.10+ and util-linux 2.38+), so a link a site plants (to a TLS key, another site's
+ * (Linux 5.10+; with util-linux before 2.38 by mount(2), see VIEW_LOCK), so a link a site plants (to a TLS key, another site's
  * wp-config.php) is never followed. Without it PHP sites are held offline (HELD_BODY), unless root
  * set PANO_EDGE_FOLLOW_LINKS=1: then the edge reads the real paths and a daily sweep removes links
  * that lead out of a site (shield.ts).
@@ -425,20 +426,13 @@ export async function buildCaddyfile(): Promise<string> {
 }
 
 /**
- * The view is mounted, read-only and nosymfollow, as the host sees it (the agent's own mount namespace
- * gets it by propagation too). Checked on the mount itself: an old libmount may accept the option and
- * silently drop it. `pid`: the view as that process sees it (the running edge, in its own namespace).
+ * The view is mounted, read-only and nosymfollow, as the host sees it. Checked on the mount itself: an old
+ * libmount accepts the option and silently drops it (viewlock.ts sets it then). `pid`: the view as that
+ * process sees it (the running edge, in its own namespace: a copy made when it started).
  */
 export async function edgeViewMounted(pid = "1"): Promise<boolean> {
   const info = (await readText(`/proc/${pid}/mountinfo`)) ?? (pid === "1" ? await readText("/proc/self/mountinfo") : null) ?? "";
-  // Fields: id parent major:minor root mount-point options ...; the last mount on a point is the visible one.
-  const opts = info
-    .split("\n")
-    .map((l) => l.split(" "))
-    .filter((f) => f[4] === EDGE_VIEW)
-    .at(-1)?.[5]
-    ?.split(",") ?? [];
-  return opts.includes("ro") && opts.includes("nosymfollow");
+  return viewLocked(mountOptions(info, EDGE_VIEW));
 }
 
 export async function edgeInstalled() {
@@ -526,9 +520,9 @@ export async function installCaddy(version?: string): Promise<string> {
 export function edgeUnit(view: boolean, realSites = false): string {
   return `[Unit]
 Description=pano edge (Caddy)
-After=network-online.target${view ? ` ${EDGE_VIEW_UNIT}` : ""}
+After=network-online.target${view ? ` ${EDGE_VIEW_UNIT} ${VIEW_LOCK_UNIT}` : ""}
 Wants=network-online.target
-${view ? `Requires=${EDGE_VIEW_UNIT}\n` : ""}
+${view ? `Requires=${EDGE_VIEW_UNIT} ${VIEW_LOCK_UNIT}\n` : ""}
 [Service]
 Type=notify
 User=${EDGE_USER}
@@ -586,16 +580,44 @@ DirectoryMode=0755
 WantedBy=multi-user.target
 `;
 
+export const VIEW_LOCK_UNIT = "pano-edgeview-lock.service";
+
 /**
- * Mounts the view and checks the kernel really applied nosymfollow. When it did not (Linux before
- * 5.10, or util-linux before 2.38, whose mount drops the option on a bind), the mount is left off and
- * PHP sites are held offline (see EDGE_VIEW).
+ * Runs `pano edge-view-lock` after the mount and before the edge, in the host's mount namespace (no
+ * sandboxing here on purpose): where mount(8) dropped nosymfollow (util-linux before 2.38) it remounts the
+ * view with mount(2), then proves it with a real link (viewlock.ts). Failing, it keeps the edge (which
+ * requires it) from starting on a view that follows links, until the agent renders it without the view.
+ */
+export const VIEW_LOCK = `[Unit]
+Description=pano: no symlinks followed in the edge's view of site files
+Requires=${EDGE_VIEW_UNIT}
+After=${EDGE_VIEW_UNIT}
+Before=pano-edge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${paths.bin}/pano edge-view-lock
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+/**
+ * Mounts the view and makes sure the kernel really applied nosymfollow (by mount(2) where util-linux before
+ * 2.38 drops it, see VIEW_LOCK). When it still did not (Linux before 5.10, or the remount failed), the
+ * mount is left off and PHP sites are held offline (see EDGE_VIEW).
  */
 async function ensureEdgeView(): Promise<boolean> {
   await ensureDir(paths.sites, 0o755);
   await writeAtomic(`${paths.systemd}/${EDGE_VIEW_UNIT}`, VIEW_MOUNT, 0o644);
+  await writeAtomic(`${paths.systemd}/${VIEW_LOCK_UNIT}`, VIEW_LOCK, 0o644);
   await run(["systemctl", "daemon-reload"]);
   await run(["systemctl", "enable", "--now", EDGE_VIEW_UNIT], { check: false });
+  await run(["systemctl", "enable", VIEW_LOCK_UNIT], { check: false });
+  // A lock that already ran stays active (RemainAfterExit) and would not check again on start; restarting
+  // it also restarts the edge (Requires=), so only when the view lacks the flag.
+  await run(["systemctl", (await edgeViewMounted()) ? "start" : "restart", VIEW_LOCK_UNIT], { check: false });
   return edgeViewMounted();
 }
 
@@ -612,7 +634,7 @@ export async function setupEdgeUnit(): Promise<boolean> {
   await writeAtomic(`${paths.systemd}/pano-edge.service`, edgeUnit(view, !view && env.edgeFollowLinks), 0o644);
   await run(["systemctl", "daemon-reload"]);
   // Off only once the edge no longer requires it (stopping a required unit stops the edge too).
-  if (!view) await run(["systemctl", "disable", "--now", EDGE_VIEW_UNIT], { check: false });
+  if (!view) await run(["systemctl", "disable", "--now", VIEW_LOCK_UNIT, EDGE_VIEW_UNIT], { check: false });
   return view;
 }
 
@@ -627,7 +649,10 @@ export async function refreshEdgeView(): Promise<boolean> {
   const view = await setupEdgeUnit();
   // Paths first, so the restarted edge starts on a config that matches its unit.
   await applyEdge().catch((e) => console.error(`[agent] edge view: ${e instanceof Error ? e.message : e}`));
-  if (before !== edgeUnit(view, !view && env.edgeFollowLinks) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
+  // Also when the running edge's own copy of the view lacks the flag (it was set after the edge started).
+  const pid = (await showUnits(["pano-edge.service"], ["MainPID"])).get("pano-edge.service")?.MainPID ?? "0";
+  const stale = view && /^[1-9]\d*$/.test(pid) && !(await edgeViewMounted(pid));
+  if ((stale || before !== edgeUnit(view, !view && env.edgeFollowLinks)) && (await run(["systemctl", "is-enabled", "pano-edge"], { check: false })).stdout.trim() === "enabled") {
     await run(["systemctl", "restart", "pano-edge"], { check: false });
   }
   return view;

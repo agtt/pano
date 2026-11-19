@@ -5,7 +5,7 @@
 import { cpus, hostname, loadavg, totalmem, uptime } from "node:os";
 import { env } from "../shared/config.ts";
 import { destIds } from "./backup.ts";
-import { EDGE_VIEW, EDGE_VIEW_UNIT, edgeActive, edgeInstalled, edgeViewMounted } from "./edge.ts";
+import { EDGE_VIEW, EDGE_VIEW_UNIT, VIEW_LOCK_UNIT, edgeActive, edgeInstalled, edgeViewMounted } from "./edge.ts";
 import { kitState } from "./recovery.ts";
 import { bindAddress } from "./mysql.ts";
 import { PHP_EOL } from "../shared/validate.ts";
@@ -176,15 +176,15 @@ export async function audit(): Promise<Finding[]> {
               id: "edge-links",
               level: "fail",
               title: "The edge can follow symlinks that sites create",
-              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and util-linux 2.38+) and PANO_EDGE_FOLLOW_LINKS=1 serves PHP sites from the real paths anyway. A site could link to another site's files or a TLS key and fetch them over HTTP; links that lead out of a site are removed once a day, which only narrows that window.`,
-              fix: `Upgrade to Debian 12+ or Ubuntu 24.04 (util-linux 2.38+) and reboot, then remove PANO_EDGE_FOLLOW_LINKS from ${paths.etc}/pano.env (check: systemctl status ${EDGE_VIEW_UNIT}).`,
+              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+) and PANO_EDGE_FOLLOW_LINKS=1 serves PHP sites from the real paths anyway. A site could link to another site's files or a TLS key and fetch them over HTTP; links that lead out of a site are removed once a day, which only narrows that window.`,
+              fix: `Find why the view is missing (systemctl status ${EDGE_VIEW_UNIT} ${VIEW_LOCK_UNIT}; Linux 5.10+ needed), then remove PANO_EDGE_FOLLOW_LINKS from ${paths.etc}/pano.env.`,
             }
           : {
               id: "edge-links",
               level: "fail",
               title: "PHP sites are offline: the edge cannot read them safely",
-              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+ and util-linux 2.38+). Without it a site could link to another site's files or a TLS key and fetch them over HTTP, so every PHP site answers 503 instead.`,
-              fix: `Upgrade to Debian 12+ or Ubuntu 24.04 (util-linux 2.38+) and reboot; pano switches over by itself (check: systemctl status ${EDGE_VIEW_UNIT}). Accepting the risk instead: PANO_EDGE_FOLLOW_LINKS=1 in ${paths.etc}/pano.env, then restart pano-agent.`,
+              detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+). Without it a site could link to another site's files or a TLS key and fetch them over HTTP, so every PHP site answers 503 instead.`,
+              fix: `Check systemctl status ${EDGE_VIEW_UNIT} ${VIEW_LOCK_UNIT} (on Linux before 5.10: upgrade the OS and reboot); pano switches over by itself. Accepting the risk instead: PANO_EDGE_FOLLOW_LINKS=1 in ${paths.etc}/pano.env, then restart pano-agent.`,
             },
     );
   }

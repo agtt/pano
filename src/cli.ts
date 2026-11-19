@@ -7,6 +7,7 @@
 //   pano admin <username>   create an admin or reset its password + 2FA (root)
 //   pano rpc <method> [json]  call the agent directly (root)
 //   pano run-shell          SSH forced command of the Runner (pano-run)
+//   pano edge-view-lock     nosymfollow on the edge's view of site files (pano-edgeview-lock.service, root)
 
 import { chmod, copyFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { DRY_RUN, VERSION, env, fsPath, paths } from "./shared/config.ts";
@@ -40,6 +41,14 @@ async function main() {
       const hooks = createHookApp();
       Bun.serve({ hostname: "127.0.0.1", port: env.hookPort, fetch: hooks.fetch, maxRequestBodySize: 1_100_000 });
       console.log(`[web] http://${env.webHost}:${env.webPort} (hooks on 127.0.0.1:${env.hookPort})`);
+      break;
+    }
+    case "edge-view-lock": {
+      const { EDGE_VIEW } = await import("./agent/edge.ts");
+      const { lockEdgeView } = await import("./agent/viewlock.ts");
+      const r = await lockEdgeView(EDGE_VIEW);
+      console.log(`[edge-view-lock] ${r.ok ? "ok" : "FAILED"} (${r.via}): ${r.detail}`);
+      if (!r.ok) process.exit(1);
       break;
     }
     case "admin": {

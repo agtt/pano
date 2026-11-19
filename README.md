@@ -117,23 +117,25 @@ From source: `bun install && bun run build`, copy `dist/pano` to the server and 
 AlmaLinux/Rocky 9, Debian 11–13, Ubuntu 22.04/24.04 (systemd, root access).
 
 PHP sites additionally need the edge's **no-symlink view**: the site files are bind-mounted read-only with `nosymfollow`, so a link a
-site plants (to a TLS key, to another site's `wp-config.php`) is never followed by the edge. That takes Linux 5.10+ (the
-`nosymfollow` flag) **and util-linux 2.38+**: mount 2.37 knows the option but drops it on a bind mount (fixed upstream in util-linux
-commit `36a3923`, "mount: Allow bind-mounting with nosymfollow"). pano checks the mount in `/proc/*/mountinfo`, not the version, so a
-distribution that backports the fix works too.
+site plants (to a TLS key, to another site's `wp-config.php`) is never followed by the edge. The kernel needs Linux 5.10+ for that flag.
+mount(8) before util-linux 2.38 may drop the option on a bind mount (upstream commit `36a3923`), and 2.36 does not know it at all, so
+`pano-edgeview-lock.service` (run after the mount, before the edge) checks the mount in `/proc/self/mountinfo` and, when the flag is
+missing, remounts the view with mount(2) itself; either way it then opens a real symlink through the view and passes only when that fails
+with `ELOOP`.
 
 | System | Kernel | util-linux | PHP sites |
 |---|---|---|---|
 | Debian 12 / 13 | 6.1 / 6.12 | 2.38.1 / 2.41 | served |
 | Ubuntu 24.04 | 6.8 | 2.39.3 | served |
-| Ubuntu 22.04 | 5.15 | 2.37.2 | held offline |
-| AlmaLinux/Rocky 9 | 5.14 | 2.37.4 | held offline |
-| Debian 11 | 5.10 | 2.36.1 | held offline |
+| Ubuntu 22.04 | 5.15 | 2.37.2 | served (mount(2) fallback when needed) |
+| AlmaLinux/Rocky 9 | 5.14 | 2.37.4 | served (checked in the test VM; mount(2) fallback when needed) |
+| Debian 11 | 5.10 | 2.36.1 | served (mount(2) fallback) |
 
-Where the view cannot be mounted pano fails closed: every PHP site answers `503`, the Security page shows it as a failure and each agent
-start (and every day) sends an alert. Apps, proxy and static sites, and sites kept on OpenLiteSpeed are not affected. To serve PHP sites
-there anyway, accepting that a site can read other sites' files and TLS keys through a symlink until the daily sweep removes it, root sets
-`PANO_EDGE_FOLLOW_LINKS=1` in `/etc/pano/pano.env` and restarts `pano-agent`.
+If the view still cannot be locked (an older kernel, a failing remount), pano fails closed: the edge does not start on that view, every
+PHP site answers `503`, the Security page shows it as a failure and each agent start (and every day) sends an alert. Apps, proxy and
+static sites, and sites kept on OpenLiteSpeed are not affected. To serve PHP sites there anyway, accepting that a site can read other
+sites' files and TLS keys through a symlink until the daily sweep removes it, root sets `PANO_EDGE_FOLLOW_LINKS=1` in
+`/etc/pano/pano.env` and restarts `pano-agent`.
 
 ## Migrating from CyberPanel
 

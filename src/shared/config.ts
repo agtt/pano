@@ -65,7 +65,7 @@ export const env = {
   /** Set when the UI is reached over plain HTTP (dev, Tailscale): drops the Secure cookie flag. */
   insecureCookies: process.env.PANO_INSECURE_COOKIES === "1",
   /**
-   * Without the edge's no-symlink view (util-linux before 2.38 or Linux before 5.10) PHP sites are held
+   * Without the edge's no-symlink view (Linux before 5.10, or the nosymfollow remount failed) PHP sites are held
    * offline. Set to 1 (root, in pano.env) to serve them from the real paths anyway: a site can then link
    * to another site's files or a TLS key and fetch them over HTTP until the daily sweep removes the link.
    */
