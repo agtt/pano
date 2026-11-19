@@ -1,8 +1,8 @@
 # pano (working name) — feature overview
 
 Open-source (MIT), self-hosted server panel for one or a few Linux servers (AlmaLinux/Rocky 9, Debian/Ubuntu).
-Built for modern apps (Next.js, Node.js, Bun, monorepos) and simple PHP/WordPress sites, with security first and a small
-footprint. One self-contained binary written in TypeScript on Bun; no Docker, no Python, no license server. Everything
+Built for modern apps (Next.js, Node.js, Bun, Python/Django, monorepos) and simple PHP/WordPress sites, with security first and a small
+footprint. One self-contained binary written in TypeScript on Bun; no Docker, no Python needed to run it, no license server. Everything
 optional is installed only when asked for, so nothing unused sits on disk or in memory.
 
 Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy edge ≈ 55 MB; a Next.js app ≈ 45 MB, a Bun app
@@ -34,6 +34,17 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Env like Vercel's: production values, preview-only values (never seen by the live app), shared variable groups for several apps (root-only files, the app's own value wins); the app page names the variables a restart would apply, and those built into the code (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, …) that need a redeploy.
 - Push-to-deploy from GitHub, GitLab, Gitea, Forgejo; optional GitHub connection with repo picker, deploy keys and commit status.
 - Preview deploys: pushes to other branches build `<branch>.<preview domain>` as an isolated app (own user, ports, `DATA_DIR`, env minus prod-only vars plus preview-only values), TLS only for existing previews; removed on branch delete, after a TTL (7 days) or past the limit (3). With GitHub connected, the link is commented on the branch's open pull requests and updated on every build.
+
+**Python apps (Django, FastAPI, Flask, any WSGI/ASGI app) — optional**
+- Same pipeline as Node.js apps: git → sandboxed build → blue/green systemd slots → health check → traffic switch → instant rollback; per-app env, logs, memory limits, cron jobs (the release's venv first on PATH), `DATA_DIR`, previews and push-to-deploy.
+- On demand, zero footprint otherwise: no interpreter, uv, build packages, unit or directory exists until the first Python app deploys or an admin installs a version (Runtimes page). Deleting the last version removes uv and `/opt/pano/runtimes/python`; distribution packages installed for native wheels (gcc, `-devel`) stay and are listed in the setting `python.os_packages`. Node.js apps never see Python on their PATH and Python apps never trigger the bun install.
+- Runtime source: python-build-standalone (astral-sh) CPython builds, one directory per exact version beside Node/Bun, tarball checked against the release's `SHA256SUMS` (download URLs must stay on github.com/astral-sh); uv from astral-sh, checked against its published `.sha256`. Chosen over distro Python (versions differ per OS, no side by side) and over uv-managed Pythons (uv would download unverified). An app pins `3.14` to the exact patch it resolved to at the first deploy.
+- Packages: one virtualenv per release (`<release>/.venv`, created by uv from the pinned interpreter, never the system's Python or pip); `uv.lock` → `uv sync --locked`, `poetry.lock` → poetry (run through uv) into the venv, `requirements.txt` / `requirements/production.txt|prod|deploy|main|base` or a configured file → `uv pip install -r` (`--require-hashes` when it has hashes), `pyproject.toml` → its dependencies. Install steps are argv (no shell) in the same transient sandbox as Node builds (`build_isolated` applies); an own install command replaces them and gets the empty venv.
+- Start: gunicorn for WSGI, uvicorn for ASGI, bound to `127.0.0.1:$PORT` (edge-proxied), forwarded headers trusted from 127.0.0.1 only; detected from Django's `manage.py` / `wsgi.py` / `asgi.py` (channels or daphne → ASGI), `app.py`, `main.py`, `app/main.py`, or set (`module:attr`, server, workers, or a start command). A server missing from the dependencies is installed into the venv with a note in the log.
+- Django (auto from `manage.py`, each overridable to always/never): `collectstatic --noinput` in the build, with the app's variables (skipped with an own build command; "auto" does not fail the deploy without `STATIC_ROOT`), and `migrate --noinput` as an explicit release step after the build and before anything of the new release starts: if it fails the deploy fails and the live release keeps serving. It runs against the live database, so migrations must work with the running release (add before you remove); a rollback does not undo them.
+- Static files: STATIC_URL/STATIC_ROOT are read from Django (or listed as `/static | staticfiles`), copied at each deploy into `/srv/pano/static/<app>/<slot>/<n>` as root-owned regular files (links, dot files and anything outside the release skipped, size limits) and served by the Caddy edge itself; the switch flips with the slot. Uploaded media is not served this way (keep it in `DATA_DIR`).
+- Native wheels: only packages without a Linux wheel need the OS: mysqlclient, psycopg2, python-ldap pull gcc and the `-devel` packages (AlmaLinux/Rocky 9: `mariadb-connector-c-devel`, `libpq-devel`, `openldap-devel`; Debian 11–13 / Ubuntu 22.04–24.04: `libmariadb-dev`, `libpq-dev`, `libldap2-dev`) the first time a deploy needs them. Pillow, lxml, cryptography, numpy and psycopg2-binary come as wheels and need nothing.
+- Security: runs as the app's own unprivileged user with the same unit hardening as other apps, nothing listens beyond 127.0.0.1, repository files are read without following links, `PYTHON*`, `PIP_*`, `UV_*`, `VIRTUAL_ENV` count as runtime variables (2FA to change), the Python settings are guarded fields like the commands.
 
 **Edge**
 - Caddy: automatic HTTPS (Let's Encrypt), HTTP/3, zstd/gzip, on-demand TLS for customer domains, Cloudflare real IP, security headers.
@@ -127,6 +138,7 @@ Footprint (measured): panel UI ≈ 7 MB RAM, root agent ≈ 25–70 MB, Caddy ed
 - Runs independently of CyberPanel/OS updates (own binary, runtimes, Caddy, users, units).
 
 ## Not there yet (honest gaps)
+- Python: no vulnerability scan of the installed interpreter or of Python lockfiles yet (patch releases arrive by installing the newer patch and redeploying); previews do not serve collected static files through the edge; one static-file copy per slot (no media); poetry installs resolve through PyPI (not hash-pinned); gunicorn+uvicorn workers and `--factory` apps need a start command.
 - Email hosting (mail server, webmail) and DNS server — intended to stay external (Cloudflare, a mail provider).
 - Multiple servers from one panel, resellers, client accounts and admin roles (all admins are equal), billing (WHMCS-style).
 - File manager and per-site SFTP users; full-page cache (Varnish-style).
