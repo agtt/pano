@@ -3,16 +3,11 @@
   Landing page for the server panel. Static: no build step, no external requests.
   Works from file:// and from a GitHub Pages subpath (all URLs are relative).
 
-  RENAMING: the product name is a placeholder and lives in exactly ONE place:
+  RENAMING: the product name lives in exactly ONE place:
   the `NAME` constant in the inline <script> at the bottom of this file.
   Every <span data-name></span> is filled from it, as are the <title> and the
   Open Graph title. Change that one line to rename the product everywhere.
-  (Without JavaScript the name spans render empty; acceptable for a placeholder.)
-
-  TODO list (search for "TODO"):
-    - install URL in the hero command
-    - GitHub link in the header and footer (repository is private for now)
-    - confirm licence wording once the repository goes public
+  (Without JavaScript the name spans render empty.)
 -->
 <html lang="en">
 <head>
@@ -38,8 +33,7 @@
         <li><a href="#features">Features</a></li>
         <li><a href="#security">Security</a></li>
         <li><a href="#compare">Compared</a></li>
-        <!-- TODO: point to the real GitHub repository once it is public -->
-        <li><a href="#" data-todo="github">GitHub (soon)</a></li>
+        <li><a href="https://github.com/agtt/pano">GitHub</a></li>
       </ul>
     </nav>
   </div>
@@ -55,11 +49,10 @@
 
         <div class="install">
           <div class="cmd">
-            <pre id="cmd"><code><span class="prompt">$ </span>curl -fsSL &lt;install-url&gt; | sh</code></pre>
+            <pre id="cmd"><code><span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh</code></pre>
             <button type="button" id="copy" aria-label="Copy install command">Copy</button>
           </div>
-          <!-- TODO: replace <install-url> above with the real installer URL -->
-          <p class="todo"><b>TODO</b>: installer URL not published yet. AlmaLinux / Rocky 9, Debian and Ubuntu.</p>
+          <p class="note">As root on AlmaLinux / Rocky 9, Debian 11–13 or Ubuntu 22.04 / 24.04. Releases are signed; the installer checks them before anything runs.</p>
           <p class="tunnel">The panel never listens publicly. Open it through a tunnel:<br><code>ssh -L 7800:127.0.0.1:7800 root@server</code></p>
         </div>
       </div>
@@ -243,7 +236,7 @@
 
       <div class="gaps">
         <h3>What it doesn't do yet</h3>
-        <p>Email hosting and a DNS server (meant to stay with Cloudflare or a mail provider), multiple servers from one panel, resellers and client roles, a file manager and per-site SFTP users, a WordPress toolkit, and preview environments for apps. It is a young project, tested end to end in VMs; the first real server migration is next.</p>
+        <p>Email hosting and a DNS server (meant to stay with Cloudflare or a mail provider), multiple servers from one panel, resellers and client roles, and a file manager and per-site SFTP users. It is a young project, tested end to end in VMs.</p>
       </div>
     </div>
   </section>
@@ -252,10 +245,10 @@
 
 <footer class="foot">
   <div class="wrap">
-    <p><span data-name></span> is open source under the MIT licence. <!-- TODO: confirm licence wording when the repo is public --></p>
+    <p><span data-name></span> is open source under the MIT licence.</p>
     <ul>
-      <!-- TODO: replace with the real GitHub URL (repository is private for now) -->
-      <li><a href="#" data-todo="github">GitHub (link coming soon)</a></li>
+      <li><a href="https://github.com/agtt/pano">GitHub</a></li>
+      <li><a href="https://github.com/agtt/pano/blob/main/SECURITY.md">Report a vulnerability</a></li>
       <li><a href="#top">Back to top</a></li>
     </ul>
   </div>
@@ -270,11 +263,6 @@
   document.title = t;
   var og = document.querySelector('meta[property="og:title"]');
   if (og) og.setAttribute("content", t);
-
-  // Placeholder links do not jump to the top.
-  document.querySelectorAll("[data-todo]").forEach(function (a) {
-    a.addEventListener("click", function (e) { e.preventDefault(); });
-  });
 
   // Copy button for the install command.
   var btn = document.getElementById("copy");
