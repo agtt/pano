@@ -13,27 +13,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>A light, secure server panel for modern apps and PHP sites</title>
-  <meta name="description" content="Open-source server panel in one binary: git deploys for Next.js, Node and Bun, PHP sites, databases, automatic HTTPS, encrypted backups and automatic security patching.">
-  <meta property="og:title" content="A light, secure server panel for modern apps and PHP sites">
+  <meta name="theme-color" content="#0f1e45">
+  <title>A free, open-source server panel that keeps itself patched</title>
+  <meta name="description" content="Open-source server panel in one binary: git deploys for Node, Bun, Python and PHP apps, automatic HTTPS, nightly vulnerability scans, automatic security patches and encrypted backups.">
+  <meta property="og:title" content="A free, open-source server panel that keeps itself patched">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2312202b'/%3E%3Crect x='7' y='8' width='4' height='16' rx='1' fill='%23e6eef2'/%3E%3Crect x='14' y='8' width='4' height='16' rx='1' fill='%23f2b33d'/%3E%3Crect x='21' y='8' width='4' height='16' rx='1' fill='%2346d08b'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1e45'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%235fd992'/%3E%3C/svg%3E">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="top" id="top">
   <div class="wrap">
-    <a class="brand" href="#top"><span class="lamps" aria-hidden="true"><i></i><i></i><i></i></span><span data-name></span></a>
+    <a class="brand" href="#top"><span class="dot" aria-hidden="true"></span><span data-name></span></a>
     <nav aria-label="Main">
       <ul>
-        <li><a href="#why">Why it is light</a></li>
-        <li><a href="#features">Features</a></li>
-        <li><a href="#security">Security</a></li>
-        <li><a href="#compare">Compared</a></li>
-        <li><a href="https://github.com/agtt/pano">GitHub</a></li>
+        <li class="opt"><a href="#security">Security</a></li>
+        <li class="opt"><a href="#features">Features</a></li>
+        <li class="opt"><a href="#compare">Compared</a></li>
+        <li><a class="gh" href="https://github.com/agtt/pano">GitHub</a></li>
       </ul>
     </nav>
   </div>
@@ -43,200 +42,117 @@
 
   <section class="hero" aria-labelledby="h-hero">
     <div class="wrap">
-      <div>
-        <h1 id="h-hero">The server panel that doesn't eat the server.</h1>
-        <p class="lede"><span data-name></span> runs Next.js, Node and Bun apps, PHP sites and databases on your own Linux server. It is a single binary, it deploys from git, it gets HTTPS on its own and it keeps itself patched. The web UI idles around 7&nbsp;MB.</p>
+      <div class="hero-text">
+        <h1 id="h-hero">The server panel that keeps your server patched while you sleep.</h1>
+        <p class="lede"><span data-name></span> runs Node, Bun, Python and PHP apps and their databases on your own Linux server. It deploys from git, gets HTTPS on its own, and every night it checks for vulnerabilities, applies security updates and backs everything up. Free and open source.</p>
 
-        <div class="install">
-          <div class="cmd">
-            <pre id="cmd"><code><span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh</code></pre>
-            <button type="button" id="copy" aria-label="Copy install command">Copy</button>
-          </div>
-          <p class="note">As root on AlmaLinux / Rocky 9, Debian 12–13 or Ubuntu 22.04 / 24.04. Releases are signed; the installer checks them before anything runs.</p>
-          <p class="tunnel">The panel never listens publicly. Open it through a tunnel:<br><code>ssh -L 7800:127.0.0.1:7800 root@server</code></p>
+        <div class="cmd">
+          <pre id="cmd"><code>curl -fsSL https://raw.githubusercontent.com/agtt/pano/main/install.sh | sh</code></pre>
+          <button type="button" id="copy">Copy</button>
         </div>
+        <p class="note">Run as root on AlmaLinux or Rocky 9, Debian 12–13, or Ubuntu 22.04 or 24.04. Releases are signed and the installer checks the signature first.</p>
       </div>
 
-      <figure class="gauge" aria-labelledby="g-title">
-        <h2 id="g-title">Memory in use <span>MB, resident</span></h2>
-        <ul>
-          <li><span>Web UI</span><span class="track" aria-hidden="true"><span class="fill single" style="--i:0;--lo:7"><i></i></span></span><span class="val">about 7</span></li>
-          <li><span>Root agent</span><span class="track" aria-hidden="true"><span class="fill" style="--i:1;--lo:25;--hi:70"><i></i><i></i></span></span><span class="val">25 to 70</span></li>
-          <li><span>Caddy edge</span><span class="track" aria-hidden="true"><span class="fill single" style="--i:2;--lo:55"><i></i></span></span><span class="val">about 55</span></li>
-          <li class="gap"><span>Next.js app</span><span class="track" aria-hidden="true"><span class="fill single" style="--i:3;--lo:45"><i></i></span></span><span class="val">about 45</span></li>
-          <li><span>Bun app</span><span class="track" aria-hidden="true"><span class="fill" style="--i:4;--lo:4;--hi:13"><i></i><i></i></span></span><span class="val">4 to 13</span></li>
-          <li><span>Idle PHP site</span><span class="track" aria-hidden="true"><span class="fill" style="--i:5;--lo:11;--hi:20"><i></i><i></i></span></span><span class="val">11 to 20</span></li>
-        </ul>
-        <figcaption>Measured in the project's AlmaLinux&nbsp;9 test VM; striped bars are ranges (<span class="key" aria-hidden="true"></span>low to high). A PHP site gets its own PHP-FPM pool. Your server will differ.</figcaption>
+      <figure class="night" aria-labelledby="night-title">
+        <figcaption id="night-title">Last night on one server</figcaption>
+        <ol>
+          <li class="warn"><time>02:00</time><div><b>Found 2 known vulnerabilities</b><span>Scanned the OS, PHP, Node, WordPress and app packages.</span></div></li>
+          <li><time>02:06</time><div><b>Patched both</b><span>Security updates only. Every site stayed up.</span></div></li>
+          <li><time>03:30</time><div><b>Moved to the new kernel</b><span>Rebooted and checked every app. Rollback was ready.</span></div></li>
+          <li><time>04:00</time><div><b>Backed everything up</b><span>Every app and database, encrypted, sent to S3.</span></div></li>
+        </ol>
       </figure>
     </div>
   </section>
 
-  <section class="why" id="why" aria-labelledby="h-why">
-    <div class="wrap">
-      <div class="head">
-        <h2 id="h-why">Small on purpose.</h2>
-        <p>A hosting panel is the one program on the server that every site depends on. It should be the easiest one to run and the hardest one to break.</p>
+  <section class="light" id="light" aria-labelledby="h-light">
+    <div class="wrap split">
+      <div>
+        <h2 id="h-light">Small enough to forget it's there.</h2>
+        <p class="sub">One 87&nbsp;MB binary. No Docker, no licence server. PHP, Python, databases and the malware scanner are only installed when something needs them.</p>
       </div>
-      <div class="why-grid">
-        <div>
-          <h3>One binary</h3>
-          <p>Written in TypeScript on Bun and shipped as one self-contained file. No Docker, no Python, no license server.</p>
-          <p>The panel is two processes: a root agent and an unprivileged web UI.</p>
-        </div>
-        <div>
-          <h3>Installed only when asked</h3>
-          <p>PHP appears when the first PHP site needs it. MariaDB, PostgreSQL, Valkey, ClamAV, realtime and TURN are added on demand, so nothing unused sits on disk or in memory.</p>
-        </div>
-        <div>
-          <h3>Sized to the machine</h3>
-          <p>Database and cache memory is a share of the server's RAM. Builds, cron jobs and queue workers get a smaller CPU and disk share than your websites, so a deploy never slows a live site.</p>
-        </div>
-      </div>
+      <figure class="mem" aria-labelledby="mem-title">
+        <figcaption id="mem-title">Memory at idle, in MB</figcaption>
+        <table>
+          <tbody>
+            <tr><th scope="row">Web UI</th><td><span class="bar" style="--v:7"></span></td><td class="n">7</td></tr>
+            <tr><th scope="row">Root agent</th><td><span class="bar" style="--v:25;--hi:70"></span></td><td class="n">25–70</td></tr>
+            <tr><th scope="row">Web server</th><td><span class="bar" style="--v:55"></span></td><td class="n">55</td></tr>
+            <tr class="sep"><th scope="row">A Next.js app</th><td><span class="bar app" style="--v:45"></span></td><td class="n">45</td></tr>
+            <tr><th scope="row">A Bun app</th><td><span class="bar app" style="--v:4;--hi:13"></span></td><td class="n">4–13</td></tr>
+            <tr><th scope="row">An idle PHP site</th><td><span class="bar app" style="--v:11;--hi:20"></span></td><td class="n">11–20</td></tr>
+          </tbody>
+        </table>
+        <p class="fine">Measured on AlmaLinux&nbsp;9. Ranges show low to high. cPanel asks for 2&nbsp;GB of RAM and 20&nbsp;GB of disk as a minimum.</p>
+      </figure>
     </div>
   </section>
 
-  <section id="features" aria-labelledby="h-features">
+  <section class="sec" id="security" aria-labelledby="h-sec">
     <div class="wrap">
-      <div class="head">
-        <h2 id="h-features">Everything a small fleet needs, nothing it doesn't.</h2>
-        <p>One or a few Linux servers, modern apps next to classic PHP sites. Each block below replaces something you would otherwise assemble by hand.</p>
-      </div>
-
-      <div class="cells">
-        <article class="cell w2 hl">
-          <h3>Apps with git deploy</h3>
-          <p>Next.js, Node.js and Bun, monorepos included. A push builds in a sandbox, starts a new release beside the old one, waits for the health check, then switches traffic. The previous release stays on disk, so rollback takes seconds and needs no rebuild. Push-to-deploy works with GitHub, GitLab, Gitea and Forgejo; any Node.js or Bun version can be pinned per app.</p>
-          <p class="instead"><b>Instead of</b> Vercel, Netlify, Coolify, or PM2 and nginx by hand.</p>
-        </article>
-        <article class="cell">
-          <h3>PHP and WordPress</h3>
-          <p>PHP 7.4 to 8.5, switchable per site with a revert. Every site runs as its own system user in its own PHP-FPM pool, inside an OS-level sandbox.</p>
-          <p class="instead"><b>Instead of</b> a shared PHP pool for every site.</p>
-        </article>
-        <article class="cell">
-          <h3>Automatic HTTPS</h3>
-          <p>Caddy at the edge: Let's Encrypt certificates, HTTP/3, compression and security headers. On-demand TLS covers customer domains. The config is validated before every reload.</p>
-        </article>
-        <article class="cell">
-          <h3>Databases and services</h3>
-          <p>MariaDB, PostgreSQL and Valkey on demand. "+ Database" creates the database and its user and writes <code>DATABASE_URL</code> into the app, so the password never reaches your browser.</p>
-        </article>
-        <article class="cell">
-          <h3>Jobs and queues</h3>
-          <p>Every cron job of every app and site on one page: last and next run, result, run now, logs. Jobs never overlap and failures alert. Optional monitor for BullMQ and Laravel queues.</p>
-          <p class="instead"><b>Instead of</b> Cronitor, Bull Board, Horizon.</p>
-        </article>
-        <article class="cell w2">
-          <h3>Encrypted backups and disaster recovery</h3>
-          <p>Full archives are encrypted with AES-256-GCM on the server; incremental backups use restic. Send them to one or two stores at once: Cloudflare R2, Backblaze B2, Hetzner, Wasabi, AWS S3 or MinIO. The store only ever sees ciphertext. Mark a store as protected and the panel never deletes from it, so a stolen server cannot wipe your backups.</p>
-          <p>The panel backs itself up too. Keep the one-line recovery kit in your password manager; on a fresh server, <code><span data-name></span> install &amp;&amp; <span data-name></span> recover</code> brings back admins, databases, sites and app data, then redeploys every app from git.</p>
-          <p class="instead"><b>Instead of</b> JetBackup, Acronis, or home-made backup scripts.</p>
-        </article>
-        <article class="cell">
-          <h3>Move in from cPanel or CyberPanel</h3>
-          <p>Import cPanel <code>cpmove</code> backups, or scan a live CyberPanel server and move sites one by one while the old panel keeps serving. Cutover has a one-click rollback.</p>
-        </article>
-        <article class="cell">
-          <h3>Realtime and TURN</h3>
-          <p>Pusher-compatible WebSockets (pusher-js, Laravel Echo and the Pusher SDKs work unchanged) and a coturn relay for WebRTC calls and peer-to-peer games. Both optional, nothing on disk until installed.</p>
-        </article>
-        <article class="cell">
-          <h3>Private network</h3>
-          <p>Built-in WireGuard with no account and no coordination server. Devices by key or QR code. Locks close SSH and the panel to everything but the VPN, and undo themselves if you lock yourself out.</p>
-          <p class="instead"><b>Instead of</b> Tailscale for admin access.</p>
-        </article>
-        <article class="cell">
-          <h3>Alerts and self-update</h3>
-          <p>Telegram alerts for failed deploys, crons and backups, services that go down, full disks and new serious vulnerabilities. <code><span data-name></span> update</code> runs the new binary first and rolls back by itself if it does not come up within a minute.</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <section class="security" id="security" aria-labelledby="h-sec">
-    <div class="wrap">
-      <div class="head">
-        <h2 id="h-sec">A compromised web UI should not be a compromised server.</h2>
-        <p>The panel is built around that one assumption. The part that faces your browser has no power of its own.</p>
-      </div>
+      <h2 id="h-sec">Built so a hacked web page can't become a hacked server.</h2>
+      <p class="sub">The part that faces your browser has no power of its own. Everything that matters goes through a small root agent that checks each request and asks you for a fresh 2FA code before anything risky.</p>
 
       <ol class="flow" aria-label="How a request travels">
-        <li class="node">
-          <h3>You</h3>
-          <p>Browser over an SSH tunnel or the built-in VPN. Login is argon2id plus mandatory TOTP.</p>
-        </li>
-        <li class="link" aria-hidden="true"><span>localhost only</span></li>
-        <li class="node">
-          <h3>Web UI</h3>
-          <p>Unprivileged user in a hardened systemd sandbox. It can ask whether a 2FA code is right, but it cannot make one.</p>
-        </li>
-        <li class="link" aria-hidden="true"><span>unix socket</span></li>
-        <li class="node root">
-          <h3>Root agent</h3>
-          <p>A fixed list of typed operations. Every argument is validated, no caller-supplied shell command runs as root, and the 2FA check happens here.</p>
-        </li>
+        <li><b>You</b><span>Over an SSH tunnel or the built-in VPN. Password plus a 2FA code.</span></li>
+        <li><b>Web UI</b><span>Runs as an unprivileged user in a sandbox. It can ask, it can't act.</span></li>
+        <li class="root"><b>Root agent</b><span>A fixed list of typed operations. Validates every argument and checks the 2FA code itself.</span></li>
       </ol>
 
-      <p class="secnote"><strong>Sensitive actions need a fresh 2FA code checked by the agent</strong>: revealing secrets, changing environment variables or what an app runs, dropping or restoring data, adding a VPN device, cutover. Even a fully compromised web process cannot read your secrets or plant code into an app.</p>
-
       <dl class="facts">
-        <div>
-          <dt>Sandboxed workloads</dt>
-          <dd>Each app and PHP site has its own system user, a read-only system, no new privileges, a syscall filter, a memory cap and no access to cloud metadata. Builds run in a sandbox too.</dd>
-        </div>
-        <div>
-          <dt>Vulnerability tracking</dt>
-          <dd>Nightly scan of OS advisories, app and site lockfiles (via OSV.dev), Node.js, PHP and WordPress core. OS security updates, PHP patch releases and the edge update themselves, never rebooting without you. Dependencies and plugins are reported, not changed.</dd>
-        </div>
-        <div>
-          <dt>Shield</dt>
-          <dd>Malware scanner with reversible quarantine, optional ClamAV deep scan, WordPress login brute-force bans and IP reputation lists. It is not a WAF, an EDR or DDoS protection, and says so.</dd>
-        </div>
-        <div>
-          <dt>Backups an attacker can't erase</dt>
-          <dd>Encrypted before upload, and protected stores refuse deletes from the server. The store test tells you whether a stolen key could still delete.</dd>
-        </div>
-        <div>
-          <dt>Audit page and log</dt>
-          <dd>A read-only audit of public ports, firewall, SSH, database bind and more, with the exact fix command for each finding. Every action lands in the audit log.</dd>
-        </div>
-        <div>
-          <dt>Network guard</dt>
-          <dd>nftables rules against SSH brute force and per-address HTTP floods, with no extra daemon. Secrets stay root-only and write-only from the UI.</dd>
-        </div>
+        <div><dt>Nightly vulnerability scan</dt><dd>OS advisories, app and site lockfiles, Node.js, PHP and WordPress core. Serious findings reach you on Telegram.</dd></div>
+        <div><dt>Patches without you</dt><dd>OS security updates, PHP patch releases and the web server update themselves and roll back if a site stops answering. App dependencies are reported, never changed.</dd></div>
+        <div><dt>Safe kernel reboots</dt><dd>New kernels are booted in a quiet window, every app is checked afterwards, and the old kernel stays ready.</dd></div>
+        <div><dt>2FA on risky actions</dt><dd>Reading a secret, changing what an app runs, adding a domain, granting database access, restoring data. Not only at login.</dd></div>
+        <div><dt>Nothing public but your sites</dt><dd>The panel and SSH sit behind built-in WireGuard. Databases stay local unless you open one, and then only over TLS.</dd></div>
+        <div><dt>Every app in its own box</dt><dd>Its own Linux user, a read-only system, a syscall filter and a memory cap. Sites are served without following symlinks, so one hacked site can't publish another's files.</dd></div>
+        <div><dt>Backups an attacker can't erase</dt><dd>Encrypted with AES-256 before upload. Mark a store as protected and the server can no longer delete from it.</dd></div>
+        <div><dt>Audited</dt><dd>The whole codebase was reviewed by Claude Mythos 5.2 before release, and every finding was fixed. Found something? <a href="https://github.com/agtt/pano/blob/main/SECURITY.md">Report it privately</a>.</dd></div>
       </dl>
     </div>
   </section>
 
-  <section id="compare" aria-labelledby="h-compare">
+  <section class="feat" id="features" aria-labelledby="h-feat">
     <div class="wrap">
-      <div class="head">
-        <h2 id="h-compare">Next to the big panels.</h2>
-        <p>A qualitative sketch, not a benchmark. cPanel and CyberPanel are mature suites that cover things this project deliberately does not.</p>
-      </div>
+      <h2 id="h-feat">What it does all day.</h2>
+      <dl class="rows">
+        <div><dt>Deploy from git</dt><dd>Push to GitHub, GitLab, Gitea or Forgejo. The new release builds in a sandbox, starts next to the old one and only gets traffic once it's healthy. Rollback takes seconds. Every branch can get its own preview link.</dd></div>
+        <div><dt>Node, Bun, Python and PHP</dt><dd>Next.js and monorepos, Django, FastAPI and Flask, PHP 7.4 to 8.5 and WordPress. Each app or site runs as its own user with its own runtime version.</dd></div>
+        <div><dt>HTTPS on its own</dt><dd>Caddy at the edge: Let's Encrypt certificates, HTTP/3 and security headers. The config is checked before every reload.</dd></div>
+        <div><dt>Databases in one click</dt><dd>MariaDB, PostgreSQL and Valkey on demand. The app gets its <code>DATABASE_URL</code> directly, so the password never reaches your browser.</dd></div>
+        <div><dt>Cron jobs and queues</dt><dd>Every job of every app on one page, with last and next run, logs and alerts when one fails.</dd></div>
+        <div><dt>Recover a whole server</dt><dd>Keep the one-line recovery kit in your password manager. On a new server, <code><span data-name></span> install</code> and <code><span data-name></span> recover</code> bring back admins, databases, sites and app data, then redeploy every app.</dd></div>
+        <div><dt>Move in from cPanel or CyberPanel</dt><dd>Import cPanel backups, or move sites from a live CyberPanel server one at a time while the old panel keeps serving.</dd></div>
+        <div><dt>Updates itself</dt><dd><code><span data-name></span> update</code> starts the new release first and rolls back on its own if it doesn't come up within a minute.</dd></div>
+      </dl>
+    </div>
+  </section>
 
-      <div class="table-wrap" role="region" aria-labelledby="h-compare" tabindex="0">
-        <table>
-          <caption>Based on each project's general positioning; check current versions before deciding. Corrections welcome.</caption>
-          <thead>
-            <tr><th scope="col"><span class="vh">Topic</span></th><th scope="col" class="us"><span data-name></span></th><th scope="col">cPanel</th><th scope="col">CyberPanel</th></tr>
-          </thead>
-          <tbody>
-            <tr><th scope="row">Footprint</th><td class="us">One binary; optional parts installed on demand</td><td>Large all-in-one suite</td><td>Full stack around OpenLiteSpeed</td></tr>
-            <tr><th scope="row">Modern apps (Next.js, Bun)</th><td class="us">Core use case: git deploy, blue/green releases, rollback</td><td>Possible, not the focus</td><td>Possible, not the focus</td></tr>
-            <tr><th scope="row">PHP and WordPress sites</th><td class="us">Yes, each site isolated in its own pool and sandbox; no WordPress toolkit yet</td><td>Yes, mature tooling</td><td>Yes</td></tr>
-            <tr><th scope="row">Email, DNS, FTP hosting</th><td class="us">Not included, by design</td><td>Included</td><td>Included</td></tr>
-            <tr><th scope="row">Resellers, client accounts, billing</th><td class="us">Not yet</td><td>Yes</td><td>Yes</td></tr>
-            <tr><th scope="row">Encrypted off-site backups and recovery kit</th><td class="us">Built in</td><td>Backup tooling included; destinations and encryption vary</td><td>Backup tooling included; destinations and encryption vary</td></tr>
-            <tr><th scope="row">Licence</th><td class="us">MIT, open source</td><td>Commercial</td><td>Open source</td></tr>
-          </tbody>
-        </table>
-      </div>
+  <section class="cmp" id="compare" aria-labelledby="h-cmp">
+    <div class="wrap">
+      <h2 id="h-cmp">Next to the panels you know.</h2>
+      <p class="sub">cPanel and CyberPanel are mature suites with email, DNS and reseller features this project leaves out on purpose. Where they overlap:</p>
 
-      <div class="gaps">
-        <h3>What it doesn't do yet</h3>
-        <p>Email hosting and a DNS server (meant to stay with Cloudflare or a mail provider), multiple servers from one panel, resellers and client roles, and a file manager and per-site SFTP users. It is a young project, tested end to end in VMs.</p>
+      <table class="vs">
+        <thead>
+          <tr><th scope="col"><span class="vh">Topic</span></th><th scope="col" class="us"><span data-name></span></th><th scope="col">cPanel</th><th scope="col">CyberPanel</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Licence</th><td class="us" data-label="pano">Free, MIT</td><td data-label="cPanel">From $35.99 a month</td><td data-label="CyberPanel">Free, paid add-ons</td></tr>
+          <tr><th scope="row">Memory</th><td class="us" data-label="pano">About 100 MB in use</td><td data-label="cPanel">2 GB minimum</td><td data-label="CyberPanel">1 GB minimum</td></tr>
+          <tr><th scope="row">Nightly vulnerability scan</th><td class="us" data-label="pano">Built in</td><td data-label="cPanel">No</td><td data-label="CyberPanel">No</td></tr>
+          <tr><th scope="row">Automatic security patches</th><td class="us" data-label="pano">OS, PHP, web server</td><td data-label="cPanel">OS and panel</td><td data-label="CyberPanel">OS</td></tr>
+          <tr><th scope="row">Panel and SSH behind a VPN</th><td class="us" data-label="pano">Built in</td><td data-label="cPanel">No</td><td data-label="CyberPanel">No</td></tr>
+          <tr><th scope="row">Zero-downtime git deploys</th><td class="us" data-label="pano">Built in</td><td data-label="cPanel">No</td><td data-label="CyberPanel">No</td></tr>
+          <tr><th scope="row">Email, DNS and FTP hosting</th><td class="us" data-label="pano">Not included</td><td data-label="cPanel">Included</td><td data-label="CyberPanel">Included</td></tr>
+          <tr><th scope="row">Resellers and billing</th><td class="us" data-label="pano">Not yet</td><td data-label="cPanel">Yes</td><td data-label="CyberPanel">Yes</td></tr>
+        </tbody>
+      </table>
+      <p class="fine">cPanel: Admin licence for up to 5 accounts, list price excluding VAT, November 2026. Minimums are each project's published requirements. Corrections welcome.</p>
+
+      <div class="young">
+        <h3>It's an early release.</h3>
+        <p>Tested end to end on AlmaLinux, Debian and Ubuntu, but young. Not there yet: email hosting, a DNS server, managing several servers from one panel, resellers, a file manager and per-site SFTP users. Try it on a spare server first.</p>
       </div>
     </div>
   </section>
@@ -247,9 +163,9 @@
   <div class="wrap">
     <p><span data-name></span> is open source under the MIT licence.</p>
     <ul>
-      <li><a href="https://github.com/agtt/pano">GitHub</a></li>
+      <li><a href="https://github.com/agtt/pano">Source on GitHub</a></li>
+      <li><a href="https://github.com/agtt/pano/releases">Releases</a></li>
       <li><a href="https://github.com/agtt/pano/blob/main/SECURITY.md">Report a vulnerability</a></li>
-      <li><a href="#top">Back to top</a></li>
     </ul>
   </div>
 </footer>
@@ -259,7 +175,8 @@
   const NAME = "pano";
 
   document.querySelectorAll("[data-name]").forEach(function (el) { el.textContent = NAME; });
-  var t = NAME + " — a light, secure server panel for modern apps and PHP sites";
+  document.querySelectorAll('[data-label="pano"]').forEach(function (el) { el.setAttribute("data-label", NAME); });
+  var t = NAME + ", a free, open-source server panel that keeps itself patched";
   document.title = t;
   var og = document.querySelector('meta[property="og:title"]');
   if (og) og.setAttribute("content", t);
@@ -267,7 +184,7 @@
   // Copy button for the install command.
   var btn = document.getElementById("copy");
   btn.addEventListener("click", function () {
-    var text = document.getElementById("cmd").textContent.replace(/^\$\s*/, "");
+    var text = document.getElementById("cmd").textContent.trim();
     var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600); };
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(done, function () {});
