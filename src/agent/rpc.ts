@@ -7,7 +7,7 @@ import * as alerts from "./alerts.ts";
 import * as android from "./android.ts";
 import * as appsOps from "./apps.ts";
 import * as envGroups from "./envgroups.ts";
-import { envPending } from "../shared/env.ts";
+import { envPending, groupList } from "../shared/env.ts";
 import * as previewsOps from "./previews.ts";
 import * as runner from "./runner.ts";
 import * as backup from "./backup.ts";
@@ -142,11 +142,18 @@ export function needsOtp(method: string, p: P): boolean {
  * (NODE_OPTIONS=--import=data:..., LD_PRELOAD, a proxy, a CA file): setting one is planting code.
  */
 const RUNTIME_ENV =
-  /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|BUN_.*|DENO_.*|LD_.*|DYLD_.*|PATH|PYTHON.*|VIRTUAL_ENV|UV_.*|PIP_.*|PERL5?LIB|PERL5OPT|RUBYOPT|RUBYLIB|GEM_HOME|GEM_PATH|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|PHPRC|PHP_INI_SCAN_DIR|BASH_ENV|ENV|SHELLOPTS|PS4|GIT_.*|NPM_CONFIG_.*|YARN_.*|COREPACK_.*|GCONV_PATH|HOSTALIASES|LOCALDOMAIN|RES_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i;
+  /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|BUN_.*|DENO_.*|LD_.*|DYLD_.*|PATH|PYTHON.*|PERL5?LIB|PERL5OPT|RUBYOPT|RUBYLIB|GEM_HOME|GEM_PATH|BUNDLE_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|PHPRC|PHP_INI_SCAN_DIR|BASH_ENV|ENV|SHELLOPTS|PS4|GIT_.*|NPM_CONFIG_.*|YARN_.*|COREPACK_.*|GCONV_PATH|HOSTALIASES|LOCALDOMAIN|RES_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|HTTPS?_PROXY|ALL_PROXY|NO_PROXY)$/i;
 
-/** True when the new variables add or change a runtime variable. */
-export const changesRuntimeEnv = (next: Record<string, string>, cur: Record<string, string>) =>
-  Object.keys(next).some((k) => RUNTIME_ENV.test(k) && next[k] !== cur[k]);
+/** What uv and pip read (an index to install from, the environment to install into): runtime variables of Python apps only, UV_THREADPOOL_SIZE of a Node.js app is just a number. */
+const PYTHON_ENV = /^(VIRTUAL_ENV|UV_.*|PIP_.*|POETRY_.*)$/i;
+
+/** True when the new variables add or change a runtime variable (`python`: of a Python app, or a group one uses). */
+export const changesRuntimeEnv = (next: Record<string, string>, cur: Record<string, string>, python = false) =>
+  Object.keys(next).some((k) => (RUNTIME_ENV.test(k) || (python && PYTHON_ENV.test(k))) && next[k] !== cur[k]);
+
+/** Whether the app, or any Python app that uses the shared group, runs Python. */
+const pythonApp = (name: unknown) => apps.get(String(name ?? ""))?.runtime === "python";
+const pythonGroup = (group: unknown) => apps.list().some((a) => a.runtime === "python" && groupList(a.env_groups ?? "").includes(String(group ?? "")));
 
 /**
  * Whether this call needs a code sent with it (no trusted window, no grant). Fails closed: if the
@@ -158,14 +165,14 @@ export async function alwaysAsk(method: string, p: P): Promise<boolean> {
     if (method === "apps.update") return changedAppFields(p).some((k) => (RUN_FIELDS as readonly string[]).includes(k));
     if (method === "apps.env.set") {
       const cur = await appsOps.getEnv(p.name, envScope(p.scope));
-      return changesRuntimeEnv(unmask(p.vars, cur), cur);
+      return changesRuntimeEnv(unmask(p.vars, cur), cur, pythonApp(p.name));
     }
     if (method === "envGroups.save") {
       const cur = await envGroups.readGroup(p.name).catch(() => ({}) as Record<string, string>);
-      return changesRuntimeEnv(unmask(p.vars, cur), cur);
+      return changesRuntimeEnv(unmask(p.vars, cur), cur, pythonGroup(p.name));
     }
     // The connection URL goes into the variable the caller names.
-    if (method === "apps.attachDatabase") return RUNTIME_ENV.test(String(p.key ?? ""));
+    if (method === "apps.attachDatabase") return RUNTIME_ENV.test(String(p.key ?? "")) || (pythonApp(p.name) && PYTHON_ENV.test(String(p.key ?? "")));
   } catch {
     return true;
   }

@@ -4,13 +4,14 @@
 // sandbox as a Node.js build; nothing is passed to a shell except the admin's own commands.
 
 import { lstat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import {
-  PY_DEFAULTS, defaultWorkers, detectPython, djangoArgv, djangoProbeArgv, hasHashes, insideDir, installSteps, parsePyStatic, parseStaticProbe, serverCommand,
+  PY_DEFAULTS, defaultWorkers, isPreviewName, detectPython, djangoArgv, djangoProbeArgv, hasHashes, insideDir, installSteps, parsePyStatic, parseStaticProbe, serverCommand,
   serverInstallStep, serverPackage, staticDir, triOn, uvEnv, type PyPlan, type PyStep,
 } from "../shared/python.ts";
 import { ensureBuildPackages, readRepo, snapshotStatic, uvDir } from "./python.ts";
-import { exists, remove } from "./sys.ts";
+import { exists, lookupUser, remove } from "./sys.ts";
 import type { App } from "./state.ts";
 
 /** Runs one argv in the build sandbox; `envFile`: the app's variables are loaded (build, migrate), otherwise it never sees them. */
@@ -28,6 +29,8 @@ export type PyCtx = {
   log: (l: string) => void;
   step: (s: string) => void | Promise<void>;
   sb: PySandbox;
+  /** previews only: variables the preview shares with production that point at a database or store */
+  sharedStoreKeys?: string[];
 };
 
 /**
@@ -53,7 +56,7 @@ export type PyBuilt = { plan: PyPlan; maps: { url: string; src: string }[] };
 /** Install dependencies and build; returns what detection found and where static files are (not yet copied). */
 export async function buildPython(c: PyCtx): Promise<PyBuilt> {
   const { app } = c;
-  const repo = await readRepo(c.workdir, app.py_requirements);
+  const repo = await readRepo(c.workdir, app.py_requirements, dirname(c.dir));
   const plan = detectPython(repo, app);
   c.log(`detected: install=${app.install_cmd ? "custom command" : plan.mode}${plan.requirements ? ` (${plan.requirements})` : ""}, django=${plan.django}, app=${plan.app ? `${plan.app.target} (${plan.app.kind})` : "none"}`);
   await ensureBuildPackages(plan.deps, c.log);
@@ -84,7 +87,9 @@ export async function buildPython(c: PyCtx): Promise<PyBuilt> {
   // Django: collectstatic with the app's env (settings read it). "auto" does not fail the deploy: many
   // projects have no STATIC_ROOT; "on" is the admin's word and does.
   let collected = false;
-  if (triOn(app.py_collectstatic, plan.django && !app.build_cmd)) {
+  // Previews serve no collected static files (the edge does not publish them), so they do not collect any.
+  const preview = isPreviewName(app.name);
+  if (!preview && triOn(app.py_collectstatic, plan.django && !app.build_cmd)) {
     if (!plan.django) throw new Error("collectstatic needs a Django project (manage.py)");
     await c.step("collectstatic");
     try {
@@ -95,7 +100,7 @@ export async function buildPython(c: PyCtx): Promise<PyBuilt> {
       c.log(`collectstatic failed (${e instanceof Error ? e.message.split("\n")[0] : e}); continuing. Set STATIC_ROOT, or turn it off.`);
     }
   }
-  return { plan, maps: await staticMaps(c, plan, collected) };
+  return { plan, maps: preview ? [] : await staticMaps(c, plan, collected) };
 }
 
 /** Which directories the edge serves: the admin's list, else (Django, after collectstatic) what the settings say. */
@@ -145,6 +150,12 @@ export async function ensureServers(c: PyCtx, starts: Iterable<string>) {
 export async function migrate(c: PyCtx, plan: PyPlan) {
   if (!triOn(c.app.py_migrate, plan.django)) return;
   if (!plan.django) throw new Error("migrate needs a Django project (manage.py)");
+  // Branch code must never migrate a database nobody reviewed it against: previews opt in with
+  // "Always" and then only when their environment holds no database of production's.
+  if (isPreviewName(c.app.name)) {
+    if (c.app.py_migrate !== "on") return c.log("preview: migrate skipped (set Django migrate to Always to run it in previews)");
+    if (c.sharedStoreKeys?.length) return c.log(`preview: migrate skipped, its environment shares ${c.sharedStoreKeys.join(", ")} with production`);
+  }
   await c.step("migrate (before the traffic switch)");
   await c.sb(djangoArgv(venvDir(c.dir), "migrate"), { env: venvEnv(c), envFile: true, onLine: c.log });
 }
@@ -158,7 +169,8 @@ export async function publishStatic(c: PyCtx, slot: "a" | "b", maps: { url: stri
       c.log(`static files: ${m.src} does not exist, ${m.url} is left to the app`);
       continue;
     }
-    const r = await snapshotStatic(m.src, c.dir, staticDir(c.app.name, slot, urls.length));
+    const owner = await lookupUser(`app-${c.app.name}`);
+    const r = await snapshotStatic(m.src, dirname(c.dir), staticDir(c.app.name, slot, urls.length), { uid: owner?.uid });
     c.log(`static files ${m.url}: ${r.files} files (${Math.round(r.bytes / 1024)} KB) served by the edge${r.skipped ? `, ${r.skipped} skipped (links, dot files, too large)` : ""}`);
     urls.push(m.url);
   }

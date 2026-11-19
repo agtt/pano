@@ -360,6 +360,23 @@ export function serverInstallStep(pkg: "gunicorn" | "uvicorn", i: Pick<PyInstall
 /** True when a requirements file pins hashes. */
 export const hasHashes = (text: string) => /--hash=sha\d+:/.test(text);
 
+// ---- previews ----------------------------------------------------------------------
+
+/** A preview is deployed as a synthetic app named pv_<id> (shared/preview.ts pvName). */
+export const isPreviewName = (name: string) => /^pv_\d+$/.test(name);
+
+const DB_KEY = /(DATABASE|(^|_)DB(_|$)|MYSQL|MARIA|POSTGRES|(^|_)PG|REDIS|VALKEY)/i;
+
+/**
+ * Variables a preview shares with production that point at a database or other backing store: the same
+ * URL, or the same value under a database-looking name. A preview must never migrate such a store.
+ */
+export function sharedStoreKeys(preview: Record<string, string>, production: Record<string, string>): string[] {
+  return Object.keys(preview)
+    .filter((k) => !!preview[k] && preview[k] === production[k] && (/^[a-z][a-z0-9+.-]*:\/\//i.test(preview[k]!) || DB_KEY.test(k)))
+    .sort();
+}
+
 // ---- Django ---------------------------------------------------------------------------
 
 export const djangoArgv = (venv: string, sub: "collectstatic" | "migrate"): string[] => [`${venv}/bin/python`, "manage.py", sub, "--noinput"];

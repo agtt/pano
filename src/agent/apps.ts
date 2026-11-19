@@ -13,7 +13,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { cpus } from "node:os";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import { envSnapshot, groupList, mergeEnv, normalizeGroups } from "../shared/env.ts";
-import { PY_DEFAULTS, liveStatic, pythonCronScript, staticDir, pythonStartScript, validatePython, type PyFields } from "../shared/python.ts";
+import { PY_DEFAULTS, liveStatic, sharedStoreKeys, pythonCronScript, staticDir, pythonStartScript, validatePython, type PyFields } from "../shared/python.ts";
 import { normalizeEnvExclude, PREVIEW_MAX_DEFAULT, PREVIEW_TTL_DEFAULT, validatePreviewDomain } from "../shared/preview.ts";
 import { formatEnv, parseEnv, parseProcesses, v, type ProcessSpec } from "../shared/validate.ts";
 import { notify } from "./alerts.ts";
@@ -23,7 +23,7 @@ import { reportStatus } from "./github.ts";
 import { parsePm2Ref, pm2App, pm2Logs, pm2Reload } from "./pm2.ts";
 import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
-import { appHosts, apps, audit, deploys, procsOf, type App, type Process } from "./state.ts";
+import { appHosts, apps, audit, deploys, previews, procsOf, type App, type Process } from "./state.ts";
 import type { PyBuilt, PyCtx } from "./pydeploy.ts";
 import { ensureDir, exists, randomToken, readText, remove, removeAs, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
 
@@ -174,7 +174,10 @@ export async function ensureAppHome(name: string) {
 export async function updateApp(name: string, input: AppInput, actor: string) {
   const app = mustGet(name);
   const processes = assignPorts(app.processes, input.processes);
-  apps.update(name, { ...input, processes, name: undefined } as Partial<App>);
+  // Collected static files belong to a Python release: another runtime serves none of them.
+  const dropStatic = input.runtime !== "python" && !!app.static_live;
+  apps.update(name, { ...input, processes, name: undefined, ...(dropStatic ? { static_live: "" } : {}) } as Partial<App>);
+  if (dropStatic) await remove(`${paths.static}/${name}`);
   const next = apps.get(name)!;
   if (app.kind === "managed") {
     await writeUnits(next);
@@ -396,6 +399,8 @@ export async function rollback(name: string, actor: string) {
   const release = target.split("/").pop() ?? "";
   if (!release || release === app.current_release || !(await exists(`${home}/releases/${release}`))) throw new Error("no previous release on disk");
   if (!(await exists(runFile(name, procsOf(app)[0]!, to, "sh")))) throw new Error("the previous release has no start script");
+  // Its virtualenv links to the Python it was built with; that version may have been removed since.
+  if (app.runtime === "python" && !(await exists(`${home}/slot-${to}/.venv/bin/python`))) throw new Error("the previous release's Python is no longer installed: deploy again");
   const procs = procsOf(app);
   const log = (l: string) => console.log(`[rollback ${name}] ${l}`);
   for (const p of procs.filter(isWeb)) await run(["systemctl", "restart", unitName(name, p, to)]);
@@ -775,11 +780,17 @@ async function deploy(app: App, id: number, target: DeployTarget) {
     }
     if (pyCtx && built) {
       const mod = await pyDeploy();
+      const pvId = /^pv_(\d+)$/.exec(app.name)?.[1];
+      if (pvId) {
+        // A preview's own env against its parent's production env: shared databases block migrate.
+        const parent = apps.get(previews.get(Number(pvId))?.app ?? "");
+        pyCtx.sharedStoreKeys = parent ? sharedStoreKeys(await effectiveEnv(app), await effectiveEnv(parent)) : [];
+      }
       // The server (gunicorn/uvicorn) in the venv, then the release step, then static files for the edge:
       // all before anything of the new release starts, so a failure here leaves the live release alone.
       await mod.ensureServers(pyCtx, starts.values());
       await mod.migrate(pyCtx, built.plan);
-      staticLive = await mod.publishStatic(pyCtx, slot, built.maps);
+      if (!pvId) staticLive = await mod.publishStatic(pyCtx, slot, built.maps);
     }
     await writeUnits(app, { slot, starts });
 

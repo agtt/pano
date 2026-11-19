@@ -133,7 +133,7 @@ export function appRoutes(a: App): Map<string, Route[]> {
     }
   }
   // Collected static files (Python apps): the edge answers these paths itself, on every host of the app.
-  const urls = a.active_slot ? liveStatic(a.static_live) : [];
+  const urls = a.active_slot && a.runtime === "python" ? liveStatic(a.static_live) : [];
   if (urls.length) {
     for (const host of [...out.keys()]) {
       urls.forEach((url, i) => out.set(host, [...out.get(host)!, { path: url, upstream: "", static: staticDir(a.name, a.active_slot, i) }]));
