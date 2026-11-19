@@ -128,3 +128,7 @@ echo "sha256 ok: $HAVE"
 chmod 755 "$TMP/$ASSET"
 "$TMP/$ASSET" version >/dev/null 2>&1 || fail "the downloaded binary does not run on this machine"
 "$TMP/$ASSET" install
+# `pano` on root's PATH for `pano update --latest` and `pano admin` (a file there that is not our link stays).
+if [ ! -e /usr/local/bin/pano ] || [ -L /usr/local/bin/pano ]; then
+  mkdir -p /usr/local/bin && ln -sfn /opt/pano/bin/pano /usr/local/bin/pano
+fi
