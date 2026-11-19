@@ -147,6 +147,9 @@ export function parseRef(p: Record<string, unknown>): JobRef {
 
 /** Starts a run now, in the background; a run already in progress is not doubled. */
 export async function runJob(ref: JobRef, actor: string) {
+  // A suspended app or site runs none of its code: its timers are off, and a run by hand is refused too.
+  const suspended = ref.owner === "app" ? !!apps.get(ref.name)?.suspended : sites.get(ref.name)?.enabled === 0;
+  if (suspended) throw new Error(`${ref.name} is suspended: resume it before you run its jobs`);
   await run(["systemctl", "start", "--no-block", `${baseOf(ref)}.service`]);
   audit(actor, "job.run", ref);
 }

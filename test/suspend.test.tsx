@@ -3,7 +3,9 @@ import { appAction, startDeploy } from "../src/agent/apps.ts";
 import { SUSPENDED_PAGE, renderCaddyfile } from "../src/agent/edge.ts";
 import { FRESH_ONLY, methods, needsOtp } from "../src/agent/rpc.ts";
 import { apps, deploys, migrate, sites, state, type App, type Site } from "../src/agent/state.ts";
+import { runJob } from "../src/agent/jobs.ts";
 import { resumeApp, resumeSite, setProjectSuspended, suspendApp, suspendReason, suspendSite } from "../src/agent/suspend.ts";
+import * as wordpress from "../src/agent/wordpress.ts";
 import { withLang } from "../src/web/i18n.ts";
 import { AppForm, AppHead } from "../src/web/views/apps.tsx";
 import { SiteForm, SiteHead } from "../src/web/views/pages.tsx";
@@ -186,6 +188,27 @@ describe("suspend and resume", () => {
     await resumeSite("p1.example", "tester");
     expect(ran("systemctl enable --now pano-php-p1.example.service")).toBe(true);
     sites.remove("p1.example");
+  });
+
+  test("suspended: cron jobs run by hand and wp-cli are refused (N6)", async () => {
+    sites.upsert(site({ name: "n6.example", kind: "php", domains: ["n6.example"], root: "/srv/pano/sites/n6.example/public", routes: [], crons: [{ schedule: "daily", command: "php x.php" }] }));
+    apps.insert({ name: "n6-web", kind: "managed", domains: ["n6.example.com"], active_slot: "a", port_a: 4310, port_b: 4311, crons: [{ schedule: "daily", command: "echo hi" }] });
+    await suspendSite("n6.example", "", "tester");
+    await suspendApp("n6-web", "", "tester");
+    lines.length = 0;
+    await expect(runJob({ owner: "site", name: "n6.example", index: 0 }, "tester")).rejects.toThrow("suspended");
+    await expect(runJob({ owner: "app", name: "n6-web", index: 0 }, "tester")).rejects.toThrow("suspended");
+    expect(lines.some((l) => l.includes("systemctl start"))).toBe(false);
+    for (const call of [() => wordpress.setMaintenance("n6.example", true, "tester"), () => wordpress.status("n6.example"), () => wordpress.update({ name: "n6.example", core: true }, "tester")])
+      await expect(call()).rejects.toThrow("suspended");
+    expect(() => wordpress.assertSiteRuns(sites.get("n6.example")!)).toThrow("suspended");
+    await resumeSite("n6.example", "tester");
+    await resumeApp("n6-web", "tester");
+    expect(() => wordpress.assertSiteRuns(sites.get("n6.example")!)).not.toThrow();
+    await runJob({ owner: "app", name: "n6-web", index: 0 }, "tester");
+    expect(ran("systemctl start --no-block pano-cron-n6-web-0.service")).toBe(true);
+    sites.remove("n6.example");
+    apps.remove("n6-web");
   });
 
   test("app: processes and cron timers stop; deploys, starts and rollbacks are refused; resume restores what ran", async () => {

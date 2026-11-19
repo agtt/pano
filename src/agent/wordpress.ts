@@ -223,6 +223,18 @@ function phpSite(name: unknown): Site {
   return site;
 }
 
+/** wp-cli loads the site's wp-config.php and plugins, i.e. runs its code: never for a suspended site. */
+export function assertSiteRuns(site: Pick<Site, "name" | "enabled">) {
+  if (!site.enabled) throw new Error(`${site.name} is suspended: resume it before you run WordPress tools`);
+}
+
+/** A PHP site whose code may run now (not suspended). */
+function runnableSite(name: unknown): Site {
+  const site = phpSite(name);
+  assertSiteRuns(site);
+  return site;
+}
+
 type WpOpts = { secrets?: Record<string, Record<string, string>>; timeoutMs?: number; check?: boolean; launch?: boolean };
 
 /**
@@ -241,6 +253,7 @@ export function wpSandboxed(name: string, user: string, home: string, env: Recor
 }
 
 async function wp(site: Site, args: string[], o: WpOpts = {}) {
+  assertSiteRuns(site);
   const home = siteHome(site.name);
   const user = siteUser(site.name);
   const env = wpEnv(site.php_version, home);
@@ -289,7 +302,7 @@ export type WpStatus = {
 };
 
 export async function status(name: unknown): Promise<WpStatus> {
-  const site = phpSite(name);
+  const site = runnableSite(name);
   if (!(await detect(site.name)).installed) throw new Error("WordPress is not installed on this site");
   await ensureWpCli();
   const soft = { check: false };
@@ -315,7 +328,7 @@ export async function status(name: unknown): Promise<WpStatus> {
 // ---- actions ----------------------------------------------------------------------
 
 export async function install(input: Record<string, unknown>, actor: string) {
-  const site = phpSite(input.name);
+  const site = runnableSite(input.name);
   const { title, adminUser, adminEmail } = validateInstall(input);
   const domain = site.domains.find((d) => d && !d.includes("*"));
   if (!domain) throw new Error("the site needs a real domain (not a catch-all) to install WordPress");
@@ -347,7 +360,7 @@ export async function install(input: Record<string, unknown>, actor: string) {
 export type UpdateInput = { name: unknown; core?: boolean; plugins?: string[] | "all"; themes?: string[] | "all" };
 
 export async function update(input: UpdateInput, actor: string): Promise<string[]> {
-  const site = phpSite(input.name);
+  const site = runnableSite(input.name);
   if (!input.core && !input.plugins && !input.themes) throw new Error("nothing selected to update");
   await ensureWpCli();
   const steps: string[][] = [];
@@ -364,7 +377,7 @@ export async function update(input: UpdateInput, actor: string): Promise<string[
 }
 
 export async function setMaintenance(name: unknown, on: boolean, actor: string) {
-  const site = phpSite(name);
+  const site = runnableSite(name);
   await ensureWpCli();
   await wp(site, ["maintenance-mode", on ? "activate" : "deactivate"]);
   audit(actor, "wp.maintenance", { site: site.name, on });
@@ -372,7 +385,7 @@ export async function setMaintenance(name: unknown, on: boolean, actor: string) 
 
 /** A new password for one administrator; their sessions end. Returned once. */
 export async function resetPassword(name: unknown, userId: unknown, actor: string) {
-  const site = phpSite(name);
+  const site = runnableSite(name);
   const id = v.int(userId, 1, 1e9, "user");
   await ensureWpCli();
   const admins = parseAdmins((await wp(site, ["user", "list", "--role=administrator", "--fields=ID,user_login,user_email", "--format=json"])).stdout);
@@ -395,7 +408,8 @@ export function setAutoUpdate(name: unknown, on: boolean, actor: string) {
 export async function nightlyUpdates() {
   const failed: string[] = [];
   for (const site of sites.list()) {
-    if (site.kind !== "php" || settings.get(`wp.auto.${site.name}`) !== "1") continue;
+    // A suspended site's code does not run, not even for updates.
+    if (site.kind !== "php" || !site.enabled || settings.get(`wp.auto.${site.name}`) !== "1") continue;
     try {
       if (!(await exists(`${siteHome(site.name)}/public/wp-includes/version.php`))) continue;
       await ensureWpCli();
