@@ -64,9 +64,19 @@ export const v = {
     check(VERSION.test(x), "version must look like 24.1.0");
     return x;
   },
-  runtime(s: unknown): "node" | "bun" {
-    check(s === "node" || s === "bun", "runtime must be node or bun");
+  runtime(s: unknown): "node" | "bun" | "python" {
+    check(s === "node" || s === "bun" || s === "python", "runtime must be node, bun or python");
     return s;
+  },
+  /** Python: 3.13 (newest patch, pinned at the first deploy) or 3.13.5. */
+  pythonVersion(s: unknown): string {
+    const x = String(s ?? "").trim().replace(/^v/, "");
+    check(/^3\.\d{1,2}(\.\d{1,2})?$/.test(x), "Python version must look like 3.13 or 3.13.5");
+    return x;
+  },
+  /** The version of a runtime: Python also takes a minor ("3.13"), the others exactly x.y.z. */
+  runtimeVersion(rt: "node" | "bun" | "python", s: unknown): string {
+    return rt === "python" ? v.pythonVersion(s) : v.version(s);
   },
   port(n: unknown): number {
     const x = Number(n);
@@ -152,7 +162,8 @@ export const PHP_EOL: Record<string, string> = {
 };
 export const DEFAULT_PHP = "8.5";
 
-export type SiteRoute = { path: string; upstream: string; redirect?: string; code?: number };
+/** `static`: files of this directory are served by the edge itself (collected static files of a Python app), `upstream` is then empty. */
+export type SiteRoute = { path: string; upstream: string; redirect?: string; code?: number; static?: string };
 
 // A redirect target: an absolute https/http URL or a path on the same host, optionally ending in Caddy's
 // {uri} (the request's path and query). No spaces, quotes or other braces: it is written into the Caddyfile.

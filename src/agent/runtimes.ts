@@ -1,4 +1,4 @@
-// Node.js and Bun runtimes, installed side by side under /opt/pano/runtimes so
+// Node.js, Bun and (on demand) Python runtimes, installed side by side under /opt/pano/runtimes so
 // each app pins its own version and system packages never change them.
 // Every download is checked against the publisher's SHA-256 list.
 
@@ -7,16 +7,21 @@ import { fsPath, paths } from "../shared/config.ts";
 import { v } from "../shared/validate.ts";
 import { ensureDir, exists, remove, run } from "./sys.ts";
 
-export type Runtime = "node" | "bun";
+export type Runtime = "node" | "bun" | "python";
 
 export const arch = () => (process.arch === "arm64" ? "arm64" : "x64");
-const dir = (rt: Runtime, ver: string) => `${paths.runtimes}/${rt}/${ver}`;
+export const dir = (rt: Runtime | "uv", ver: string) => `${paths.runtimes}/${rt}/${ver}`;
 
 /** Directory that goes first on PATH for an app using this runtime. */
 export function runtimeBin(rt: Runtime, ver: string): string {
-  return rt === "node" ? `${dir(rt, ver)}/bin` : dir(rt, ver);
+  return rt === "bun" ? dir(rt, ver) : `${dir(rt, ver)}/bin`;
 }
 
+/**
+ * Node.js and Bun only: what every app's PATH, the Android and runner builds and the vulnerability
+ * scan have always seen. Python is optional and listed by installedAll(); it never shows up here,
+ * so a server without Python apps behaves exactly as before.
+ */
 export async function installed(): Promise<{ runtime: Runtime; version: string }[]> {
   const out: { runtime: Runtime; version: string }[] = [];
   for (const rt of ["node", "bun"] as const) {
@@ -27,6 +32,16 @@ export async function installed(): Promise<{ runtime: Runtime; version: string }
     } catch {}
   }
   return out.sort((a, b) => a.runtime.localeCompare(b.runtime) || cmpVer(b.version, a.version));
+}
+
+/** Everything installed, Python (only if it was ever installed) included. */
+export async function installedAll(): Promise<{ runtime: Runtime; version: string }[]> {
+  const py: { runtime: Runtime; version: string }[] = [];
+  try {
+    for (const ver of await readdir(fsPath(`${paths.runtimes}/python`))) if (/^\d+\.\d+\.\d+$/.test(ver)) py.push({ runtime: "python", version: ver });
+  } catch {}
+  py.sort((a, b) => cmpVer(b.version, a.version));
+  return [...(await installed()), ...py];
 }
 
 export function cmpVer(a: string, b: string): number {
@@ -92,6 +107,11 @@ export function expectedSum(list: string, file: string): string {
 }
 
 export async function install(rt: Runtime, version: string, log: (l: string) => void = () => {}): Promise<void> {
+  // Python lives in its own module, loaded only when someone installs it (see python.ts).
+  if (rt === "python") {
+    await (await import("./python.ts")).installPython(version, log);
+    return;
+  }
   const ver = v.version(version);
   const target = dir(rt, ver);
   if (await exists(target)) return;
@@ -132,5 +152,6 @@ export async function install(rt: Runtime, version: string, log: (l: string) => 
 
 export async function uninstall(rt: Runtime, version: string, inUse: boolean) {
   if (inUse) throw new Error(`${rt} ${version} is used by an app`);
+  if (rt === "python") return (await import("./python.ts")).uninstallPython(version);
   await remove(dir(rt, v.version(version)));
 }

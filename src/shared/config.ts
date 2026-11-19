@@ -24,6 +24,8 @@ export const paths = {
   logs: "/var/log/pano",
   apps: "/srv/pano/apps",
   sites: "/srv/pano/sites",
+  /** Collected static files of Python apps, root-owned copies the edge serves (created with the first one). */
+  static: "/srv/pano/static",
   containers: "/srv/pano/containers",
   containerEnv: "/etc/pano/containers",
   quadlets: "/etc/containers/systemd",

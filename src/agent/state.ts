@@ -12,7 +12,7 @@ export type App = {
   name: string;
   kind: "managed" | "external";
   domains: string[];
-  runtime: "node" | "bun";
+  runtime: "node" | "bun" | "python";
   runtime_version: string;
   repo: string;
   branch: string;
@@ -52,6 +52,16 @@ export type App = {
   env_built: string;
   /** 1: plain HTTP is redirected to HTTPS (default); 0: also served on plain HTTP (Cloudflare "Flexible" SSL, apps that redirect themselves) */
   http_redirect: number;
+  /** Python apps (shared/python.ts PyFields; the defaults mean nothing for other runtimes) */
+  py_server: string;
+  py_app: string;
+  py_requirements: string;
+  py_collectstatic: string;
+  py_migrate: string;
+  py_static: string;
+  py_workers: number;
+  /** URL prefixes (JSON array) the edge serves from the live release's collected static files; "" for apps without */
+  static_live: string;
   /** 1: the edge answers every request with the suspended page; its processes, cron timers and previews are stopped */
   suspended: number;
   suspended_reason: string;
@@ -349,6 +359,14 @@ const ADDED_COLUMNS: [table: string, column: string, def: string][] = [
   ["apps", "env_groups", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "env_running", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "env_built", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "py_server", "TEXT NOT NULL DEFAULT 'auto'"],
+  ["apps", "py_app", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "py_requirements", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "py_collectstatic", "TEXT NOT NULL DEFAULT 'auto'"],
+  ["apps", "py_migrate", "TEXT NOT NULL DEFAULT 'auto'"],
+  ["apps", "py_static", "TEXT NOT NULL DEFAULT ''"],
+  ["apps", "py_workers", "INTEGER NOT NULL DEFAULT 0"],
+  ["apps", "static_live", "TEXT NOT NULL DEFAULT ''"],
   ["apps", "http_redirect", "INTEGER NOT NULL DEFAULT 1"],
   ["apps", "suspended", "INTEGER NOT NULL DEFAULT 0"],
   ["apps", "suspended_reason", "TEXT NOT NULL DEFAULT ''"],
@@ -482,6 +500,8 @@ export function previewApp(parent: App, pv: Preview): App {
     auto_deploy: 0,
     crons: [],
     preview_domain: "",
+    // A preview serves no collected static files through the edge (they are the live release's).
+    static_live: "",
     // A preview's env is one file with the groups already merged in (prod-only variables left out).
     env_groups: "",
   };
