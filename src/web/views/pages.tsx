@@ -123,7 +123,7 @@ export function PhpSiteNew({ csrf, versions }: { csrf: string; versions: PhpVers
           <span>PHP</span>
           <PhpSelect versions={versions} current={versions[0]?.version} name="php_version" />
         </label>
-        <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required />
+        <Field label="Authenticator code" name="otp" autocomplete="one-time-code" required always />
         <div class="actions">
           <button class="btn primary">{t("Create")}</button>
         </div>

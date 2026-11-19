@@ -62,7 +62,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
     jobs, shield settings, suspending, a safe reboot, …) skip the code.
   - *Always ask.* These take only a code sent with that very call, never the window or a grant: revealing a secret (env and shared values,
     container env, webhook/realtime/TURN secrets, Valkey URL, backup key, recovery kit, WordPress or database password resets); changing
-    what runs (creating an app; repository, branch, directory, runtime, commands, processes, crons, shared groups or build isolation of an app;
+    what runs (creating an app or a PHP site, installing WordPress; repository, branch, directory, runtime, commands, processes, crons, shared groups or build isolation of an app;
     a variable such as `NODE_OPTIONS`, `LD_PRELOAD`, `PATH` or a proxy; site crons, containers, Android projects, restoring a quarantined
     file); what a site is (creating one, its kind, static root, proxy routes and redirects, adding or moving a domain, using another site's
     certificate); the network and its locks (VPN devices and locks, firewall off or ports, Cloudflare lock, guard, remote database access);

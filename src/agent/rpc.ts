@@ -106,8 +106,9 @@ export const FRESH_ONLY = new Set([
   "backup.key.export", "recovery.kit", "wp.resetPassword", "db.password",
   // a database user gets every privilege on an existing (a tenant's) database
   "db.grant",
-  // which code runs (as an app, a site, a container or with the Android signing key)
-  "apps.create", "sites.crons", "containers.save", "android.project.save", "shield.restore",
+  // which code runs (as an app, a site, a container or with the Android signing key); a new PHP site or a
+  // WordPress install with an admin of the caller's choosing is PHP running as a new site user
+  "apps.create", "sites.createPhp", "wp.install", "sites.crons", "containers.save", "android.project.save", "shield.restore",
   // the network and the locks
   "vpn.peer.add", "vpn.locks", "vpn.disable", "firewall.disable", "firewall.ports", "cloudflare.lock", "guard.set",
   "pg.remote.enable", "pg.remote.user.add", "mysql.remote.enable", "mysql.remote.user.add",

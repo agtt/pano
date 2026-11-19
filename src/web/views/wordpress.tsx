@@ -39,7 +39,7 @@ export function WordPressCard({ site, d, csrf }: { site: string; d: WpDetectView
         <Field label="Admin user" name="adminUser" required placeholder="admin" />
         <Field label="Admin email" name="adminEmail" type="email" required />
         <div class="actions">
-          <Otp />
+          <Otp always />
           <button class="btn primary">Install WordPress</button>
         </div>
       </form>
