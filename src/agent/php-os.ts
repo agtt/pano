@@ -46,13 +46,13 @@ export const resetOsCache = () => { cached = undefined; };
 export function assertSupported(os: PhpOs): void {
   if (os.family === "el") {
     if (!os.known || !["8", "9", "10"].includes(os.version.split(".")[0] ?? "")) {
-      throw new Error("PHP sites currently need AlmaLinux, Rocky or RHEL 8-10 (Remi packages), Debian 11-13 or Ubuntu 22.04/24.04 (Sury packages)");
+      throw new Error("PHP sites currently need AlmaLinux, Rocky or RHEL 8-10 (Remi packages), Debian 12-13 or Ubuntu 22.04/24.04 (Sury packages)");
     }
     return;
   }
   const ok = os.id === "ubuntu" ? os.version in UBUNTU_CODENAMES : os.version in DEBIAN_CODENAMES;
   if (!ok || !os.codename) {
-    throw new Error(`PHP sites on ${os.id || "this system"} ${os.version} are not supported (Debian 11-13, Ubuntu 22.04/24.04)`);
+    throw new Error(`PHP sites on ${os.id || "this system"} ${os.version} are not supported (Debian 12-13, Ubuntu 22.04/24.04)`);
   }
 }
 
