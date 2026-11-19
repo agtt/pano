@@ -72,9 +72,17 @@ function terminalQr(text: string): string {
   return r.code === 0 ? r.out : "";
 }
 
+/**
+ * A new server has no admin on either side. The web database belongs to the web user (a compromised
+ * pano-web could empty it), so the agent's root-owned admins decide as well: then the installer only
+ * updates, and a lost web login is `pano admin`'s job.
+ */
+export const isFirstInstall = (webUsers: number, agentAdmins: number) => webUsers === 0 && agentAdmins === 0;
+
 export async function firstRun(call: Call, ownWebDb: () => Promise<void>) {
   const { createUser, userCount, webDb } = await import("./web/auth.ts");
-  if (userCount() > 0) {
+  const { adminNames } = await import("./agent/otp.ts");
+  if (!isFirstInstall(userCount(), adminNames().length)) {
     // Opening it as root may have made its -wal/-shm files: they stay the web user's.
     webDb().close();
     await ownWebDb();
