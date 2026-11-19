@@ -4,7 +4,7 @@
 // CAP_NET_BIND_SERVICE; the Caddyfile is rendered from state and validated
 // before every reload, so a bad change never replaces a working config.
 
-import { readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { DRY_RUN, env, fsPath, paths } from "../shared/config.ts";
 import { liveStatic, staticDir } from "../shared/python.ts";
 import { remoteDomains } from "./remotedb-config.ts";
@@ -657,8 +657,28 @@ export const VIEWS = [
  * 2.38 drops it, see viewLock). When it still did not (Linux before 5.10, or the remount failed), the
  * mount is left off and the sites it holds are held offline (see EDGE_VIEW, WWW_VIEW).
  */
+/**
+ * The directory a view shows. pano's own sites directory is kept at 0755; /var/www belongs to the host:
+ * created only when missing, never chmodded, and a symlink or non-directory there means no view.
+ */
+export async function ensureViewParent(parent: string): Promise<boolean> {
+  if (parent !== WWW_ROOT) {
+    await ensureDir(parent, 0o755);
+    return true;
+  }
+  let st;
+  try {
+    st = await lstat(fsPath(parent));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    await ensureDir(parent, 0o755);
+    return true;
+  }
+  return st.isDirectory() && !st.isSymbolicLink();
+}
+
 async function ensureView(x: (typeof VIEWS)[number]): Promise<boolean> {
-  await ensureDir(x.parent, 0o755);
+  if (!(await ensureViewParent(x.parent))) return false;
   await writeAtomic(`${paths.systemd}/${x.mount}`, x.mountUnit, 0o644);
   await writeAtomic(`${paths.systemd}/${x.lock}`, x.lockUnit, 0o644);
   await run(["systemctl", "daemon-reload"]);
