@@ -85,6 +85,8 @@ const SENSITIVE = new Set([
   "sites.fixPermissions", "shield.quarantine",
   // Takes a tenant offline (or back): routine for an admin, so the trusted window covers it.
   "sites.suspend", "sites.resume", "sites.toggle", "apps.suspend", "apps.resume", "projects.suspend", "projects.resume",
+  // Takes every site down for a minute and can switch the boot kernel: the trusted window covers it, the web process alone not.
+  "vulns.reboot",
 ]);
 /**
  * Guarded actions that need a code sent with that very call, even while the session is trusted

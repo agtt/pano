@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { AUTO_MIN_UPTIME_MS, fstabErrors, grubbyField, kernelOf, nextAutoNight, tailscaleTakesWebPorts, unitNames } from "../src/agent/reboot.ts";
+import { FRESH_ONLY, needsOtp } from "../src/agent/rpc.ts";
 import { VulnsCard } from "../src/web/views/vulns.tsx";
+
+test("rebooting needs a code (or the trusted window), N5", () => {
+  expect(needsOtp("vulns.reboot", {})).toBe(true);
+  expect(FRESH_ONLY.has("vulns.reboot")).toBe(false);
+});
 
 test("grubby info and kernel paths", () => {
   const info = `index=0
