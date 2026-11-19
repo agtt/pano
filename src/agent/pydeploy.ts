@@ -157,7 +157,9 @@ export async function migrate(c: PyCtx, plan: PyPlan) {
     if (c.sharedStoreKeys?.length) return c.log(`preview: migrate skipped, its environment shares ${c.sharedStoreKeys.join(", ")} with production`);
   }
   await c.step("migrate (before the traffic switch)");
-  await c.sb(djangoArgv(venvDir(c.dir), "migrate"), { env: venvEnv(c), envFile: true, onLine: c.log });
+  // The database the running app opens: DATA_DIR as its unit sets it (apps.ts), or SQLite settings that use
+  // it migrate a fresh file in the release and the app starts on an empty one.
+  await c.sb(djangoArgv(venvDir(c.dir), "migrate"), { env: venvEnv(c, { DATA_DIR: `${paths.apps}/${c.app.name}/data` }), envFile: true, onLine: c.log });
 }
 
 /** Copies the static files into the slot's own directories for the edge; returns the URL prefixes that are now served. */

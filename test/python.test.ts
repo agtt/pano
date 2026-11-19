@@ -411,12 +411,13 @@ describe("previews never migrate a store they share with production", () => {
   const plan = { mode: "requirements", requirements: "r.txt", django: true, app: null, deps: new Set<string>() } as never;
   const ctx = (name: string, py_migrate: string, shared: string[] = []) => {
     const ran: string[][] = [];
+    const envs: Record<string, string>[] = [];
     const logs: string[] = [];
     const c = {
       app: { name, py_migrate } as App, dir: "/r", workdir: "/r", path: "/usr/bin", cache: "/c", log: (l: string) => void logs.push(l), step: () => {},
-      sb: async (argv: string[]) => void ran.push(argv), sharedStoreKeys: shared,
+      sb: async (argv: string[], o: { env: Record<string, string> }) => void (ran.push(argv), envs.push(o.env)), sharedStoreKeys: shared,
     };
-    return { c, ran, logs };
+    return { c, ran, envs, logs };
   };
 
   test("names and shared keys", () => {
@@ -431,6 +432,8 @@ describe("previews never migrate a store they share with production", () => {
     const live = ctx("hub", "auto");
     await migrate(live.c as never, plan);
     expect(live.ran).toEqual([["/r/.venv/bin/python", "manage.py", "migrate", "--noinput"]]);
+    // the same DATA_DIR the running app gets: its SQLite database, not a fresh one in the release
+    expect(live.envs[0]!.DATA_DIR).toBe("/srv/pano/apps/hub/data");
 
     const auto = ctx("pv_3", "auto");
     await migrate(auto.c as never, plan);

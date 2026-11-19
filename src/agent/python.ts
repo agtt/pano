@@ -11,7 +11,7 @@
 // deploy needs them (see nativePackages).
 
 import { constants } from "node:fs";
-import { lstat, open, readdir, readlink, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { lstat, open, readdir, readlink, realpath, rename, rm, rmdir, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DRY_RUN, fsPath, paths } from "../shared/config.ts";
 import {
@@ -76,6 +76,9 @@ async function extract(url: string, sumsUrl: string, file: string, stage: string
   await Bun.write(fsPath(`${tmp}/${file}`), bytes);
   await ensureDir(stage, 0o755);
   await run(["tar", "-xzf", fsPath(`${tmp}/${file}`), "-C", fsPath(stage), "--strip-components=1", "--no-same-owner"]);
+  // Directories the archive does not list are made with the agent's umask (0027): app users could not
+  // reach the interpreter. Readable and searchable for everyone, writable only by root.
+  await run(["chmod", "-R", "u+rwX,go+rX,go-w", fsPath(stage)]);
 }
 
 /** One install of a thing at a time (a deploy and the Runtimes page may ask together). */
@@ -149,6 +152,8 @@ export async function uninstallPython(version: string): Promise<void> {
   if (afterUninstall((await installedAll()).filter((r) => r.runtime === "python")).removeUv) {
     await remove(`${paths.runtimes}/uv`);
     await remove(`${paths.runtimes}/python`);
+    // The edge's static copies live per app and go with each app; the emptied parent goes with Python.
+    await rmdir(fsPath(paths.static)).catch(() => {});
   }
 }
 
