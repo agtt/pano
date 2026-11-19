@@ -19,7 +19,7 @@ import * as github from "./github.ts";
 import * as guard from "./guard.ts";
 import * as php from "./php.ts";
 import * as cutover from "./cutover.ts";
-import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, forbiddenStaticRoot, installCaddy, setupEdgeUnit } from "./edge.ts";
+import { applyEdge, buildCaddyfile, edgeActive, edgeInstalled, edgeSettings, forbiddenStaticRoot, installCaddy, setupEdgeUnit, WWW_ROOT } from "./edge.ts";
 import { siteCerts } from "./certs.ts";
 import * as importer from "./importer.ts";
 import * as jobs from "./jobs.ts";
@@ -825,17 +825,19 @@ export const methods: Record<string, Handler> = {
     cpanel.applyArchive(String(p.file ?? ""), { sites: (p.sites ?? []).map(String), databases: (p.databases ?? []).map(String) }, actor),
 };
 
-/** The edge runs with ProtectHome, so static roots live outside /home. */
-const STATIC_PARENTS = ["/srv", "/var/www"];
+/** Static roots live under /var/www: the edge reads it through a nosymfollow view (edge.ts WWW_VIEW). */
+const STATIC_PARENTS = [WWW_ROOT];
 
 /**
- * A static site's root: under /srv or /var/www, never pano's own tree (other sites' and apps' homes, the
+ * A static site's root: under /var/www, never pano's own tree (other sites' and apps' homes, the
  * edge view, Python static files, containers) or a directory above it, also not through a symlink.
  */
 async function staticRoot(x: unknown): Promise<string> {
   const root = v.pathUnder(x, STATIC_PARENTS);
+  // In development the sandbox root itself may sit behind a link (macOS /var -> /private/var).
+  const base = fsPath("") ? await realpath(fsPath("")).catch(() => fsPath("")) : "";
   const real = await realpath(fsPath(root))
-    .then((r) => r.slice(fsPath("").length) || "/")
+    .then((r) => (r.startsWith(base) ? r.slice(base.length) || "/" : r))
     .catch(() => root);
   if (forbiddenStaticRoot(root) || forbiddenStaticRoot(real)) throw new Error("a static root cannot be inside pano's own directories (/srv/pano) or above them");
   return root;

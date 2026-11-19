@@ -102,8 +102,16 @@ describe("sites.save and db.grant (N1)", () => {
     expect(await alwaysAsk("sites.save", { ...st, root: "/var/www/n2" })).toBe(true);
     for (const root of ["/srv/pano/sites/victim/public", "/srv/pano/apps/web", "/srv/pano/edgeview/victim/public", "/srv/pano/static/web", "/srv/pano/containers/x", "/srv/pano", "/srv"]) {
       expect(forbiddenStaticRoot(root)).toBe(true);
-      await expect(methods["sites.save"]!({ ...st, root }, "tester")).rejects.toThrow("pano's own directories");
+      await expect(methods["sites.save"]!({ ...st, root }, "tester")).rejects.toThrow();
     }
+    // Only under /var/www (N3); through a symlink into pano's tree neither.
+    await expect(methods["sites.save"]!({ ...st, root: "/srv/www/n1" }, "tester")).rejects.toThrow("under /var/www");
+    const { mkdirSync, symlinkSync } = await import("node:fs");
+    const { fsPath } = await import("../src/shared/config.ts");
+    mkdirSync(fsPath("/srv/pano/sites/victim"), { recursive: true });
+    mkdirSync(fsPath("/var/www"), { recursive: true });
+    symlinkSync(fsPath("/srv/pano/sites/victim"), fsPath("/var/www/sneaky"));
+    await expect(methods["sites.save"]!({ ...st, root: "/var/www/sneaky" }, "tester")).rejects.toThrow("pano's own directories");
     for (const root of ["/var/www/n1", "/srv/www/n1", "/srv/panorama"]) expect(forbiddenStaticRoot(root)).toBe(false);
   });
 

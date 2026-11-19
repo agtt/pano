@@ -44,9 +44,12 @@ async function main() {
       break;
     }
     case "edge-view-lock": {
-      const { EDGE_VIEW } = await import("./agent/edge.ts");
+      const { EDGE_VIEW, VIEWS } = await import("./agent/edge.ts");
       const { lockEdgeView } = await import("./agent/viewlock.ts");
-      const r = await lockEdgeView(EDGE_VIEW);
+      // Only pano's own views (the units pass one); none given: the sites view (units before /var/www had one).
+      const x = VIEWS.find((w) => w.view === (args[0] ?? EDGE_VIEW));
+      if (!x) return fail(`usage: pano edge-view-lock [${VIEWS.map((w) => w.view).join("|")}]`);
+      const r = await lockEdgeView(x.view, x.parent);
       console.log(`[edge-view-lock] ${r.ok ? "ok" : "FAILED"} (${r.via}): ${r.detail}`);
       if (!r.ok) process.exit(1);
       break;

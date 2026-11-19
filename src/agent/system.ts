@@ -5,7 +5,7 @@
 import { cpus, hostname, loadavg, totalmem, uptime } from "node:os";
 import { env } from "../shared/config.ts";
 import { destIds } from "./backup.ts";
-import { EDGE_VIEW, EDGE_VIEW_UNIT, VIEW_LOCK_UNIT, edgeActive, edgeInstalled, edgeViewMounted } from "./edge.ts";
+import { EDGE_VIEW, EDGE_VIEW_UNIT, VIEW_LOCK_UNIT, WWW_LOCK_UNIT, WWW_ROOT, WWW_VIEW, WWW_VIEW_UNIT, edgeActive, edgeInstalled, edgeViewMounted, heldByEdge, viewMountedAt } from "./edge.ts";
 import { kitState } from "./recovery.ts";
 import { bindAddress } from "./mysql.ts";
 import { PHP_EOL } from "../shared/validate.ts";
@@ -186,6 +186,25 @@ export async function audit(): Promise<Finding[]> {
               detail: `The server could not mount the sites read-only with nosymfollow (needs Linux 5.10+). Without it a site could link to another site's files or a TLS key and fetch them over HTTP, so every PHP site answers 503 instead.`,
               fix: `Check systemctl status ${EDGE_VIEW_UNIT} ${VIEW_LOCK_UNIT} (on Linux before 5.10: upgrade the OS and reboot); pano switches over by itself. Accepting the risk instead: PANO_EDGE_FOLLOW_LINKS=1 in ${paths.etc}/pano.env, then restart pano-agent.`,
             },
+    );
+  }
+  // Static sites: only under /var/www, read through its own view (edge.ts WWW_VIEW)
+  const statics = sites.list().filter((s) => s.kind === "static" && s.domains.length);
+  if (statics.length && (await edgeInstalled())) {
+    const views = { sites: await edgeViewMounted(), www: await viewMountedAt(WWW_VIEW) };
+    const held = heldByEdge(statics, views, env.edgeFollowLinks).map((s) => `${s.name} (${s.root})`);
+    f.push(
+      held.length
+        ? {
+            id: "static-links",
+            level: "fail",
+            title: "Some static sites are offline: the edge cannot read them safely",
+            detail: `Static roots are served only from under ${WWW_ROOT}, through a read-only nosymfollow view (${WWW_VIEW}), and never from inside /srv/pano. Held at 503: ${held.slice(0, 8).join(", ")}${held.length > 8 ? ", …" : ""}.`,
+            fix: `Move the files under ${WWW_ROOT} and set the new root on the site; if they are there already, check systemctl status ${WWW_VIEW_UNIT} ${WWW_LOCK_UNIT} (Linux 5.10+ needed).`,
+          }
+        : env.edgeFollowLinks && !views.www
+          ? { id: "static-links", level: "fail", title: "The edge can follow symlinks in static sites", detail: `PANO_EDGE_FOLLOW_LINKS=1 serves static sites from the real paths without the ${WWW_VIEW} view.`, fix: `Check systemctl status ${WWW_VIEW_UNIT} ${WWW_LOCK_UNIT}, then remove PANO_EDGE_FOLLOW_LINKS from ${paths.etc}/pano.env.` }
+          : { id: "static-links", level: "ok", title: "Static sites are served without following symlinks", detail: `Read through ${WWW_VIEW}.` },
     );
   }
 

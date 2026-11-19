@@ -552,22 +552,23 @@ export async function shieldStatus() {
 // ---- symlinks out of sites ---------------------------------------------------------------
 
 /**
- * The edge reads PHP sites through its no-symlink view (edge.ts EDGE_VIEW); this also brings existing
- * installs onto it. Where the server cannot mount it (Linux before 5.10, or the remount of viewlock.ts failed), PHP sites
- * are held offline and every agent start and day says so on the alert channel. Only with
+ * The edge reads PHP and static sites through its no-symlink views (edge.ts EDGE_VIEW, WWW_VIEW); this also
+ * brings existing installs onto them. Where the server cannot mount one (Linux before 5.10, or the remount of
+ * viewlock.ts failed), its sites are held offline and every agent start and day says so on the alert channel. Only with
  * PANO_EDGE_FOLLOW_LINKS=1 does the edge read the real paths; it would follow a link a site plants to a TLS
  * key or another site's files, so links leading out of a site are removed (as the site's user, see
  * removeOutsideLinks). A stopgap: a link lives until the next sweep.
  */
 export async function guardSiteLinks() {
   settings.set("shield.linkGuard", String(Date.now()));
-  if (DRY_RUN || (await refreshEdgeView()) || !(await edgeInstalled())) return;
-  const held = heldByEdge(sites.list(), false, env.edgeFollowLinks).filter((s) => s.kind === "php" && s.enabled && s.domains.length);
+  if (DRY_RUN || !(await edgeInstalled())) return;
+  const views = await refreshEdgeView();
+  const held = heldByEdge(sites.list(), views, env.edgeFollowLinks).filter((s) => s.enabled && s.domains.length);
   if (held.length) {
     audit("agent", "edge.view.missing", { held: held.map((s) => s.name) });
     await notify(viewMissingAlert(held.map((s) => s.name)));
   }
-  if (!env.edgeFollowLinks) return;
+  if (views.sites || !env.edgeFollowLinks) return;
   const removed: string[] = [];
   for (const s of sites.list().filter((x) => x.kind === "php")) {
     const gone = await removeOutsideLinks(s.name).catch((e) => {
@@ -582,9 +583,9 @@ export async function guardSiteLinks() {
 /** The alert when PHP sites are held offline because the edge view cannot be mounted. */
 export function viewMissingAlert(names: string[]): string {
   return (
-    `⛔ edge: ${names.length} PHP site(s) are offline (503): this server cannot mount the site files read-only with nosymfollow ` +
-    `(needs Linux 5.10+; see systemctl status pano-edgeview-lock), and without that the edge could be made to serve TLS keys or other sites' files.\n` +
-    `${names.slice(0, 8).join(", ")}${names.length > 8 ? ", …" : ""}\nFix: see the Security page.`
+    `⛔ edge: ${names.length} site(s) are offline (503): their files cannot be served without following symlinks ` +
+    `(no read-only nosymfollow view, needs Linux 5.10+; or a static root outside /var/www or inside /srv/pano), and the edge could ` +
+    `be made to serve TLS keys or other sites' files.\n${names.slice(0, 8).join(", ")}${names.length > 8 ? ", …" : ""}\nFix: see the Security page.`
   );
 }
 

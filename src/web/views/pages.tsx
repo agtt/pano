@@ -281,7 +281,7 @@ export function SiteForm({ site, csrf, versions = [], logs = "", extra }: { site
             </label>
           )}
           <Field label="Domains" name="domains" value={s?.domains.join(", ")} placeholder="example.com, www.example.com ( * = catch-all )" required />
-          <Field label="Root directory" name="root" value={s?.root} placeholder="/srv/www/example (static)" />
+          <Field label="Root directory" name="root" value={s?.root} placeholder="/var/www/example (static)" />
           <label class="field wide">
             <span>{t("Routes")} (proxy)</span>
             <textarea name="routes" rows={4} class="mono" placeholder={"/ 127.0.0.1:3000\n/api 127.0.0.1:3001\n/old redirect https://example.com{uri} 301"}>

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { REDIS_COMMAND, renderQuadlet, repoOf, runRef, TEMPLATES, validateContainer } from "../src/agent/containers.ts";
 import { cleanDumpLine, grantMatches, parseGrants } from "../src/agent/cpanel.ts";
-import { EDGE_VIEW_UNIT, VIEW_LOCK, VIEW_MOUNT, edgeUnit, heldByEdge, mountUnitName, renderCaddyfile, viewPath } from "../src/agent/edge.ts";
+import { EDGE_VIEW_UNIT, NO_VIEWS, VIEWS, VIEW_LOCK, VIEW_MOUNT, edgeUnit, heldByEdge, mountUnitName, renderCaddyfile, viewPath, wwwViewPath } from "../src/agent/edge.ts";
 import { viewMissingAlert } from "../src/agent/shield.ts";
 import { analyzeHtaccess } from "../src/agent/htaccess.ts";
 import { renderFpmConf, renderPhpIni, renderPhpUnit } from "../src/agent/php.ts";
@@ -70,12 +70,13 @@ describe("edge: multi-process apps and php sites", () => {
   });
   test("with the no-symlink view the edge reads files there; PHP-FPM still gets the real root", () => {
     const st = { ...php, name: "files", kind: "static", domains: ["files.example.org"], root: "/var/www/files" } as Site;
-    const viewed = renderCaddyfile({ apps: [], sites: [php, st], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView: true });
+    const viewed = renderCaddyfile({ apps: [], sites: [php, st], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), edgeView: true, wwwView: true });
     expect(viewed).toContain("root * /srv/pano/edgeview/blog.example.org/public");
     expect(viewed).toContain("php_fastcgi unix//run/pano-php/blog.example.org/fpm.sock {\n\t\ttry_files {path} {path}/index.php {path}/index.html {path}/index.htm index.php\n\t\troot /srv/pano/sites/blog.example.org/public\n\t}");
     expect(viewed).not.toContain("root * /srv/pano/sites/");
-    // A root outside the sites directory is served as it is, without dotfiles or dumps.
-    expect(viewed).toContain("root * /var/www/files");
+    // A static root under /var/www is read through its own view, without dotfiles or dumps (N3).
+    expect(viewed).toContain("root * /srv/pano/wwwview/files");
+    expect(viewed).not.toContain("root * /var/www/");
     const files = viewed.slice(viewed.indexOf("files.example.org {"));
     expect(files).toContain("path_regexp (?i)(/\\.|\\.(sql|bak|old|orig|swp)$)");
     expect(files.indexOf("respond @pano_deny 404")).toBeLessThan(files.indexOf("file_server"));
@@ -88,14 +89,24 @@ describe("edge: multi-process apps and php sites", () => {
     expect(blog).not.toContain("file_server");
     expect(blog).not.toContain("php_fastcgi");
     expect(off).not.toContain("/srv/pano/sites/");
-    // A static root elsewhere does not depend on the view.
-    expect(off).toContain("root * /var/www/files");
-    expect(heldByEdge([php, st], false, false).map((x) => x.name)).toEqual(["blog.example.org"]);
-    expect(heldByEdge([php, st], true, false)).toEqual([]);
+    // Neither view: the static site is held too, nothing is read from /var/www (N3).
+    expect(off.slice(off.indexOf("files.example.org {"))).toContain('respond "Service temporarily unavailable" 503');
+    expect(off).not.toContain("/var/www");
+    expect(heldByEdge([php, st], { sites: false, www: true }, false).map((x) => x.name)).toEqual(["blog.example.org"]);
+    expect(heldByEdge([php, st], { sites: true, www: false }, false).map((x) => x.name)).toEqual(["files"]);
+    expect(heldByEdge([php, st], { sites: true, www: true }, false)).toEqual([]);
+    // A static root outside /var/www (allowed before) is held even with both views.
+    const elsewhere = { ...st, name: "old", root: "/srv/www/old" } as Site;
+    expect(heldByEdge([elsewhere], { sites: true, www: true }, false).map((x) => x.name)).toEqual(["old"]);
+    expect(wwwViewPath("/var/www")).toBe("/srv/pano/wwwview");
+    expect(wwwViewPath("/var/www/a/")).toBe("/srv/pano/wwwview/a");
+    expect(wwwViewPath("/var/wwwx/a")).toBeNull();
     // Only root's PANO_EDGE_FOLLOW_LINKS=1 serves them from the real paths.
     const follow = renderCaddyfile({ apps: [], sites: [php], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), followLinks: true });
     expect(follow).toContain("root * /srv/pano/sites/blog.example.org/public");
-    expect(heldByEdge([php], false, true)).toEqual([]);
+    expect(heldByEdge([php, elsewhere], NO_VIEWS, true)).toEqual([]);
+    const followStatic = renderCaddyfile({ apps: [], sites: [elsewhere], settings: { email: "", behindCloudflare: false, hooksDomain: "" }, certs: new Set(), followLinks: true });
+    expect(followStatic).toContain("root * /srv/www/old");
   });
   test("a static root in pano's own tree is never published, view or not", () => {
     const bad = { ...php, name: "steal", kind: "static", domains: ["steal.example"], root: "/srv/pano/sites/blog.example.org/public" } as Site;
@@ -107,7 +118,7 @@ describe("edge: multi-process apps and php sites", () => {
   });
   test("the alert names the held sites and the fix", () => {
     const msg = viewMissingAlert(["a.example", "b.example"]);
-    expect(msg).toContain("2 PHP site(s) are offline");
+    expect(msg).toContain("2 site(s) are offline");
     expect(msg).toContain("Linux 5.10+");
     expect(msg).toContain("a.example, b.example");
     expect(viewMissingAlert(Array.from({ length: 10 }, (_, i) => `s${i}`))).toContain(", …");
@@ -122,20 +133,28 @@ describe("edge view", () => {
     expect(viewPath("/srv/pano/sitesx/a")).toBeNull();
   });
   test("the edge requires the view and cannot see the real sites only when the view is there", () => {
-    const on = edgeUnit(true);
+    const on = edgeUnit({ sites: true, www: false });
     expect(on).toContain("Requires=srv-pano-edgeview.mount");
     expect(on).toContain("After=network-online.target srv-pano-edgeview.mount");
-    expect(on).toContain("InaccessiblePaths=-/srv/pano/sites\n");
     expect(on).toContain("Requires=srv-pano-edgeview.mount pano-edgeview-lock.service");
     expect(VIEW_LOCK).toContain("Before=pano-edge.service");
     expect(VIEW_LOCK).toContain("ExecStart=/opt/pano/bin/pano edge-view-lock");
     // In the host's mount namespace: no sandboxing that would give the unit a namespace of its own.
     expect(VIEW_LOCK).not.toMatch(/Protect|Private|ReadOnlyPaths|InaccessiblePaths/);
-    const off = edgeUnit(false);
+    expect(on).toContain("InaccessiblePaths=-/srv/pano/sites -/var/www\n");
+    const off = edgeUnit(NO_VIEWS);
     expect(off).not.toContain("Requires=");
-    // Without the view PHP sites are held offline, so the real sites stay out of the edge's reach.
-    expect(off).toContain("InaccessiblePaths=-/srv/pano/sites\n");
-    expect(edgeUnit(false, true)).not.toContain("InaccessiblePaths");
+    // Without the views their sites are held offline, so the real directories stay out of the edge's reach.
+    expect(off).toContain("InaccessiblePaths=-/srv/pano/sites -/var/www\n");
+    expect(edgeUnit(NO_VIEWS, true)).not.toContain("InaccessiblePaths");
+    expect(edgeUnit({ sites: true, www: false }, true)).toContain("InaccessiblePaths=-/srv/pano/sites\n");
+    const both = edgeUnit({ sites: true, www: true });
+    expect(both).toContain("Requires=srv-pano-edgeview.mount pano-edgeview-lock.service srv-pano-wwwview.mount pano-wwwview-lock.service");
+    const www = VIEWS.find((x) => x.key === "www")!;
+    expect(www.mountUnit).toContain("What=/var/www\nWhere=/srv/pano/wwwview");
+    expect(www.mountUnit).toContain("Options=bind,ro,nosymfollow");
+    expect(www.lockUnit).toContain("ExecStart=/opt/pano/bin/pano edge-view-lock /srv/pano/wwwview");
+    expect(www.lockUnit).toContain("Requires=srv-pano-wwwview.mount");
     expect(VIEW_MOUNT).toContain("Options=bind,ro,nosymfollow");
     expect(VIEW_MOUNT).toContain("Where=/srv/pano/edgeview");
   });

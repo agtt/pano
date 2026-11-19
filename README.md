@@ -73,7 +73,7 @@ an idle PHP site (its own pool, PHP 8.5) ≈ 11–20 MB.
     visitors to a port or address of its choosing, give a database user it knows access to an existing database or open the network on
     its own, not even right after an admin signs in. Inside a trusted window it can make the routine changes above, which apps act on (an
     ordinary variable such as a mail host is one; a domain removed from a site and added to an app reaches that app's own code). Static
-    roots are never inside pano's own directories (`/srv/pano`: other sites, apps, containers) and no route points at pano's own ports.
+    roots are only under `/var/www`, never inside pano's own directories (`/srv/pano`: other sites, apps, containers) and no route points at pano's own ports.
     The code still travels through it, so it can spend a code the admin types on one always-ask action of its own choosing instead of the
     admin's. Adding an admin, a runner key, a VPN device, a remote database user, a GitHub token or a backup destination, turning the
     runner on, exporting the backup key or recovery kit, resetting an admin's 2FA and changing the alert channel are therefore also
@@ -116,14 +116,15 @@ From source: `bun install && bun run build`, copy `dist/pano` to the server and 
 
 AlmaLinux/Rocky 9, Debian 11–13, Ubuntu 22.04/24.04 (systemd, root access).
 
-PHP sites additionally need the edge's **no-symlink view**: the site files are bind-mounted read-only with `nosymfollow`, so a link a
-site plants (to a TLS key, to another site's `wp-config.php`) is never followed by the edge. The kernel needs Linux 5.10+ for that flag.
-mount(8) before util-linux 2.38 may drop the option on a bind mount (upstream commit `36a3923`), and 2.36 does not know it at all, so
-`pano-edgeview-lock.service` (run after the mount, before the edge) checks the mount in `/proc/self/mountinfo` and, when the flag is
-missing, remounts the view with mount(2) itself; either way it then opens a real symlink through the view and passes only when that fails
-with `ELOOP`.
+PHP and static sites additionally need the edge's **no-symlink views**: the site files (`/srv/pano/sites`) and the static roots
+(`/var/www`, the only place a static site's root may be) are bind-mounted read-only with `nosymfollow`, so a link planted there (to a
+TLS key, to another site's `wp-config.php`) is never followed by the edge. The kernel needs Linux 5.10+ for that flag. mount(8) before
+util-linux 2.38 may drop the option on a bind mount (upstream commit `36a3923`), and 2.36 does not know it at all, so
+`pano-edgeview-lock.service` and `pano-wwwview-lock.service` (run after each mount, before the edge) check the mount in
+`/proc/self/mountinfo` and, when the flag is missing, remount the view with mount(2) themselves; either way they then open a real
+symlink through the view and pass only when that fails with `ELOOP`.
 
-| System | Kernel | util-linux | PHP sites |
+| System | Kernel | util-linux | PHP and static sites |
 |---|---|---|---|
 | Debian 12 / 13 | 6.1 / 6.12 | 2.38.1 / 2.41 | served |
 | Ubuntu 24.04 | 6.8 | 2.39.3 | served |
@@ -131,11 +132,11 @@ with `ELOOP`.
 | AlmaLinux/Rocky 9 | 5.14 | 2.37.4 | served (checked in the test VM; mount(2) fallback when needed) |
 | Debian 11 | 5.10 | 2.36.1 | served (mount(2) fallback) |
 
-If the view still cannot be locked (an older kernel, a failing remount), pano fails closed: the edge does not start on that view, every
-PHP site answers `503`, the Security page shows it as a failure and each agent start (and every day) sends an alert. Apps, proxy and
-static sites, and sites kept on OpenLiteSpeed are not affected. To serve PHP sites there anyway, accepting that a site can read other
-sites' files and TLS keys through a symlink until the daily sweep removes it, root sets `PANO_EDGE_FOLLOW_LINKS=1` in
-`/etc/pano/pano.env` and restarts `pano-agent`.
+If a view still cannot be locked (an older kernel, a failing remount), pano fails closed: the edge does not start on that view, the
+sites it holds answer `503`, the Security page shows it as a failure and each agent start (and every day) sends an alert. A static site
+whose root is outside `/var/www` (allowed before) is held the same way until its files move there. Apps, proxy sites and sites kept on
+OpenLiteSpeed are not affected. To serve such sites anyway, accepting that whoever can write their files can read other sites' files
+and TLS keys through a symlink, root sets `PANO_EDGE_FOLLOW_LINKS=1` in `/etc/pano/pano.env` and restarts `pano-agent`.
 
 ## Migrating from CyberPanel
 

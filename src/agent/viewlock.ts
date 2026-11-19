@@ -12,7 +12,7 @@
 import { FFIType, dlopen, ptr, read } from "bun:ffi";
 import { lstat, readFile, symlink, unlink } from "node:fs/promises";
 import { release } from "node:os";
-import { fsPath, paths } from "../shared/config.ts";
+import { fsPath } from "../shared/config.ts";
 
 export const MS_RDONLY = 1;
 export const MS_NOSUID = 2;
@@ -101,9 +101,9 @@ function ffiRemount(target: string, flags: number): number {
 }
 
 /** A link in the sites directory to a file that surely exists; opened through the view it must fail with ELOOP. */
-async function probeView(view: string): Promise<boolean> {
+async function probeView(view: string, parent: string): Promise<boolean> {
   const name = `.pano-view-probe-${process.pid}`;
-  const link = fsPath(`${paths.sites}/${name}`);
+  const link = fsPath(`${parent}/${name}`);
   await unlink(link).catch(() => {});
   await symlink("/proc/version", link);
   try {
@@ -118,11 +118,11 @@ async function probeView(view: string): Promise<boolean> {
 }
 
 /** `pano edge-view-lock` (pano-edgeview-lock.service): exit code 0 only when the probe passed. */
-export async function lockEdgeView(view: string): Promise<LockResult> {
+export async function lockEdgeView(view: string, parent: string): Promise<LockResult> {
   return lockView(view, {
     mountinfo: () => readFile("/proc/self/mountinfo", "utf8"),
     remount: ffiRemount,
-    probe: () => probeView(view),
+    probe: () => probeView(view, parent),
     kernel: release(),
   });
 }
