@@ -20,7 +20,7 @@ import { SDK, jdkDir } from "./android.ts";
 import { LOW } from "./apps.ts";
 import { installed as installedRuntimes, runtimeBin } from "./runtimes.ts";
 import { audit, settings } from "./state.ts";
-import { dirBytes, ensureDir, exists, lookupUser, readText, remove, run, writeAtomic } from "./sys.ts";
+import { dirBytes, ensureDir, exists, lookupUser, readText, removeTree, run, writeAtomic } from "./sys.ts";
 import { hardening } from "./throwaway.ts";
 
 const KEYS = `${runHome}/.ssh/authorized_keys`;
@@ -375,14 +375,14 @@ export async function workspaces(): Promise<{ name: string; bytes: number; modif
 export async function cleanWorkspace(ws: string, actor: string) {
   if (!WORKSPACE.test(ws)) throw new ValidationError("bad workspace name");
   if (units.has(ws)) throw new Error("a run is going in this workspace");
-  await remove(`${runWorkspaces}/${ws}`);
+  await removeTree(`${runWorkspaces}/${ws}`, RUN_USER);
   audit(actor, "runner.workspace.clean", { ws });
 }
 
 /** The shared download cache (Gradle, npm, bun); the next runs fill it again. */
 export async function clearRunnerCache(actor: string) {
   if (units.size) throw new Error("wait until no run is going");
-  await remove(runCache);
+  await removeTree(runCache, RUN_USER);
   if (await lookupUser(RUN_USER)) await ensureDir(runCache, 0o700, RUN_USER);
   audit(actor, "runner.cache.clear");
 }

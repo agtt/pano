@@ -191,6 +191,18 @@ export async function removeAs(abs: string, user: string) {
 }
 
 /**
+ * A tenant's whole tree: first as its user (removeAs), then root removes the root-owned rest with
+ * coreutils rm, which never follows a symlink and descends by descriptor (not a path walk that a swapped
+ * directory could redirect), and stays on one filesystem. Never Node's recursive rm on a tenant's tree.
+ */
+export async function removeTree(abs: string, user: string) {
+  await removeAs(abs, user);
+  await run(["rm", "-rf", "--one-file-system", "--", fsPath(abs)], { check: false, timeoutMs: 600_000 });
+  // Dry runs (tests, dev) run no commands: the sandbox copy goes the plain way.
+  if (DRY_RUN) await remove(abs);
+}
+
+/**
  * The bytes of a file in a tenant's tree, read by that user ("" = root), so root never opens a path the
  * tenant can redirect. `real` is a real filesystem path (already through fsPath).
  */

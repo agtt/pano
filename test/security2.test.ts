@@ -117,3 +117,31 @@ test("fixing a site's permissions never hands its home to the site, not even for
   expect(chownR).toContain(fsPath(`${home}/public`));
   expect(chownR.split(" ")).not.toContain(fsPath(home));
 });
+
+test("a tenant's tree goes as its user first, then root's coreutils rm on one filesystem (N7)", async () => {
+  const { existsSync, mkdirSync } = await import("node:fs");
+  const { fsPath } = await import("../src/shared/config.ts");
+  const { deletePhpSite, siteHome, siteUser } = await import("../src/agent/php.ts");
+  const { removeTree } = await import("../src/agent/sys.ts");
+  const home = siteHome("n7b.example");
+  mkdirSync(fsPath(`${home}/public`), { recursive: true });
+  const lines: string[] = [];
+  const spy = spyOn(console, "log").mockImplementation((...a: unknown[]) => void lines.push(a.join(" ")));
+  try {
+    await deletePhpSite({ name: "n7b.example", kind: "php", converted_from: null } as never, true);
+    await removeTree("/srv/pano/apps/n7c/data/.pano-sqlite", "app-n7c");
+  } finally {
+    spy.mockRestore();
+  }
+  const user = siteUser("n7b.example");
+  const at = (s: string) => lines.findIndex((l) => l.includes(s));
+  const cron = at("systemctl stop pano-sitecron-n7b.example-*.timer pano-sitecron-n7b.example-*.service");
+  const asUser = at(`(${user}) rm -rf -- ${fsPath(home)}`);
+  const asRoot = at(`] rm -rf --one-file-system -- ${fsPath(home)}`);
+  expect(cron).toBeGreaterThanOrEqual(0);
+  expect(cron).toBeLessThan(asUser);
+  expect(asUser).toBeLessThan(asRoot);
+  expect(asRoot).toBeLessThan(at(`userdel ${user}`));
+  expect(existsSync(fsPath(home))).toBe(false);
+  expect(at("(app-n7c) rm -rf --")).toBeLessThan(at("] rm -rf --one-file-system -- " + fsPath("/srv/pano/apps/n7c/data/.pano-sqlite")));
+});

@@ -16,7 +16,7 @@ import { applyEdge } from "./edge.ts";
 import { readGroup } from "./envgroups.ts";
 import { commentPreview, reportStatus } from "./github.ts";
 import { appHosts, apps, audit, deploys, previewApp, previews, procsOf, sites, type App, type Preview, type Process } from "./state.ts";
-import { remove, run, writeAtomic } from "./sys.ts";
+import { removeTree, run, writeAtomic } from "./sys.ts";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -182,7 +182,7 @@ export function startPreview(appName: string, branchInput: string, trigger: stri
       if (!processes.length) throw new Error("this app has no web process (with a route) to preview");
       id = previews.insert({ app: app.name, branch, slug, host, processes, expires_at: expiryFrom(nowSec(), app.preview_ttl_days) });
       // A home left over from an earlier state must never carry its data into a new preview.
-      await remove(appHome(pvName(id)));
+      await removeTree(appHome(pvName(id)), appUser(pvName(id)));
     }
     try {
       const deploy = enqueueDeploy(previewApp(app, previews.get(id)!), target(id), `preview:${branch}`.slice(0, 80));

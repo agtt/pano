@@ -9,7 +9,7 @@ import { lstat, mkdir, open, readdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fsPath, paths } from "../shared/config.ts";
 import { appHome, appUser } from "./apps.ts";
-import { remove, run } from "./sys.ts";
+import { removeTree, run } from "./sys.ts";
 
 /** Inside DATA_DIR, only while a backup runs (and in a restored copy until it is put in place). */
 export const SNAP_DIR = ".pano-sqlite";
@@ -53,7 +53,8 @@ async function isSqlite(file: string): Promise<boolean> {
  */
 export async function snapshotApp(app: string): Promise<string[]> {
   const data = `${appHome(app)}/data`;
-  await remove(`${data}/${SNAP_DIR}`);
+  // The app runs meanwhile and owns DATA_DIR: removed as its user first (removeTree).
+  await removeTree(`${data}/${SNAP_DIR}`, appUser(app));
   const done: string[] = [];
   for (const rel of await findSqlite(data)) {
     const r = await run([`${paths.bin}/pano`, "sqlite-snapshot", fsPath(`${data}/${rel}`), fsPath(`${data}/${SNAP_DIR}/${rel}`)], {
@@ -68,7 +69,7 @@ export async function snapshotApp(app: string): Promise<string[]> {
   return done;
 }
 
-export const dropSnapshots = (app: string) => remove(`${appHome(app)}/data/${SNAP_DIR}`);
+export const dropSnapshots = (app: string) => removeTree(`${appHome(app)}/data/${SNAP_DIR}`, appUser(app));
 
 /** `pano sqlite-snapshot <db> <copy>`: run as the app's user. Waits up to 30 s for a writer. */
 export function vacuumInto(src: string, dst: string) {

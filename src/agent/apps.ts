@@ -25,7 +25,7 @@ import { applyEdge, ensureUser } from "./edge.ts";
 import { available, installed, install as installRuntime, runtimeBin, type Runtime } from "./runtimes.ts";
 import { appHosts, apps, audit, deploys, previews, procsOf, type App, type Process } from "./state.ts";
 import type { PyBuilt, PyCtx } from "./pydeploy.ts";
-import { ensureDir, exists, randomToken, readText, remove, removeAs, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
+import { ensureDir, exists, randomToken, readText, remove, removeAs, removeTree, run, showUnits, writeAtomic, type RunOptions } from "./sys.ts";
 
 export const appUser = (name: string) => `app-${name}`;
 export const appHome = (name: string) => `${paths.apps}/${name}`;
@@ -213,7 +213,7 @@ export async function teardownUnits(name: string, removeFiles: boolean) {
     // What the app could write goes first, as the app's user (see removeAs); root then removes only its
     // own layout (run/, shared/, slot links) and whatever the user could not.
     for (const d of ["releases", "cache", "data", ".ssh"]) await removeAs(`${appHome(name)}/${d}`, appUser(name));
-    await remove(appHome(name));
+    await removeTree(appHome(name), appUser(name));
     await run(["userdel", appUser(name)], { check: false });
   }
 }

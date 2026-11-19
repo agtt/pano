@@ -19,7 +19,7 @@ import {
   gpgFingerprints, installedDebPackages, mysqlSocketFor, ondrejSources, phpRootFor, suryList, type PhpOs,
 } from "./php-os.ts";
 import { audit, sites, type Site } from "./state.ts";
-import { ensureDir, exists, remove, run, showUnits, writeAtomic } from "./sys.ts";
+import { ensureDir, exists, remove, removeTree, run, showUnits, writeAtomic } from "./sys.ts";
 
 const scl = (ver: string) => `php${ver.replace(".", "")}`;
 export const phpRoot = (ver: string) => phpRootFor(currentOs(), ver);
@@ -460,7 +460,9 @@ export async function deletePhpSite(site: Site, removeFiles: boolean) {
   await remove(confDir(site.name));
   await run(["systemctl", "daemon-reload"], { check: false });
   if (removeFiles && !site.converted_from) {
-    await remove(siteHome(site.name));
+    // Nothing of the site may run while its tree goes: its cron jobs neither (sites.delete rewrites them after).
+    await run(["systemctl", "stop", `pano-sitecron-${site.name}-*.timer`, `pano-sitecron-${site.name}-*.service`], { check: false });
+    await removeTree(siteHome(site.name), siteUser(site.name));
     await run(["userdel", siteUser(site.name)], { check: false });
   }
 }
@@ -490,7 +492,7 @@ export async function convertLegacy(name: string, version: string, actor: string
   if (!(await plain())) throw new Error(`document root ${site.root} is or sits under a symlink; nothing was copied`);
   await run(["cp", "-a", "--", `${src}/.`, fsPath(`${home}/public/`)], { timeoutMs: 3_600_000 });
   if (!(await plain())) {
-    await remove(`${home}/public`);
+    await removeTree(`${home}/public`, siteUser(site.name));
     throw new Error(`document root ${site.root} changed into a symlink while it was copied; the copy was removed`);
   }
   const warnings = await fixPermissions(site.name);
