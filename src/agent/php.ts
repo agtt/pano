@@ -385,7 +385,10 @@ export async function fixPermissions(name: string): Promise<string[]> {
   const home = siteHome(name);
   const user = siteUser(name);
   // -R does not follow links (and works fd-relative); -h changes a link itself, never what it points at.
-  await run(["chown", "-R", "--no-dereference", `${user}:${user}`, fsPath(home)]);
+  // The children only: the home stays root's throughout, so the site can never swap public/ (or any
+  // other entry) for a link while root works below it.
+  const kids = (await readdir(fsPath(home)).catch(() => [] as string[])).map((k) => fsPath(`${home}/${k}`));
+  if (kids.length) await run(["chown", "-R", "--no-dereference", `${user}:${user}`, "--", ...kids]);
   // As the site's user: the site's PHP may run meanwhile and swap a path for a link, and then chmod
   // reaches only what that user owns anyway.
   await run(["find", fsPath(home), "-type", "d", "-exec", "chmod", "0750", "{}", "+"], { user, check: false });

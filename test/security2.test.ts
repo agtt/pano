@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { renderValkeyConf, renderValkeyUnit } from "../src/agent/appvalkey.ts";
 import { inRanges, parseCidr, parseRangeList, renderLock } from "../src/agent/cloudflare.ts";
@@ -97,4 +97,23 @@ test("the shared Valkey's password goes only to a listener inside its own unit",
   expect(onlyUnitListens(["812"], { "812": "0::/system.slice/pano-app-shop.service\n" }, "valkey.service")).toBe(false);
   expect(onlyUnitListens(["812", "900"], { ...own, "900": "0::/user.slice/user-1001.slice/session-3.scope\n" }, "valkey.service")).toBe(false);
   expect(onlyUnitListens([], {}, "valkey.service")).toBe(false); // nothing listens: Valkey is down
+});
+
+test("fixing a site's permissions never hands its home to the site, not even for a moment (N7)", async () => {
+  const { mkdirSync } = await import("node:fs");
+  const { fsPath } = await import("../src/shared/config.ts");
+  const { fixPermissions, siteHome, siteUser } = await import("../src/agent/php.ts");
+  const home = siteHome("n7.example");
+  for (const d of ["public", "tmp", "logs"]) mkdirSync(fsPath(`${home}/${d}`), { recursive: true });
+  const lines: string[] = [];
+  const spy = spyOn(console, "log").mockImplementation((...a: unknown[]) => void lines.push(a.join(" ")));
+  try {
+    await fixPermissions("n7.example");
+  } finally {
+    spy.mockRestore();
+  }
+  const user = siteUser("n7.example");
+  const chownR = lines.find((l) => l.includes(`chown -R --no-dereference ${user}:${user}`)) ?? "";
+  expect(chownR).toContain(fsPath(`${home}/public`));
+  expect(chownR.split(" ")).not.toContain(fsPath(home));
 });
